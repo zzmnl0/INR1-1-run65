@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+
+# Models and generated validation/training outputs
+checkpoints/
+checkpoints_fsia/
+*.pth
+*.pt
+*.npy
+*.npz
+
+# Local agent/tool state
+.agents/
+.codex/
+.tokensave/
