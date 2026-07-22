@@ -301,8 +301,8 @@ CONFIG_MDIA = {
     'w_cosmic':           1.0,   # COSMIC 损失相对 FY 的权重系数
 
     # ==================== 断点续训 ====================
-    'resume_ckpt':   None,   # 检查点路径；None = 从头训练
-    'resume_epochs': None,   # 续训轮数；None = 使用 config['epochs']
+    'resume_ckpt': None,              # last_training_state.pth；旧 raw state_dict 也可兼容
+    'resume_completed_epochs': None,  # 仅旧 raw state_dict 必填；完整状态自动读取
 
 }
 

@@ -74,6 +74,20 @@ def _sha256_file(path):
     return digest.hexdigest()
 
 
+def _remaining_phase_counts(completed_epochs, total_epochs, warmup_epochs):
+    if not 0 <= completed_epochs <= total_epochs:
+        raise ValueError('completed_epochs must be within [0, total_epochs]')
+    warmup_remaining = max(0, min(total_epochs, warmup_epochs) - completed_epochs)
+    uncertainty_remaining = max(0, total_epochs - max(completed_epochs, warmup_epochs))
+    return warmup_remaining, uncertainty_remaining
+
+
+def _atomic_torch_save(state, path):
+    temp_path = f'{path}.tmp'
+    torch.save(state, temp_path)
+    os.replace(temp_path, path)
+
+
 # ======================== SubsetTimeBinSampler ========================
 
 class SubsetTimeBinSampler(TimeBinSampler):
@@ -1096,27 +1110,50 @@ def train_fsia(config=None):
     print(f'  初始 τ_solar:{model.sw_encoder.tau_solar.item():.2f} h')
 
     # ========== 步骤 4.5: 断点续训（可选）==========
-    _resume_ckpt   = config.get('resume_ckpt')
-    _resume_epochs = config.get('resume_epochs')
+    _resume_ckpt = config.get('resume_ckpt')
+    resume_state = None
+    start_epoch = 0
     if _resume_ckpt:
-        if os.path.exists(_resume_ckpt):
-            model.load_state_dict(torch.load(_resume_ckpt, map_location=device), strict=True)
-            print(f'\n[步骤 4.5] 已从检查点加载权重: {_resume_ckpt}')
-            _cosmic_dead = (
-                torch.count_nonzero(
-                    model.cosmic_obs_encoder.input_proj.weight).item() == 0
-                and torch.count_nonzero(
-                    model.proj_pre.weight[:, -model.kalman_layer.d_model:]).item() == 0
-            )
-            if config.get('w_cosmic', 0.0) > 0 and _cosmic_dead:
-                model._initialize_cosmic_bootstrap()
-                print('  检测到旧 checkpoint COSMIC 全零入口，已仅重启 COSMIC 梯度路径')
+        if not os.path.exists(_resume_ckpt):
+            raise FileNotFoundError(f'续训 checkpoint 不存在: {_resume_ckpt}')
+        loaded = torch.load(_resume_ckpt, map_location='cpu', weights_only=False)
+        if (isinstance(loaded, dict)
+                and loaded.get('checkpoint_type') == 'fsia_training_state'):
+            resume_state = loaded
+            model.load_state_dict(loaded['model_state_dict'], strict=True)
+            start_epoch = int(loaded['completed_epochs'])
+            saved_warmup = int(loaded['uncertainty_warmup_epochs'])
+            if saved_warmup != int(config.get('uncertainty_warmup_epochs', 5)):
+                raise ValueError('续训 checkpoint 与当前 uncertainty_warmup_epochs 不一致')
+            print(f'\n[步骤 4.5] 已加载完整训练状态: {_resume_ckpt}')
         else:
-            print(f'\n[步骤 4.5] 警告: 检查点不存在 ({_resume_ckpt})，从头训练')
-        if _resume_epochs is not None:
-            config = dict(config)
-            config['epochs'] = int(_resume_epochs)
-            print(f'  续训轮数: {config["epochs"]}')
+            completed = config.get('resume_completed_epochs')
+            if completed is None and config.get('eval_only'):
+                completed = 0
+            elif completed is None:
+                raise ValueError('旧 raw state_dict 续训必须设置 resume_completed_epochs')
+            model.load_state_dict(loaded, strict=True)
+            start_epoch = int(completed)
+            print(f'\n[步骤 4.5] 已加载旧 raw state_dict: {_resume_ckpt}')
+            print('  注意: 旧 checkpoint 不含优化器/scheduler，二者将重新初始化')
+
+        _cosmic_dead = (
+            torch.count_nonzero(
+                model.cosmic_obs_encoder.input_proj.weight).item() == 0
+            and torch.count_nonzero(
+                model.proj_pre.weight[:, -model.kalman_layer.d_model:]).item() == 0
+        )
+        if config.get('w_cosmic', 0.0) > 0 and _cosmic_dead:
+            model._initialize_cosmic_bootstrap()
+            print('  检测到旧 checkpoint COSMIC 全零入口，已仅重启 COSMIC 梯度路径')
+
+        warmup_left, uncertainty_left = _remaining_phase_counts(
+            start_epoch, int(config['epochs']),
+            int(config.get('uncertainty_warmup_epochs', 5)))
+        if start_epoch >= int(config['epochs']):
+            raise ValueError(f'已完成 {start_epoch} epochs，目标总轮数为 {config["epochs"]}')
+        print(f'  已完成: {start_epoch}/{config["epochs"]}  '
+              f'剩余 warmup={warmup_left}  uncertainty={uncertainty_left}')
 
     if config.get('eval_only'):
         print('\n[评估模式] 已加载数据上下文与 checkpoint，跳过优化器和训练循环')
@@ -1150,20 +1187,50 @@ def train_fsia(config=None):
         print('  AMP 仅支持 CUDA，已禁用')
         use_amp = False
 
+    if resume_state is not None:
+        optimizer.load_state_dict(resume_state['optimizer_state_dict'])
+        if scheduler is not None and resume_state.get('scheduler_state_dict') is not None:
+            scheduler.load_state_dict(resume_state['scheduler_state_dict'])
+        if scaler is not None and resume_state.get('scaler_state_dict') is not None:
+            scaler.load_state_dict(resume_state['scaler_state_dict'])
+        rng_state = resume_state.get('rng_state', {})
+        if rng_state.get('numpy') is not None:
+            np.random.set_state(rng_state['numpy'])
+        if rng_state.get('torch') is not None:
+            torch.set_rng_state(rng_state['torch'])
+        if torch.cuda.is_available() and rng_state.get('cuda') is not None:
+            torch.cuda.set_rng_state_all(rng_state['cuda'])
+        print('  优化器、scheduler、AMP及随机状态已恢复')
+
     # ========== 步骤 6: 训练循环 ==========
-    print(f'\n[步骤 6] 开始训练 ({config["epochs"]} epochs)...')
+    print(f'\n[步骤 6] 开始训练 (目标总轮数 {config["epochs"]}, '
+          f'从 Epoch {start_epoch + 1} 继续)...')
     warmup = config.get('uncertainty_warmup_epochs', 5)
     if config.get('use_uncertainty'):
         print(f'  前 {warmup} 轮使用 Huber loss，之后启用 NLL + 不确定性学习')
     print(f'  物理损失每 {config.get("physics_loss_freq", 5)} 个 batch 计算一次')
 
-    train_losses, val_losses, history = [], [], []
-    best_val_ne      = float('inf')
-    best_val_peak    = float('inf')
-    best_epoch       = None
-    ne_patience_counter   = 0
+    history = list(resume_state.get('history', [])) if resume_state else []
+    train_losses = [row['total_loss'] for row in history]
+    val_losses = [row['val_mse'] for row in history]
+    if resume_state:
+        best_val_ne = float(resume_state['best_val_ne'])
+        best_val_peak = float(resume_state['best_val_peak'])
+        best_epoch = resume_state.get('best_epoch')
+        ne_patience_counter = int(resume_state.get('ne_patience_counter', 0))
+        peak_patience_counter = int(resume_state.get('peak_patience_counter', 0))
+    else:
+        best_val_ne_cfg = config.get('resume_best_val')
+        best_val_peak_cfg = config.get('resume_best_peak')
+        best_val_ne = (float(best_val_ne_cfg)
+                       if best_val_ne_cfg is not None else float('inf'))
+        best_val_peak = (float(best_val_peak_cfg)
+                         if best_val_peak_cfg is not None else float('inf'))
+        best_epoch = config.get('resume_best_epoch')
+        ne_patience_counter = 0
     peak_patience_counter = 0
     best_ckpt = os.path.join(config['save_dir'], 'best_fsia_model.pth')
+    last_state_ckpt = os.path.join(config['save_dir'], 'last_training_state.pth')
 
     # 构建 GIRO 验证集（用于双域早停）
     giro_hmf2_val_loader = None
@@ -1176,7 +1243,7 @@ def train_fsia(config=None):
     _val_cfg['giro_batch_size'] = min(config.get('giro_batch_size', 256), 512)
     giro_hmf2_val_loader, giro_nmf2_val_loader = _build_giro(_val_cfg, device=None)
 
-    for epoch in range(config['epochs']):
+    for epoch in range(start_epoch, config['epochs']):
         epoch_t0 = time.time()
         print(f"\n{'='*50}")
         print(f"Epoch {epoch+1}/{config['epochs']}")
@@ -1323,6 +1390,31 @@ def train_fsia(config=None):
             ckpt_path = os.path.join(config['save_dir'], f'fsia_epoch_{epoch+1}.pth')
             torch.save(model.state_dict(), ckpt_path)
 
+        _atomic_torch_save({
+            'checkpoint_type': 'fsia_training_state',
+            'format_version': 1,
+            'completed_epochs': epoch + 1,
+            'target_epochs': int(config['epochs']),
+            'uncertainty_warmup_epochs': int(warmup),
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
+            'scaler_state_dict': scaler.state_dict() if scaler else None,
+            'best_val_ne': best_val_ne,
+            'best_val_peak': best_val_peak,
+            'best_epoch': best_epoch,
+            'ne_patience_counter': ne_patience_counter,
+            'peak_patience_counter': peak_patience_counter,
+            'history': history,
+            'rng_state': {
+                'numpy': np.random.get_state(),
+                'torch': torch.get_rng_state(),
+                'cuda': (torch.cuda.get_rng_state_all()
+                         if torch.cuda.is_available() else None),
+            },
+        }, last_state_ckpt)
+        print(f'  [断点] 完整训练状态已保存: {last_state_ckpt}')
+
         if config.get('early_stopping'):
             if (ne_patience_counter >= config.get('ne_patience', 4) or
                     peak_patience_counter >= config.get('peak_patience', 4)):
@@ -1343,8 +1435,8 @@ def train_fsia(config=None):
         'best_val_combined': best_val_ne,
         'best_val_peak_mae': (best_val_peak
                               if best_val_peak < float('inf') else None),
-        'best_epoch_metrics': (history[best_epoch - 1]
-                               if best_epoch is not None else None),
+        'best_epoch_metrics': next(
+            (row for row in history if row.get('epoch') == best_epoch), None),
         'fy_profiles': len(fy_nb_index.prof_starts),
         'cosmic_profiles': (len(cosmic_nb_index.prof_starts)
                             if cosmic_nb_index is not None else 0),

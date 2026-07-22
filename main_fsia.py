@@ -45,6 +45,11 @@ from inr_modules.mdia.visualization_mdia import (plot_global_slice, plot_altitud
 
 _PROFILE_FIXED_DIR = Path(current_dir) / 'checkpoints_fsia' / 'run65-profile-fixed'
 _OLD_RUN65_CKPT = Path(current_dir) / 'checkpoints_fsia' / 'run65' / 'best_fsia_model.pth'
+_RESUME_CKPT = str(_PROFILE_FIXED_DIR / 'best_fsia_model.pth')
+# 当前日志显示 Epoch 1 已完整保存，Epoch 2 仅运行到 batch 200，故从全局 Epoch 2 重跑。
+_RESUME_COMPLETED_EPOCHS = 1
+_RESUME_BEST_VAL = 0.146658
+_RESUME_BEST_PEAK = 0.6334
 
 
 class _Tee:
@@ -103,6 +108,23 @@ def _write_run_manifest(config):
         json.dump(manifest, stream, ensure_ascii=False, indent=2)
 
 
+def _record_resume_manifest(config):
+    path = Path(config['save_dir']) / 'run_manifest.json'
+    if not path.exists():
+        return
+    with path.open(encoding='utf-8') as stream:
+        manifest = json.load(stream)
+    manifest.setdefault('resume_events', []).append({
+        'created_utc': datetime.now(timezone.utc).isoformat(),
+        'checkpoint': _file_identity(config['resume_ckpt']),
+        'code_identity': _code_identity(current_dir),
+    })
+    temp_path = path.with_suffix('.json.tmp')
+    with temp_path.open('w', encoding='utf-8') as stream:
+        json.dump(manifest, stream, ensure_ascii=False, indent=2)
+    os.replace(temp_path, path)
+
+
 def _strict_load_finite(model, checkpoint, device):
     state = torch.load(checkpoint, map_location=device)
     model.load_state_dict(state, strict=True)
@@ -114,10 +136,7 @@ def _strict_load_finite(model, checkpoint, device):
 
 def main(eval_only=False):
     # ==================== 断点续训接口 ====================
-    # 从头训练：_RESUME_CKPT = None
-    # 续训：    _RESUME_CKPT = r"...\best_fsia_model.pth"，_RESUME_EPOCHS = N
-    _RESUME_CKPT   = None
-    _RESUME_EPOCHS = 5
+    # config['epochs'] 始终表示目标总轮数；旧 raw state_dict 必须显式给出已完成轮数。
 
     # ==================== 加载配置 ====================
     config = get_config_mdia()
@@ -126,7 +145,10 @@ def main(eval_only=False):
     update_config_mdia(
         save_dir=str(_PROFILE_FIXED_DIR),
         resume_ckpt=None,
-        resume_epochs=None,
+        resume_completed_epochs=None,
+        resume_best_val=None,
+        resume_best_peak=None,
+        resume_best_epoch=None,
         eval_only=False,
     )
 
@@ -134,10 +156,17 @@ def main(eval_only=False):
         update_config_mdia(
             eval_only=True,
             resume_ckpt=os.path.join(config['save_dir'], 'best_fsia_model.pth'))
-
-    if _RESUME_CKPT is not None:
-        update_config_mdia(resume_ckpt=_RESUME_CKPT, resume_epochs=_RESUME_EPOCHS)
-        print(f'\n[续训模式] 检查点: {_RESUME_CKPT}  续训 {_RESUME_EPOCHS} 轮')
+    elif _RESUME_CKPT is not None:
+        last_state = _PROFILE_FIXED_DIR / 'last_training_state.pth'
+        resume_path = str(last_state) if last_state.exists() else _RESUME_CKPT
+        update_config_mdia(
+            resume_ckpt=resume_path,
+            resume_completed_epochs=_RESUME_COMPLETED_EPOCHS,
+            resume_best_val=_RESUME_BEST_VAL,
+            resume_best_peak=_RESUME_BEST_PEAK,
+            resume_best_epoch=_RESUME_COMPLETED_EPOCHS,
+        )
+        print(f'\n[续训模式] 检查点: {resume_path}')
     # run61 重构（基于 run60）：FY 邻域观测特征替代坐标 SIREN
     #   核心缺陷修复：h_spatial（DualFreqSpatialNet）只编码坐标，不含 FY 观测值，
     #     FY 损失将 h_spatial 推向 FY-optimal → 污染 PeakHead hmF2 估计
@@ -171,7 +200,12 @@ def main(eval_only=False):
     best_ckpt = Path(config['save_dir']) / 'best_fsia_model.pth'
     if best_ckpt.resolve() == _OLD_RUN65_CKPT.resolve():
         raise RuntimeError('拒绝覆盖历史 run65 checkpoint')
-    if not eval_only:
+    is_resume = bool(config.get('resume_ckpt')) and not eval_only
+    if is_resume:
+        if not os.path.exists(config['resume_ckpt']):
+            raise FileNotFoundError(f"续训 checkpoint 不存在: {config['resume_ckpt']}")
+        _record_resume_manifest(config)
+    elif not eval_only:
         Path(config['save_dir']).mkdir(parents=True, exist_ok=True)
         if best_ckpt.exists():
             raise FileExistsError(f'新训练目录已有 checkpoint，请换用空目录: {best_ckpt}')
@@ -280,11 +314,9 @@ if __name__ == '__main__':
     parser.add_argument('--eval-only', action='store_true',
                         help='load best checkpoint and skip training')
     args = parser.parse_args()
-    if not args.eval_only and not torch.cuda.is_available():
-        raise RuntimeError('完整训练要求 CUDA；当前 PyTorch 环境仅支持 CPU，未启动训练')
     _PROFILE_FIXED_DIR.mkdir(parents=True, exist_ok=True)
     log_path = _PROFILE_FIXED_DIR / 'training.log'
-    log_mode = 'a' if args.eval_only else 'x'
+    log_mode = 'a' if args.eval_only or _RESUME_CKPT else 'x'
     with log_path.open(log_mode, encoding='utf-8', buffering=1) as log_stream:
         with contextlib.redirect_stdout(_Tee(sys.stdout, log_stream)), \
                 contextlib.redirect_stderr(_Tee(sys.stderr, log_stream)):
