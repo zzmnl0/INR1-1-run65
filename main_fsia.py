@@ -22,8 +22,14 @@ run22 改进要点（相对于 run18）：
     fy_path, iri_proxy_path, sw_path, giro_hmf2_path, giro_nmf2_path
 """
 
+import argparse
+import contextlib
+import hashlib
+import json
 import os
 import sys
+from datetime import datetime, timezone
+from pathlib import Path
 import torch
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -37,8 +43,76 @@ from inr_modules.mdia.evaluation_mdia import evaluate_and_save_report, evaluate_
 from inr_modules.mdia.visualization_mdia import (plot_global_slice, plot_altitude_profile,
                                                   plot_hmf2_nmf2_map)
 
+_PROFILE_FIXED_DIR = Path(current_dir) / 'checkpoints_fsia' / 'run65-profile-fixed'
+_OLD_RUN65_CKPT = Path(current_dir) / 'checkpoints_fsia' / 'run65' / 'best_fsia_model.pth'
 
-def main():
+
+class _Tee:
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, text):
+        for stream in self.streams:
+            stream.write(text)
+        return len(text)
+
+    def flush(self):
+        for stream in self.streams:
+            stream.flush()
+
+
+def _file_identity(path):
+    path = Path(path)
+    stat = path.stat()
+    digest = hashlib.sha256()
+    with path.open('rb') as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+            digest.update(chunk)
+    return {'path': str(path.resolve()), 'size': stat.st_size,
+            'mtime_ns': stat.st_mtime_ns, 'sha256': digest.hexdigest()}
+
+
+def _code_identity(root):
+    digest = hashlib.sha256()
+    files = sorted(Path(root).rglob('*.py'))
+    for path in files:
+        rel = path.relative_to(root).as_posix().encode('utf-8')
+        digest.update(rel)
+        digest.update(path.read_bytes())
+    return {'python_files': len(files), 'sha256': digest.hexdigest()}
+
+
+def _write_run_manifest(config):
+    data_keys = [key for key, value in config.items()
+                 if key.endswith('_path') and value and os.path.isfile(value)]
+    manifest = {
+        'created_utc': datetime.now(timezone.utc).isoformat(),
+        'config': config,
+        'data_identity': {key: _file_identity(config[key]) for key in data_keys},
+        'code_identity': _code_identity(current_dir),
+        'environment': {
+            'python': sys.version,
+            'torch': torch.__version__,
+            'cuda_runtime': torch.version.cuda,
+            'cuda_device': (torch.cuda.get_device_name(0)
+                            if torch.cuda.is_available() else None),
+        },
+    }
+    path = Path(config['save_dir']) / 'run_manifest.json'
+    with path.open('x', encoding='utf-8') as stream:
+        json.dump(manifest, stream, ensure_ascii=False, indent=2)
+
+
+def _strict_load_finite(model, checkpoint, device):
+    state = torch.load(checkpoint, map_location=device)
+    model.load_state_dict(state, strict=True)
+    bad = [name for name, value in state.items()
+           if torch.is_tensor(value) and not torch.isfinite(value).all()]
+    if bad:
+        raise ValueError(f'checkpoint contains non-finite parameters: {bad[:5]}')
+
+
+def main(eval_only=False):
     # ==================== 断点续训接口 ====================
     # 从头训练：_RESUME_CKPT = None
     # 续训：    _RESUME_CKPT = r"...\best_fsia_model.pth"，_RESUME_EPOCHS = N
@@ -49,7 +123,17 @@ def main():
     config = get_config_mdia()
 
     # FSIA 检查点目录（每次新训练实验递增 run 编号）
-    update_config_mdia(save_dir=r"D:\code11\IRI01\IRI03\INR1-1-run65\checkpoints_fsia\run65")
+    update_config_mdia(
+        save_dir=str(_PROFILE_FIXED_DIR),
+        resume_ckpt=None,
+        resume_epochs=None,
+        eval_only=False,
+    )
+
+    if eval_only:
+        update_config_mdia(
+            eval_only=True,
+            resume_ckpt=os.path.join(config['save_dir'], 'best_fsia_model.pth'))
 
     if _RESUME_CKPT is not None:
         update_config_mdia(resume_ckpt=_RESUME_CKPT, resume_epochs=_RESUME_EPOCHS)
@@ -73,14 +157,25 @@ def main():
     print(f'  fsia_dim_ff : {config["fsia_dim_ff"]}')
 
     # ==================== 路径检查 ====================
-    required_paths = ['fy_path', 'iri_proxy_path', 'sw_path']
+    required_paths = ['fy_path', 'fy_profile_path', 'iri_proxy_path', 'sw_path']
+    if config.get('w_cosmic', 0.0) > 0:
+        required_paths.append('cosmic_path')
     missing = [k for k in required_paths
-               if config.get(k) and not os.path.exists(config[k])]
+               if not config.get(k) or not os.path.exists(config[k])]
     if missing:
         print('\n以下数据文件缺失，无法继续训练:')
         for k in missing:
             print(f'  {k}: {config[k]}')
         return
+
+    best_ckpt = Path(config['save_dir']) / 'best_fsia_model.pth'
+    if best_ckpt.resolve() == _OLD_RUN65_CKPT.resolve():
+        raise RuntimeError('拒绝覆盖历史 run65 checkpoint')
+    if not eval_only:
+        Path(config['save_dir']).mkdir(parents=True, exist_ok=True)
+        if best_ckpt.exists():
+            raise FileExistsError(f'新训练目录已有 checkpoint，请换用空目录: {best_ckpt}')
+        _write_run_manifest(config)
 
     # ==================== 开始训练 ====================
     print('\n' + '=' * 60)
@@ -95,16 +190,18 @@ def main():
     val_loader      = results[4]
     sw_manager      = results[5]
     batch_processor = results[6]
+    iri_peak_manager = results[7]
 
-    print(f'\n训练完成！最终验证损失: {val_losses[-1]:.6f}')
+    if val_losses:
+        print(f'\n训练完成！最终验证损失: {val_losses[-1]:.6f}')
     best_ckpt = os.path.join(config['save_dir'], 'best_fsia_model.pth')
     print(f'最佳模型保存于: {best_ckpt}')
 
     # ==================== 加载最佳模型 ====================
     device = torch.device(config['device'])
     if os.path.exists(best_ckpt):
-        model.load_state_dict(torch.load(best_ckpt, map_location=device))
-        print('已加载最佳模型权重用于评估')
+        _strict_load_finite(model, best_ckpt, device)
+        print('已严格加载最佳模型，且参数全部有限')
 
     # ==================== 模型信息 ====================
     print(f'\n最终 EWMA 时间常数:')
@@ -118,9 +215,11 @@ def main():
 
     save_dir = config['save_dir']
     evaluate_and_save_report(
-        model, train_loader, val_loader, batch_processor, device, save_dir)
+        model, train_loader, val_loader, batch_processor, device, save_dir,
+        iri_peak_manager=iri_peak_manager)
     evaluate_parity(
-        model, val_loader, batch_processor, device, save_dir)
+        model, val_loader, batch_processor, device, save_dir,
+        iri_peak_manager=iri_peak_manager)
 
     # ==================== 可视化 ====================
     print('\n' + '=' * 60)
@@ -177,4 +276,16 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--eval-only', action='store_true',
+                        help='load best checkpoint and skip training')
+    args = parser.parse_args()
+    if not args.eval_only and not torch.cuda.is_available():
+        raise RuntimeError('完整训练要求 CUDA；当前 PyTorch 环境仅支持 CPU，未启动训练')
+    _PROFILE_FIXED_DIR.mkdir(parents=True, exist_ok=True)
+    log_path = _PROFILE_FIXED_DIR / 'training.log'
+    log_mode = 'a' if args.eval_only else 'x'
+    with log_path.open(log_mode, encoding='utf-8', buffering=1) as log_stream:
+        with contextlib.redirect_stdout(_Tee(sys.stdout, log_stream)), \
+                contextlib.redirect_stderr(_Tee(sys.stderr, log_stream)):
+            main(eval_only=args.eval_only)

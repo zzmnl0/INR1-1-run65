@@ -17,7 +17,8 @@ def _unix_to_relhour(unix_times, start_unix):
 
 
 def query_model_grid(model, sw_manager, day_record, start_unix, device,
-                     batch_size=2048, iri_peak_manager=None):
+                     batch_size=2048, iri_peak_manager=None,
+                     fy_nb_index=None, cosmic_nb_index=None):
     """
     在 DayRecord 的 (alt, time) 网格上推理 FSIA-INR，返回 log10(Ne) 网格。
 
@@ -36,6 +37,8 @@ def query_model_grid(model, sw_manager, day_record, start_unix, device,
         device:           torch.device
         batch_size:       推理分块大小
         iri_peak_manager: IRIPeakManager 或 None（PeakHead 背景输入）
+        fy_nb_index:      FYNeighborhoodIndex 或 None
+        cosmic_nb_index:  COSMICNeighborhoodIndex 或 None
 
     Returns:
         ne_pred_log10: [n_alt, n_time] float32 — FSIA-INR log10(Ne) 预测
@@ -96,6 +99,8 @@ def query_model_grid(model, sw_manager, day_record, start_unix, device,
 
     pred_flat = np.empty(M, dtype=np.float32)
     iri_flat  = np.empty(M, dtype=np.float32)
+    fy_covered = 0
+    cosmic_covered = 0
 
     with torch.no_grad():
         for start in range(0, M, batch_size):
@@ -109,9 +114,27 @@ def query_model_grid(model, sw_manager, day_record, start_unix, device,
             if iri_peak_manager is not None:
                 iri_peak = iri_peak_manager.get_iri_peak(chunk)
 
-            ne_fused, _, _, _, extras = model(chunk, sw_seq, iri_peak=iri_peak)
+            model_kwargs = {'iri_peak': iri_peak}
+            if fy_nb_index is not None:
+                feats, present = fy_nb_index.query_batch_np(coords_np[start:end])
+                fy_covered += int(np.count_nonzero(present > 0.5))
+                model_kwargs.update(
+                    neighbors_feats=torch.from_numpy(feats).to(device),
+                    has_obs=torch.from_numpy(present).to(device))
+            if cosmic_nb_index is not None:
+                feats, present = cosmic_nb_index.query_batch_np(coords_np[start:end])
+                cosmic_covered += int(np.count_nonzero(present > 0.5))
+                model_kwargs.update(
+                    neighbors_feats_cosmic=torch.from_numpy(feats).to(device),
+                    has_obs_cosmic=torch.from_numpy(present).to(device))
+
+            ne_fused, _, _, _, extras = model(chunk, sw_seq, **model_kwargs)
             pred_flat[start:end] = ne_fused.reshape(-1).cpu().numpy()
             iri_flat[start:end]  = extras['ne_bkg'].reshape(-1).cpu().numpy()
+
+    if fy_nb_index is not None or cosmic_nb_index is not None:
+        print(f'    邻域覆盖: FY={fy_covered}/{M} ({fy_covered/M:.2%}), '
+              f'COSMIC={cosmic_covered}/{M} ({cosmic_covered/M:.2%})')
 
     ne_pred_log10[valid_mask] = pred_flat
     ne_iri_log10[valid_mask]  = iri_flat

@@ -36,6 +36,8 @@ else:
 CONFIG_MDIA = {
     # ==================== 数据路径 ====================
     'fy_path': r'D:\FYsatellite\EDP_data\fy_202409_clean1.npy',
+    # clean1 supplies physical columns; clean3's seventh column supplies profile_id only.
+    'fy_profile_path': r'D:\FYsatellite\EDP_data\fy_202409_clean3.npy',
     'iri_proxy_path': r'D:\code11\IRI01\output_results\iri_september_full_proxy.pth',
     'sw_path': r'D:\FYsatellite\EDP_data\kp\OMNI_Kp_F107_20240901_20241001.txt',
     'save_dir': './checkpoints_fsia/run6',
@@ -123,7 +125,7 @@ CONFIG_MDIA = {
 
     # ==================== 不确定性学习 ====================
     'use_uncertainty': True,
-    'uncertainty_warmup_epochs': 2,
+    'uncertainty_warmup_epochs': 5,
     'log_var_min': -6.0,        # 最大精度 exp(6)≈403，恢复表达能力（原-10风险高；-4过保守）
     'log_var_min_init': -2.0,   # NLL 冷启动时收紧下限，随 ramp 线性放开到 log_var_min
     'log_var_max': 6.0,         # 对称设置
@@ -283,7 +285,6 @@ CONFIG_MDIA = {
     # 剖面级聚合参数（run61 profile-level）
     'fy_nb_k_prof':    8,    # 最近剖面数
     'fy_nb_n_alt':     8,    # 每剖面高度采样数
-    'fy_nb_dt_break': 0.05,  # 掩星剖面断点阈值（小时，=3 min）
     # FYObsEncoder 超参数
     'fy_enc_heads': 4,       # 注意力头数
     # run61: 关闭 GIRO 直接约束（调试阶段，PeakHead 绕过后 Ne_val 语义待重建）
@@ -321,7 +322,7 @@ def print_config_mdia():
     print('=' * 60)
 
     categories = {
-        '数据路径': ['fy_path', 'iri_proxy_path', 'sw_path',
+        '数据路径': ['fy_path', 'fy_profile_path', 'iri_proxy_path', 'sw_path',
                     'giro_hmf2_path', 'giro_nmf2_path', 'save_dir'],
         '数据规格': ['total_hours', 'start_date_str', 'bin_size_hours'],
         '物理参数': ['lat_range', 'lon_range', 'alt_range'],

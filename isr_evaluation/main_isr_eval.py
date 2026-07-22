@@ -43,7 +43,7 @@ CONFIG = {
     'model_type': 'fsia',
 
     # ---- 检查点路径（None = 根据 model_type 自动推断）----
-    'checkpoint_path': r"D:\code11\IRI01\IRI03\INR1-1\FSIA_INR18\checkpoints_fsia\run57\best_fsia_model.pth",
+    'checkpoint_path': r"D:\code11\IRI01\IRI03\INR1-1-run65\checkpoints_fsia\run65\best_fsia_model.pth",
 
     # ---- ISR 数据目录 ----
     # 每个目录下应包含 .hdf5 / .h5 文件（可多个文件，同站同月）
@@ -63,7 +63,7 @@ CONFIG = {
     'batch_size':      2048,    # 单次推理点数
 
     # ---- 输出目录 ----
-    'save_dir': os.path.join(_FSIA_DIR, r'isr_validation_outputs\run57'),
+    'save_dir': os.path.join(_FSIA_DIR, r'isr_validation_outputs\run65-obs'),
 
     # ---- 是否处理各站点（可单独关闭）----
     'run_jicamarca':  True,
@@ -264,7 +264,8 @@ def _load_model_and_managers(config, device):
     """加载模型、SpaceWeatherManager 和 IRIPeakManager。
 
     Returns:
-        (model, sw_manager, cfg, model_name, iri_peak_manager)
+        (model, sw_manager, cfg, model_name, iri_peak_manager,
+         fy_nb_index, cosmic_nb_index)
     """
     from inr_modules.config_mdia import get_config_mdia
     from inr_modules.data_managers.space_weather_manager import SpaceWeatherManager
@@ -328,6 +329,8 @@ def _load_model_and_managers(config, device):
 
     # IRIPeakManager（FSIA v2.2）：提供 IRI 峰参数背景给 PeakHead
     iri_peak_manager = None
+    fy_nb_index = None
+    cosmic_nb_index = None
     if model_type == 'fsia':
         try:
             from inr_modules.data_managers.iri_peak_manager import IRIPeakManager
@@ -346,12 +349,23 @@ def _load_model_and_managers(config, device):
         except Exception as e:
             print(f'[main] IRIPeakManager 初始化失败（{e}），使用中性后备值')
 
-    return model, sw_manager, cfg, model_name, iri_peak_manager
+        from inr_modules.data_managers.FY_dataloader import (
+            FYNeighborhoodIndex, COSMICNeighborhoodIndex)
+        fy_nb_index = FYNeighborhoodIndex(cfg['fy_path'], cfg)
+        cosmic_path = cfg.get('cosmic_path', '')
+        if not cosmic_path or not os.path.exists(cosmic_path):
+            raise FileNotFoundError(f'COSMIC 数据文件不存在: {cosmic_path}')
+        cosmic_nb_index = COSMICNeighborhoodIndex(cosmic_path, cfg)
+        print('[main] FY/COSMIC 正式局部邻域索引加载完成')
+
+    return (model, sw_manager, cfg, model_name, iri_peak_manager,
+            fy_nb_index, cosmic_nb_index)
 
 
 def _process_station(station_name, day_records, model, sw_manager,
                      start_unix, config, device, model_name='MDIA-INR',
-                     iri_peak_manager=None):
+                     iri_peak_manager=None, fy_nb_index=None,
+                     cosmic_nb_index=None):
     """
     对单个站点的所有 DayRecord 完成推理、指标计算、绘图。
 
@@ -398,6 +412,8 @@ def _process_station(station_name, day_records, model, sw_manager,
             model, sw_manager, rec, start_unix, device,
             batch_size=config['batch_size'],
             iri_peak_manager=iri_peak_manager,
+            fy_nb_index=fy_nb_index,
+            cosmic_nb_index=cosmic_nb_index,
         )
 
         # 四列时间-高度对比图 (ISR | IRI | model | model-ISR)
@@ -570,7 +586,8 @@ def main():
     print(f'[main] 验证时间段: {CONFIG["start_date_str"]} ~ {CONFIG["end_date_str"]}')
 
     # ==================== 加载模型 ====================
-    model, sw_manager, mdia_cfg, model_name, iri_peak_manager = \
+    (model, sw_manager, mdia_cfg, model_name, iri_peak_manager,
+     fy_nb_index, cosmic_nb_index) = \
         _load_model_and_managers(CONFIG, device)
     print(f'[main] 模型类型: {model_name}')
 
@@ -601,6 +618,8 @@ def main():
                 model, sw_manager, start_unix, CONFIG, device,
                 model_name=model_name,
                 iri_peak_manager=iri_peak_manager,
+                fy_nb_index=fy_nb_index,
+                cosmic_nb_index=cosmic_nb_index,
             )
             if rep is not None:
                 station_reports.append(rep)
@@ -629,6 +648,8 @@ def main():
                 model, sw_manager, start_unix, CONFIG, device,
                 model_name=model_name,
                 iri_peak_manager=iri_peak_manager,
+                fy_nb_index=fy_nb_index,
+                cosmic_nb_index=cosmic_nb_index,
             )
             if rep is not None:
                 station_reports.append(rep)

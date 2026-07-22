@@ -12,6 +12,7 @@ FSIA-INR 训练脚本
 import os
 import sys
 import json
+import hashlib
 import time
 import torch
 import torch.optim as optim
@@ -60,9 +61,17 @@ except ImportError:
 
 from data_managers import SpaceWeatherManager, IRINeuralProxy
 from data_managers.FY_dataloader import (
-    FY3D_Dataset, TimeBinSampler,
+    FY3D_Dataset, TimeBinSampler, FYNeighborhoodIndex,
     COSMICNeighborhoodIndex, get_cosmic_dataloader,
 )
+
+
+def _sha256_file(path):
+    digest = hashlib.sha256()
+    with open(path, 'rb') as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 # ======================== SubsetTimeBinSampler ========================
@@ -1023,30 +1032,25 @@ def train_fsia(config=None):
 
     # ========== 步骤 3b: FY 邻域索引（run61）==========
     print('\n[步骤 3b] 构建 FY 邻域索引（run61）...')
-    try:
-        from data_managers.FY_dataloader import FYNeighborhoodIndex
-        fy_nb_index = FYNeighborhoodIndex(config['fy_path'], config)
-        print(f'  FYNeighborhoodIndex 已构建 (dt={fy_nb_index.dt}h, '
-              f'dlat={fy_nb_index.dlat}°, dlon={fy_nb_index.dlon}°, '
-              f'k_max={fy_nb_index.k_max})')
-    except Exception as _e:
-        print(f'  警告: FYNeighborhoodIndex 构建失败 ({_e})，退化为无邻域模式')
-        fy_nb_index = None
+    fy_nb_index = FYNeighborhoodIndex(config['fy_path'], config)
+    print(f'  FYNeighborhoodIndex 已构建 (profiles={len(fy_nb_index.prof_starts):,}, '
+          f'dt={fy_nb_index.dt}h, dlat={fy_nb_index.dlat}°, '
+          f'dlon={fy_nb_index.dlon}°, k_max={fy_nb_index.k_max})')
 
     # ========== 步骤 3c: COSMIC-2 邻域索引（run64）==========
     print('\n[步骤 3c] 构建 COSMIC-2 邻域索引（run64）...')
     cosmic_nb_index  = None
     cosmic_path_cfg  = config.get('cosmic_path', '')
     if cosmic_path_cfg and os.path.exists(cosmic_path_cfg):
-        try:
-            cosmic_nb_index = COSMICNeighborhoodIndex(cosmic_path_cfg, config)
-            print(f'  COSMICNeighborhoodIndex 已构建 (dt={cosmic_nb_index.dt}h, '
-                  f'dlat={cosmic_nb_index.dlat}°, dlon={cosmic_nb_index.dlon}°, '
-                  f'k_max={cosmic_nb_index.k_max})')
-        except Exception as _e:
-            print(f'  警告: COSMICNeighborhoodIndex 构建失败 ({_e})')
+        cosmic_nb_index = COSMICNeighborhoodIndex(cosmic_path_cfg, config)
+        print(f'  COSMICNeighborhoodIndex 已构建 '
+              f'(profiles={len(cosmic_nb_index.prof_starts):,}, '
+              f'dt={cosmic_nb_index.dt}h, dlat={cosmic_nb_index.dlat}°, '
+              f'dlon={cosmic_nb_index.dlon}°, k_max={cosmic_nb_index.k_max})')
     else:
-        print(f'  cosmic_path 未配置或不存在，跳过 COSMIC 邻域索引')
+        if config.get('w_cosmic', 0.0) > 0:
+            raise FileNotFoundError(f'COSMIC 数据文件不存在: {cosmic_path_cfg}')
+        print('  w_cosmic=0，跳过 COSMIC 邻域索引')
 
     batch_processor = SlidingWindowBatchProcessor(sw_manager, device=device,
                                                   fy_nb_index=fy_nb_index,
@@ -1057,21 +1061,18 @@ def train_fsia(config=None):
     cosmic_train_loader = None
     cosmic_val_loader   = None
     if cosmic_path_cfg and os.path.exists(cosmic_path_cfg) and config.get('w_cosmic', 0.0) > 0:
-        try:
-            _csm_val_days = config.get('cosmic_val_days', [4, 14, 24])
-            cosmic_train_loader, cosmic_val_loader = get_cosmic_dataloader(
-                cosmic_path=cosmic_path_cfg,
-                val_days=_csm_val_days,
-                batch_size=config.get('batch_size', 2048),
-                bin_size_hours=config.get('bin_size_hours', 1.0),
-                num_workers=config.get('num_workers', 0),
-                use_memmap=config.get('use_memmap', True),
-            )
-            print(f'  COSMIC 训练批次: {len(cosmic_train_loader)}'
-                  f' | 验证批次: {len(cosmic_val_loader)}'
-                  f' | val_days={_csm_val_days}')
-        except Exception as _e:
-            print(f'  警告: COSMIC 数据加载器构建失败 ({_e})')
+        _csm_val_days = config.get('cosmic_val_days', [4, 14, 24])
+        cosmic_train_loader, cosmic_val_loader = get_cosmic_dataloader(
+            cosmic_path=cosmic_path_cfg,
+            val_days=_csm_val_days,
+            batch_size=config.get('batch_size', 2048),
+            bin_size_hours=config.get('bin_size_hours', 1.0),
+            num_workers=config.get('num_workers', 0),
+            use_memmap=config.get('use_memmap', True),
+        )
+        print(f'  COSMIC 训练批次: {len(cosmic_train_loader)}'
+              f' | 验证批次: {len(cosmic_val_loader)}'
+              f' | val_days={_csm_val_days}')
     else:
         print('  w_cosmic=0 或 cosmic_path 未配置/不存在，跳过 COSMIC 数据加载')
 
@@ -1117,6 +1118,11 @@ def train_fsia(config=None):
             config['epochs'] = int(_resume_epochs)
             print(f'  续训轮数: {config["epochs"]}')
 
+    if config.get('eval_only'):
+        print('\n[评估模式] 已加载数据上下文与 checkpoint，跳过优化器和训练循环')
+        return (model, [], [], train_loader, val_loader,
+                sw_manager, batch_processor, iri_peak_manager)
+
     # ========== 步骤 5: 优化器 ==========
     print('\n[步骤 5] 配置优化器...')
     lr = config['lr']
@@ -1154,6 +1160,7 @@ def train_fsia(config=None):
     train_losses, val_losses, history = [], [], []
     best_val_ne      = float('inf')
     best_val_peak    = float('inf')
+    best_epoch       = None
     ne_patience_counter   = 0
     peak_patience_counter = 0
     best_ckpt = os.path.join(config['save_dir'], 'best_fsia_model.pth')
@@ -1253,6 +1260,8 @@ def train_fsia(config=None):
             'epoch': epoch + 1,
             'train_mse': train_dict['mse'],
             'val_mse':   val_loss,
+            'val_cosmic_mse': val_metrics.get('val_csm_mse'),
+            'val_combined': val_metrics.get('val_combined', val_loss),
             'train_nll': train_dict['nll'],
             'total_loss': train_dict['total'],
             'bkg':              train_dict['bkg'],
@@ -1286,6 +1295,7 @@ def train_fsia(config=None):
         _val_combined = val_metrics.get('val_combined', val_loss)  # run64: FY + w_cosmic*COSMIC
         if _val_combined < best_val_ne:
             best_val_ne          = _val_combined
+            best_epoch           = epoch + 1
             ne_patience_counter  = 0
             torch.save(model.state_dict(), best_ckpt)
             _csm_str = (f"  COSMIC MSE={val_metrics.get('val_csm_mse', 0.0):.6f}"
@@ -1328,9 +1338,27 @@ def train_fsia(config=None):
         json.dump(history, f, indent=2)
     print(f"训练历史已保存: {hist_path}")
 
+    summary = {
+        'best_epoch': best_epoch,
+        'best_val_combined': best_val_ne,
+        'best_val_peak_mae': (best_val_peak
+                              if best_val_peak < float('inf') else None),
+        'best_epoch_metrics': (history[best_epoch - 1]
+                               if best_epoch is not None else None),
+        'fy_profiles': len(fy_nb_index.prof_starts),
+        'cosmic_profiles': (len(cosmic_nb_index.prof_starts)
+                            if cosmic_nb_index is not None else 0),
+        'checkpoint_path': os.path.abspath(best_ckpt),
+        'checkpoint_sha256': _sha256_file(best_ckpt),
+    }
+    summary_path = os.path.join(config['save_dir'], 'training_summary.json')
+    with open(summary_path, 'w', encoding='utf-8') as stream:
+        json.dump(summary, stream, ensure_ascii=False, indent=2)
+    print(f"训练摘要已保存: {summary_path}")
+
     return (model, train_losses, val_losses,
             train_loader, val_loader,
-            sw_manager, batch_processor)
+            sw_manager, batch_processor, iri_peak_manager)
 
 
 # ======================== 入口 ========================

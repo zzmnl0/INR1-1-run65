@@ -19,7 +19,8 @@ from scipy.stats import pearsonr
 
 # ======================== 内部辅助 ========================
 
-def _collect_predictions(model, dataloader, batch_processor, device):
+def _collect_predictions(model, dataloader, batch_processor, device,
+                         iri_peak_manager=None):
     """
     遍历 DataLoader，收集完整预测结果。
 
@@ -33,10 +34,19 @@ def _collect_predictions(model, dataloader, batch_processor, device):
 
     with torch.no_grad():
         for batch_data in dataloader:
-            coords, target_ne, sw_seq, neighbors_feats, has_obs = batch_processor.process_batch(batch_data)
-            Ne_fused, _, _, _, extras = model(coords, sw_seq,
-                                              neighbors_feats=neighbors_feats,
-                                              has_obs=has_obs)
+            (coords, target_ne, sw_seq,
+             neighbors_feats, has_obs,
+             neighbors_feats_cosmic,
+             has_obs_cosmic) = batch_processor.process_batch(batch_data)
+            iri_peak = (iri_peak_manager.get_iri_peak(coords)
+                        if iri_peak_manager is not None else None)
+            Ne_fused, _, _, _, extras = model(
+                coords, sw_seq,
+                iri_peak=iri_peak,
+                neighbors_feats=neighbors_feats,
+                has_obs=has_obs,
+                neighbors_feats_cosmic=neighbors_feats_cosmic,
+                has_obs_cosmic=has_obs_cosmic)
 
             preds.append(Ne_fused.reshape(-1).cpu().numpy())
             bkgs.append(extras['ne_bkg'].reshape(-1).cpu().numpy())
@@ -58,7 +68,8 @@ def _calc_metrics(y_true, y_pred):
 # ======================== 评估报告 ========================
 
 def evaluate_and_save_report(model, train_loader, val_loader,
-                              batch_processor, device, save_dir):
+                              batch_processor, device, save_dir,
+                              iri_peak_manager=None):
     """
     计算训练集 / 验证集评估指标，保存文本报告。
 
@@ -80,11 +91,11 @@ def evaluate_and_save_report(model, train_loader, val_loader,
 
     print('[评估] 收集训练集预测...')
     t_pred, t_bkg, t_true = _collect_predictions(
-        model, train_loader, batch_processor, device)
+        model, train_loader, batch_processor, device, iri_peak_manager)
 
     print('[评估] 收集验证集预测...')
     v_pred, v_bkg, v_true = _collect_predictions(
-        model, val_loader, batch_processor, device)
+        model, val_loader, batch_processor, device, iri_peak_manager)
 
     t_inr = _calc_metrics(t_true, t_pred)
     t_iri = _calc_metrics(t_true, t_bkg)
@@ -140,7 +151,8 @@ def evaluate_and_save_report(model, train_loader, val_loader,
 
 # ======================== Parity 图 ========================
 
-def evaluate_parity(model, val_loader, batch_processor, device, save_dir):
+def evaluate_parity(model, val_loader, batch_processor, device, save_dir,
+                    iri_peak_manager=None):
     """
     绘制双面板 Parity 图（验证集）。
 
@@ -163,7 +175,8 @@ def evaluate_parity(model, val_loader, batch_processor, device, save_dir):
     os.makedirs(save_dir, exist_ok=True)
 
     print('[评估] 生成 Parity 图（验证集）...')
-    pred, bkg, true = _collect_predictions(model, val_loader, batch_processor, device)
+    pred, bkg, true = _collect_predictions(
+        model, val_loader, batch_processor, device, iri_peak_manager)
     print(f'  验证样本数: {len(true):,}')
 
     m_iri = _calc_metrics(true, bkg)

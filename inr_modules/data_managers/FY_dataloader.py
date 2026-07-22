@@ -247,7 +247,7 @@ class FYNeighborhoodIndex:
         ~200-400 个垂直高度层行。直接索引原始点时 M~3000，即使分块仍慢。
 
         解决方案：把时空索引从「逐测量点」升级为「逐掩星剖面」：
-            1. __init__:  相邻 Δt > dt_break(=3min) 检测剖面边界
+            1. __init__:  使用 clean3 第 7 列 profile_id 检测真实剖面边界
                           每条剖面均匀预采样 n_alt=8 个高度点存入 prof_abs_data
                           时间分箱建立在剖面代表点上 → M_prof ≈ 5-15（vs 原始 ~3000）
             2. query_batch_np:
@@ -267,9 +267,28 @@ class FYNeighborhoodIndex:
     def __init__(self, fy_data_path, config=None):
         if config is None:
             config = {}
-        raw  = np.load(fy_data_path, mmap_mode='r')
-        valid = ~np.isnan(raw).any(axis=1)
-        data  = np.array(raw[valid, :5], dtype=np.float32)   # [N,5]: lat,lon,alt,time,ne
+        raw = np.load(fy_data_path, mmap_mode='r')
+        profile_path = config.get('fy_profile_path')
+        if not profile_path:
+            profile_path = str(fy_data_path).replace('_clean1.npy', '_clean3.npy')
+        profile_raw = np.load(profile_path, mmap_mode='r')
+        if (raw.ndim != 2 or profile_raw.ndim != 2 or raw.shape[1] < 5
+                or raw.shape[0] != profile_raw.shape[0] or profile_raw.shape[1] <= 6):
+            raise ValueError('FY clean1/clean3 rows are not aligned or profile_id is missing')
+        for start in range(0, len(raw), 1_000_000):
+            end = min(start + 1_000_000, len(raw))
+            if not np.array_equal(raw[start:end, :5], profile_raw[start:end, :5],
+                                  equal_nan=True):
+                raise ValueError(f'FY clean1/clean3 physical columns differ at {start}:{end}')
+        valid = np.isfinite(raw[:, :5]).all(axis=1)
+        profile_ids_raw = profile_raw[:, 6]
+        if not np.isfinite(profile_ids_raw).all() or not np.array_equal(
+                profile_ids_raw, np.rint(profile_ids_raw)):
+            raise ValueError('FY profile_id must contain finite integers')
+        data = np.array(raw[valid, :5], dtype=np.float32)
+        profile_ids = np.rint(profile_ids_raw[valid]).astype(np.int64)
+        if len(data) == 0:
+            raise ValueError('FY contains no finite physical rows')
 
         self.dt       = float(config.get('fy_nb_dt',       1.5))
         self.dlat     = float(config.get('fy_nb_dlat',     5.0))
@@ -277,19 +296,18 @@ class FYNeighborhoodIndex:
         self.k_prof   = int(config.get('fy_nb_k_prof',     8))
         self.n_alt    = int(config.get('fy_nb_n_alt',      8))
         self.k_max    = self.k_prof * self.n_alt               # = 64，与旧接口兼容
-        self.dt_break = float(config.get('fy_nb_dt_break', 0.05))   # 3 min in hours
-
-        # ---- 1. 时间排序 ----
-        sort_idx          = np.argsort(data[:, 3])
+        # ---- 1. 以 clean3 profile_id 聚合，保留剖面内原始点顺序 ----
+        sort_idx          = np.argsort(profile_ids, kind='stable')
         self.sorted_data  = data[sort_idx]
-        sorted_times      = self.sorted_data[:, 3]
+        sorted_pids       = profile_ids[sort_idx]
 
-        # ---- 2. 掩星剖面边界检测（相邻 Δt > dt_break → 新剖面）----
-        breaks           = np.where(np.diff(sorted_times) > self.dt_break)[0] + 1
+        # ---- 2. profile_id 变化即新剖面 ----
+        breaks           = np.where(np.diff(sorted_pids) != 0)[0] + 1
         starts           = np.concatenate([[0], breaks]).astype(np.int32)
         ends             = np.concatenate([breaks, [len(self.sorted_data)]]).astype(np.int32)
         self.prof_starts = starts
         self.prof_ends   = ends
+        self.prof_ids    = sorted_pids[starts]
         N_prof           = len(starts)
         counts           = (ends - starts).astype(np.float64)
         print(f'[FYNeighborhoodIndex] 原始点={len(self.sorted_data):,}  '
@@ -632,11 +650,18 @@ class COSMICNeighborhoodIndex:
         self.k_max  = self.k_prof * self.n_alt  # 64
 
         raw   = np.load(cosmic_path, mmap_mode='r')
-        valid = ~np.isnan(raw[:, :5]).any(axis=1)
+        if raw.ndim != 2 or raw.shape[1] <= 5:
+            raise ValueError('COSMIC must have six columns including profile_id')
+        valid = np.isfinite(raw[:, :5]).all(axis=1)
+        pid_raw = raw[:, 5]
+        if not np.isfinite(pid_raw).all() or not np.array_equal(pid_raw, np.rint(pid_raw)):
+            raise ValueError('COSMIC profile_id must contain finite integers')
         data  = np.array(raw[valid, :5], dtype=np.float32)   # [N, 5]
-        pids  = np.array(raw[valid, 5],  dtype=np.int32)     # profile_id
+        pids  = np.rint(pid_raw[valid]).astype(np.int64)     # profile_id
+        if len(data) == 0:
+            raise ValueError('COSMIC contains no finite physical rows')
 
-        sort_idx         = np.argsort(data[:, 3])
+        sort_idx         = np.argsort(pids, kind='stable')
         self.sorted_data = data[sort_idx]
         sorted_pids      = pids[sort_idx]
 
@@ -646,6 +671,7 @@ class COSMICNeighborhoodIndex:
         ends   = np.concatenate([breaks, [len(self.sorted_data)]]).astype(np.int32)
         self.prof_starts = starts
         self.prof_ends   = ends
+        self.prof_ids    = sorted_pids[starts]
         N_prof  = len(starts)
         counts  = (ends - starts).astype(np.float64)
         print(f'[COSMICNeighborhoodIndex] 原始点={len(self.sorted_data):,}  '
