@@ -1,12 +1,10 @@
 """
 FSIA-INR 训练脚本
 
-主要特性：
-    1. FSIA_INR_Model — IRI 完全冻结 + CrossSourceAttention + PeakHead + FusionDecoder
-    2. 单组 AdamW 优化器（IRI 冻结，无需分组 LR）
-    3. 双域早停：Ne MSE + GIRO 峰值 MAE 独立计数
-    4. 物理损失：5 项（bkg/res_smooth/horiz_smooth/uplift/depletion）+ 廓线对齐
-    5. 检查点：best_fsia_model.pth（以 Ne MSE 改善为保存条件）
+Active path: frozen IRI background, local FY/COSMIC profile encoders,
+NeuralETKFLayer, and a bounded fusion decoder. Training uses one AdamW group,
+FY/COSMIC validation, height-adaptive IRI regularization, and profile peak
+alignment. The best checkpoint is selected by validation density loss.
 """
 
 import os
@@ -31,14 +29,9 @@ try:
     from .physics_losses_mdia import (
         combined_mdia_physics_loss,
         profile_peak_alignment_loss,
-        peak_field_smooth_loss,
-        pearson_r_shape_loss,
-        banded_pearson_loss,
-        ne_vert_smooth_loss,
     )
     from .sliding_dataset import SlidingWindowBatchProcessor
     from .plotting import plot_training_curves
-    from .giro_dataloader import build_giro_loaders, compute_giro_loss
 except ImportError:
     _mdia_dir = os.path.dirname(os.path.abspath(__file__))
     _inr_dir = os.path.dirname(_mdia_dir)
@@ -50,14 +43,9 @@ except ImportError:
     from physics_losses_mdia import (
         combined_mdia_physics_loss,
         profile_peak_alignment_loss,
-        peak_field_smooth_loss,
-        pearson_r_shape_loss,
-        banded_pearson_loss,
-        ne_vert_smooth_loss,
     )
     from sliding_dataset import SlidingWindowBatchProcessor
     from plotting import plot_training_curves
-    from giro_dataloader import build_giro_loaders, compute_giro_loss
 
 from data_managers import SpaceWeatherManager, IRINeuralProxy
 from data_managers.FY_dataloader import (
@@ -86,6 +74,55 @@ def _atomic_torch_save(state, path):
     temp_path = f'{path}.tmp'
     torch.save(state, temp_path)
     os.replace(temp_path, path)
+
+
+def _optimizer_parameter_names(model):
+    return [name for name, param in model.named_parameters()
+            if param.requires_grad]
+
+
+def _load_optimizer_state(optimizer, saved_state, model, saved_names=None):
+    """Load optimizer state, dropping parameters frozen by repository cleanup."""
+    try:
+        optimizer.load_state_dict(saved_state)
+        return False
+    except ValueError as original_error:
+        if len(saved_state['param_groups']) != 1:
+            raise original_error
+
+        old_ids = saved_state['param_groups'][0]['params']
+        if saved_names is None:
+            # Training states written before format v2 contained every
+            # non-IRI parameter and did not record names.
+            saved_names = [
+                name for name, _ in model.named_parameters()
+                if not name.startswith('iri_proxy.')
+            ]
+        if len(saved_names) != len(old_ids):
+            raise original_error
+
+        current_template = optimizer.state_dict()
+        if len(current_template['param_groups']) != 1:
+            raise original_error
+        current_ids = current_template['param_groups'][0]['params']
+        current_names = _optimizer_parameter_names(model)
+        if len(current_names) != len(current_ids):
+            raise original_error
+
+        old_id_by_name = dict(zip(saved_names, old_ids))
+        migrated_state = {}
+        for name, current_id in zip(current_names, current_ids):
+            old_id = old_id_by_name.get(name)
+            if old_id in saved_state['state']:
+                migrated_state[current_id] = saved_state['state'][old_id]
+
+        migrated_group = dict(saved_state['param_groups'][0])
+        migrated_group['params'] = current_ids
+        optimizer.load_state_dict({
+            'state': migrated_state,
+            'param_groups': [migrated_group],
+        })
+        return True
 
 
 # ======================== SubsetTimeBinSampler ========================
@@ -127,8 +164,7 @@ def _query_cosmic_neighbors(batch_processor, coords):
 
 def train_one_epoch(model, train_loader, batch_processor,
                     optimizer, device, config, epoch, scaler=None,
-                    giro_hmf2_loader=None, giro_nmf2_loader=None, sw_manager=None,
-                    iri_peak_manager=None,
+                    sw_manager=None, iri_peak_manager=None,
                     cosmic_train_loader=None, cosmic_iter=None):
     """训练一个 epoch。"""
     model.train()
@@ -143,47 +179,18 @@ def train_one_epoch(model, train_loader, batch_processor,
     use_amp            = config.get('use_amp', False) and scaler is not None
     physics_freq       = config.get('physics_loss_freq', 5)
 
-    stats = {k: 0.0 for k in ['total', 'mse', 'nll', 'bkg',
-                                'uplift', 'depletion', 'eia_crest', 'physics_total',
-                                'profile_align', 'peak_smooth', 'ne_vert_smooth',  # run41
-                                'iri_struct',                           # 1-C
-                                'l_shape',                              # run22 Pearson-r 形态约束
-                                # run25: DA 自动加权 IRI 峰锚定（无新硬编码 w_*）
-                                'peak_iri_hmf2',     # hmF2 vs IRI MSE，权重 = trust_iri = 1-K_FY.mean()
-                                'peak_iri_nmf2',     # NmF2 banded Pearson 形状损失（IRI 系统偏差不锚定值）
-                                'trust_iri_mean',    # batch 平均 IRI 信任度（1 - K_FY 均值）
-                                'alpha_eff_mean',    # run26 (B2): batch 平均 PeakHead 自适应 detach 系数
-                                'giro_hmf2', 'giro_nmf2', 'gate_mean',
-                                'giro_ne_val', 'giro_argmax',
-                                'alt_weight_mean',                      # P0-D 监控
-                                'low_alt_frac',
-                                # run22 DA 监控键（run28：MHDK→NeuralETKFLayer，物理意义升级）
-                                'K_FY_mean',        # K_eff_FY 均值（ens_var/(ens_var+r_fy)）
-                                'K_vert_mean',      # K_eff_vert 均值
-                                'b_mean',           # ensemble 方差均值（≡ 背景误差协方差对角元）
-                                'r_fy_mean',        # FY 观测误差均值（含底侧+夜间物理先验）
-                                'innov_FY_norm',    # FY 新息 L2 范数均值
-                                'innov_vert_norm',  # 垂直新息 L2 范数均值
-                                # run28 NeuralETKFLayer ensemble 监控
-                                'inflation',        # 当前 inflation 因子 = exp(log_inflation)
-                                # run59: H 学习参考 R 监控（run60: alpha_vert_night/eq 已删除）
-                                'r_ref_FY',         # H_FY 梯度路径基准 R（均等学日/夜）
-                                'r_ref_vert',       # H_vert 梯度路径基准 R
-                                'member_w_max',    # max ensemble member weight（dominance 监控）
-                                # [DIAG] 融合问题定位监控指标
-                                'ne_delta_abs',    # |Ne_delta| 均值：decoder 修正幅度
-                                'ne_bkg_mean',     # IRI 背景 Ne 均值
-                                'ne_fused_mean',   # 融合 Ne 均值
-                                'delta_pos_frac',  # Ne_delta>0 比例（健康值 0.4~0.6）
-                                'hmf2_iri_diff',   # |hmF2_fused - hmF2_IRI| 均值 (km)
-                                'csm_mse',         # run64: COSMIC-2 MSE（Two-pass）
-                                ]}
+    stats = {k: 0.0 for k in [
+        'total', 'mse', 'nll', 'bkg', 'physics_total', 'profile_align',
+        'iri_struct', 'trust_iri_mean', 'gate_mean',
+        'alt_weight_mean', 'low_alt_frac',
+        'K_FY_mean', 'K_COSMIC_mean', 'b_mean', 'r_fy_mean',
+        'innov_FY_norm', 'innov_COSMIC_norm',
+        'inflation', 'r_ref_FY', 'r_ref_COSMIC', 'member_w_max',
+        'ne_delta_abs', 'ne_bkg_mean', 'ne_fused_mean', 'delta_pos_frac',
+        'csm_mse',
+    ]}
     num_batches = 0
 
-    hmf2_iter        = iter(giro_hmf2_loader) if giro_hmf2_loader is not None else None
-    nmf2_iter        = iter(giro_nmf2_loader) if giro_nmf2_loader is not None else None
-    giro_direct_iter = iter(giro_hmf2_loader) if giro_hmf2_loader is not None else None  # 1-D
-    use_giro  = (hmf2_iter is not None or nmf2_iter is not None) and sw_manager is not None
     log_interval  = 100
     total_batches = len(train_loader)
     t0 = time.time()
@@ -195,7 +202,7 @@ def train_one_epoch(model, train_loader, batch_processor,
 
         compute_physics = (batch_idx % physics_freq == 0)
 
-        # ---- IRI 峰参数查询（PeakHead 背景输入）----
+        # ---- IRI peak structural reference ----
         iri_peak_batch = None
         if iri_peak_manager is not None:
             with torch.no_grad():
@@ -204,7 +211,7 @@ def train_one_epoch(model, train_loader, batch_processor,
         with torch.amp.autocast('cuda', enabled=use_amp):
             h_sw_shared, _, _ = model.sw_encoder(sw_seq[:1])
             h_sw_shared = h_sw_shared.expand(coords.shape[0], -1).contiguous()
-            Ne_fused, log_var, _ne_placeholder, Ne_delta, extras = model(
+            Ne_fused, log_var, _, _, extras = model(
                 coords, sw_seq,
                 precomputed_h_sw=h_sw_shared,
                 iri_peak=iri_peak_batch,
@@ -227,23 +234,13 @@ def train_one_epoch(model, train_loader, batch_processor,
                 _delta_pos = (extras['ne_residual'] > 0).float().mean().item()
                 _bkg       = extras['ne_bkg'].mean().item()
                 _fused     = Ne_fused.mean().item()
-                _hmf2_pred = extras.get('peak_params', {}).get('hmF2')
-                if _hmf2_pred is not None and iri_peak_batch is not None:
-                    _hmf2_str = (f"hmF2_fused={_hmf2_pred.mean().item():.1f}km"
-                                 f"(IRI={iri_peak_batch[:,0].mean().item():.1f}km"
-                                 f" diff={(_hmf2_pred - iri_peak_batch[:,0]).abs().mean().item():.1f}km)")
-                elif _hmf2_pred is not None:
-                    _hmf2_str = f"hmF2_fused={_hmf2_pred.mean().item():.1f}km"
-                else:
-                    _hmf2_str = "hmF2=N/A"
                 _target_mean = target_ne.mean().item()
                 _delta_vs_target = _fused - _target_mean   # 正=过高估计，负=低估
                 print(f"  [DIAG b{batch_idx:>5}] "
                       f"gate={_g:.3f}(d={_gd:.3f}/p={_gp:.3f})  "
                       f"|Ne_delta|={_delta:.4f}  delta>0={_delta_pos:.2f}  "
                       f"bkg={_bkg:.3f}  fused={_fused:.3f}  target={_target_mean:.3f}  "
-                      f"fused-target={_delta_vs_target:+.3f}  "
-                      f"{_hmf2_str}")
+                      f"fused-target={_delta_vs_target:+.3f}")
 
         # ---- run26 (A1): 一次性计算 trust_iri，供 L_shape / bkg_trust / L_peak_iri 共用 ----
         # trust_iri = (1 - K_FY.mean(dim=-1)).detach().clamp(0,1)  ∈ [B]
@@ -296,72 +293,16 @@ def train_one_epoch(model, train_loader, batch_processor,
                 nll_val = pure_mse.item()
 
         if compute_physics:
-            _peak      = extras.get('peak_params', {})
-            hmF2_fused = _peak.get('hmF2')   # [B] 融合峰高（IRI+GIRO修正）
-            NmF2_fused = _peak.get('NmF2')
             physics_loss, phy_dict = combined_mdia_physics_loss(
                 pred_ne=Ne_fused,
                 ne_bkg=extras['ne_bkg'],
-                ne_residual=Ne_delta,
                 coords=coords,
-                lat=coords[:, 0].detach(),
-                hmF2_pred=hmF2_fused,
-                NmF2_pred=NmF2_fused,
-                sin_I=extras.get('sin_I'),
-                w_bkg=config.get('w_bkg', 0.1),
-                w_uplift=config.get('w_uplift', 0.0),
-                w_depletion=config.get('w_depletion', 0.0),
-                w_eia_crest=config.get('w_eia_crest', 0.0),
-                uplift_threshold_km=config.get('uplift_threshold_km', 380.0),
-                # P0-C: 高度自适应 bkg 权重
-                use_adaptive_bkg=True,
                 w_bkg_low=config.get('w_bkg_low', 0.25),
                 w_bkg_high=config.get('w_bkg_high', 0.02),
                 w_bkg_transition=config.get('w_bkg_transition', 250.0),
                 w_bkg_sharpness=config.get('w_bkg_sharpness', 25.0),
-                # v3.1: 夜间增强 + EIA 日间门控
-                w_bkg_night=config.get('w_bkg_night', 0.0),
-                uplift_lt_sigma=config.get('uplift_lt_sigma', 5.0),
-                # run26 (A1): DA 不确定性派生的 IRI 信任度，per-sample 加权 bkg_trust
                 trust_iri=trust_iri_global,
             )
-
-            # ---- 峰场平滑（run65 P1：giro_mode mini-forward，coords_ps 独立 requires_grad）----
-            # peak_field_smooth_loss 需要 coords 梯度（grad path: coords → DualFreqSpatialNet →
-            # h_spatial → PeakHead → hmF2）。P1 移除主批次 coords.requires_grad，改用 n_s 点的
-            # 独立 mini-forward（giro_mode=True 仅运行 SW + Spatial + PeakHead，~10× 更快）。
-            w_ps = config.get('w_peak_smooth', 0.0)
-            loss_peak_smooth = torch.tensor(0.0, device=device)
-            if w_ps > 0:
-                n_s = min(config.get('peak_smooth_samples', 256), coords.shape[0])
-                idx_ps = torch.randperm(coords.shape[0], device=device)[:n_s]
-                coords_ps = coords[idx_ps].detach().clone().requires_grad_(True)
-                iri_peak_ps = iri_peak_batch[idx_ps] if iri_peak_batch is not None else None
-                with torch.amp.autocast('cuda', enabled=use_amp):
-                    _, _, _, _, extras_ps = model(
-                        coords_ps, sw_seq[idx_ps],
-                        precomputed_h_sw=h_sw_shared[idx_ps].detach(),
-                        iri_peak=iri_peak_ps,
-                        giro_mode=True,
-                    )
-                hmF2_ps = extras_ps.get('peak_params', {}).get('hmF2')
-                if hmF2_ps is not None:
-                    loss_peak_smooth = peak_field_smooth_loss(
-                        hmF2_ps, coords_ps,
-                        sin_I=extras_ps.get('sin_I'),
-                        cos_I=extras_ps.get('cos_I'),
-                        lat_geo_deg=coords_ps[:, 0],
-                    )
-                    physics_loss = physics_loss + w_ps * loss_peak_smooth
-            phy_dict['peak_smooth'] = loss_peak_smooth.item()
-
-            # ---- run41: Ne 垂直方向二阶导平滑（直接约束 Ne_fused 在 alt 方向的高频波动）----
-            w_nv = config.get('w_ne_vert_smooth', 0.0)
-            loss_ne_vert = torch.tensor(0.0, device=device)
-            if w_nv > 0:
-                loss_ne_vert = ne_vert_smooth_loss(Ne_fused, coords)
-                physics_loss = physics_loss + w_nv * loss_ne_vert
-            phy_dict['ne_vert_smooth'] = loss_ne_vert.item() if isinstance(loss_ne_vert, torch.Tensor) else float(loss_ne_vert)
 
             # ---- 1-C: L_iri_struct（h_iri_aligned 重建 IRI 场，防止对齐网络丢弃结构）----
             w_is = config.get('w_iri_struct', 0.0)
@@ -378,7 +319,7 @@ def train_one_epoch(model, train_loader, batch_processor,
 
             # ---- 廓线-峰高对齐损失（使用 hmF2_det，避免重复 detach）----
             w_pa = config.get('w_profile_align', 0.0)
-            if w_pa > 0 and hmF2_fused is not None:
+            if w_pa > 0:
                 coords_peak = coords.detach().clone()
                 coords_peak[:, 2] = extras['hmF2_det']   # detached 融合峰高，更稳定
                 coords_peak.requires_grad_(True)
@@ -388,10 +329,7 @@ def train_one_epoch(model, train_loader, batch_processor,
                         precomputed_h_sw=h_sw_shared.detach(),
                         iri_peak=iri_peak_batch,
                     )
-                loss_pa = profile_peak_alignment_loss(
-                    Ne_at_peak, coords_peak,
-                    NmF2_pred=NmF2_fused,
-                    w_val=config.get('w_profile_align_val', 0.0))
+                loss_pa = profile_peak_alignment_loss(Ne_at_peak, coords_peak)
                 physics_loss = physics_loss + w_pa * loss_pa
                 phy_dict['profile_align'] = loss_pa.item()
             else:
@@ -399,87 +337,14 @@ def train_one_epoch(model, train_loader, batch_processor,
 
         else:
             physics_loss = 0.0
-            phy_dict = {k: 0.0 for k in ['bkg', 'uplift', 'depletion',
-                                           'eia_crest', 'physics_total',
-                                           'profile_align', 'peak_smooth', 'iri_struct']}
+            phy_dict = {k: 0.0 for k in [
+                'bkg', 'physics_total', 'profile_align', 'iri_struct']}
 
-        giro_loss = 0.0
-        giro_dict = {'giro_hmf2': 0.0, 'giro_nmf2': 0.0, 'giro_ne_val': 0.0, 'giro_argmax': 0.0}
-        giro_freq = config.get('giro_loss_freq', 1)
-        compute_giro = use_giro and (batch_idx % giro_freq == 0)
-        if compute_giro:
-            _giro_loss, _giro_dict, hmf2_iter, nmf2_iter = compute_giro_loss(
-                model, sw_manager,
-                hmf2_iter, giro_hmf2_loader,
-                nmf2_iter, giro_nmf2_loader,
-                device, config,
-                iri_peak_manager=iri_peak_manager,
-            )
-            giro_loss = _giro_loss
-            giro_dict = _giro_dict
-
-            # ---- 1-D: GIRO → Ne_fused 直接约束 + 弱 argmax（run61: 默认关闭，无邻域数据时跳过）----
-            if config.get('w_giro_ne_val', 0) > 0 or config.get('w_giro_argmax', 0) > 0:
-                _direct_loss, _direct_dict, giro_direct_iter = _compute_giro_direct_loss(
-                    model, giro_direct_iter, giro_hmf2_loader,
-                    sw_manager, iri_peak_manager, device, config)
-                giro_loss = giro_loss + _direct_loss
-                giro_dict['giro_ne_val']  = _direct_dict.get('giro_ne_val', 0.0)
-                giro_dict['giro_argmax']  = _direct_dict.get('giro_argmax', 0.0)
-
-        total_loss = config.get('w_obs', 1.0) * loss_main + physics_loss + giro_loss
-
-        # ---- run22: L_shape — Pearson-r 形态约束（每批次，IRI 形态守恒）----
-        # run26 (A1): trust_iri 加权 — IRI 主导时强守形态，FY 主导时弱化（允许偏离错误的 IRI）
-        w_shape = config.get('w_shape', 0.05)
-        l_shape_val = torch.tensor(0.0, device=device)
-        if w_shape > 0:
-            l_shape_val = pearson_r_shape_loss(
-                Ne_fused, extras['ne_bkg'], trust_iri=trust_iri_global)
-            total_loss  = total_loss + w_shape * l_shape_val
-
-        # ---- run25: L_peak_iri — DA 自动加权 IRI 峰锚定（无新硬编码 w_*）----
-        # trust_iri = (1 - K_FY.mean()).detach()  → IRI 信任度，由 DA 不确定性自动决定
-        # hmF2: IRI 值可信 → MSE 锚定（按 trust_iri 加权）
-        # NmF2: IRI 系统偏差仅 Pearson 可信 → banded Pearson 形状（不锚定值）
-        l_peak_iri_hmf2 = torch.tensor(0.0, device=device)
-        l_peak_iri_nmf2 = torch.tensor(0.0, device=device)
-        trust_iri_mean_val = 0.0
-        _peak_p = extras.get('peak_params', {})
-        _hmF2_f = _peak_p.get('hmF2')
-        _NmF2_f = _peak_p.get('NmF2')
-        if (_hmF2_f is not None and _NmF2_f is not None
-                and trust_iri_global is not None
-                and iri_peak_batch is not None):
-            # run26: 复用 trust_iri_global（已在 forward 后统一计算）
-            trust_iri = trust_iri_global
-            trust_iri_mean_val = trust_iri.mean().item()
-
-            # hmF2 anchor（归一化 km → unitless）
-            hmF2_resid = (_hmF2_f - iri_peak_batch[:, 0]) / 100.0              # [B]
-            l_peak_iri_hmf2 = (trust_iri * hmF2_resid.pow(2)).mean()
-
-            # NmF2 banded Pearson（3 带：低/中/高纬，min_samples=10）
-            l_peak_iri_nmf2 = trust_iri.mean() * banded_pearson_loss(
-                _NmF2_f,
-                iri_peak_batch[:, 1],
-                coords[:, 0],     # lat_geo_deg
-            )
-
-            total_loss = total_loss + l_peak_iri_hmf2 + l_peak_iri_nmf2
-
-        # ---- Gate 熵正则（防止 gate 崩塌至 0 或 1）----
-        # 注：使用 gate_data（sigmoid 输出，恒 ∈ (0,1)）而非合并 gate，
-        # 因为修改 C 的 lt_gate_modulation 可使合并 gate 超过 1，
-        # 导致 log(1 - gate + eps) = log(负数) = NaN。
+        total_loss = config.get('w_obs', 1.0) * loss_main + physics_loss
+        trust_iri_mean_val = (
+            trust_iri_global.mean().item()
+            if trust_iri_global is not None else 0.0)
         gate = extras.get('gate')
-        gate_data_ent = extras.get('gate_data')   # sigmoid 输出，恒 ∈ (0,1)
-        _gate_for_ent = gate_data_ent if gate_data_ent is not None else gate
-        if _gate_for_ent is not None and config.get('w_gate_entropy', 0.0) > 0:
-            eps = 1e-6
-            gate_ent = (_gate_for_ent * torch.log(_gate_for_ent + eps) +
-                        (1 - _gate_for_ent) * torch.log(1 - _gate_for_ent + eps)).mean()
-            total_loss = total_loss + config['w_gate_entropy'] * gate_ent
 
         # ── run64: COSMIC-2 Two-pass 训练 ──
         _w_cosmic   = config.get('w_cosmic', 0.0)
@@ -503,7 +368,7 @@ def train_one_epoch(model, train_loader, batch_processor,
             with torch.amp.autocast('cuda', enabled=use_amp):
                 csm_h_sw, _, _ = model.sw_encoder(csm_sw_seq[:1])
                 csm_h_sw = csm_h_sw.expand(csm_coords.shape[0], -1).contiguous()
-                csm_Ne, csm_log_var, _, csm_Ne_delta, csm_extras = model(
+                csm_Ne, csm_log_var, _, _, csm_extras = model(
                     csm_coords, csm_sw_seq,
                     precomputed_h_sw=csm_h_sw,
                     iri_peak=csm_iri_peak,
@@ -548,28 +413,14 @@ def train_one_epoch(model, train_loader, batch_processor,
             csm_total = config.get('w_obs', 1.0) * csm_loss_main
             # COSMIC physics (same freq as FY)
             if compute_physics:
-                _csm_pk = csm_extras.get('peak_params', {})
                 csm_phy, _ = combined_mdia_physics_loss(
                     pred_ne=csm_Ne,
                     ne_bkg=csm_extras['ne_bkg'],
-                    ne_residual=csm_Ne_delta,
                     coords=csm_coords,
-                    lat=csm_coords[:, 0].detach(),
-                    hmF2_pred=_csm_pk.get('hmF2'),
-                    NmF2_pred=_csm_pk.get('NmF2'),
-                    sin_I=csm_extras.get('sin_I'),
-                    w_bkg=config.get('w_bkg', 0.1),
-                    w_uplift=config.get('w_uplift', 0.0),
-                    w_depletion=config.get('w_depletion', 0.0),
-                    w_eia_crest=config.get('w_eia_crest', 0.0),
-                    uplift_threshold_km=config.get('uplift_threshold_km', 380.0),
-                    use_adaptive_bkg=True,
                     w_bkg_low=config.get('w_bkg_low', 0.25),
                     w_bkg_high=config.get('w_bkg_high', 0.02),
                     w_bkg_transition=config.get('w_bkg_transition', 250.0),
                     w_bkg_sharpness=config.get('w_bkg_sharpness', 25.0),
-                    w_bkg_night=config.get('w_bkg_night', 0.0),
-                    uplift_lt_sigma=config.get('uplift_lt_sigma', 5.0),
                     trust_iri=trust_iri_csm,
                 )
                 csm_total = csm_total + csm_phy
@@ -580,28 +431,6 @@ def train_one_epoch(model, train_loader, batch_processor,
                         csm_total = csm_total + w_is_csm * F.mse_loss(
                             model.iri_recon_head(csm_h_iri_a),
                             csm_extras['ne_bkg'].detach())
-            # COSMIC L_shape
-            if w_shape > 0:
-                csm_total = csm_total + w_shape * pearson_r_shape_loss(
-                    csm_Ne, csm_extras['ne_bkg'], trust_iri=trust_iri_csm)
-            # COSMIC L_peak_iri anchor
-            _csm_pp = csm_extras.get('peak_params', {})
-            _csm_hf = _csm_pp.get('hmF2')
-            _csm_nf = _csm_pp.get('NmF2')
-            if (_csm_hf is not None and _csm_nf is not None
-                    and trust_iri_csm is not None and csm_iri_peak is not None):
-                _csm_hr  = (_csm_hf - csm_iri_peak[:, 0]) / 100.0
-                csm_total = csm_total + (trust_iri_csm * _csm_hr.pow(2)).mean()
-                csm_total = csm_total + trust_iri_csm.mean() * banded_pearson_loss(
-                    _csm_nf, csm_iri_peak[:, 1], csm_coords[:, 0])
-            # COSMIC gate entropy
-            _csm_gd  = csm_extras.get('gate_data')
-            _csm_ge  = csm_extras.get('gate') if _csm_gd is None else _csm_gd
-            if _csm_ge is not None and config.get('w_gate_entropy', 0.0) > 0:
-                _eps = 1e-6
-                csm_total = csm_total + config['w_gate_entropy'] * (
-                    _csm_ge * torch.log(_csm_ge + _eps)
-                    + (1 - _csm_ge) * torch.log(1 - _csm_ge + _eps)).mean()
             total_loss = total_loss + _w_cosmic * csm_total
 
         # ── 守卫：非有限 loss 跳过 backward，防止 NaN 写入参数 ──
@@ -650,48 +479,31 @@ def train_one_epoch(model, train_loader, batch_processor,
         stats['total'] += total_loss.item()
         stats['mse']   += pure_mse.item()
         stats['nll']   += nll_val
-        for k in ['bkg', 'uplift', 'depletion', 'eia_crest', 'physics_total',
-                   'profile_align', 'peak_smooth', 'iri_struct']:
+        for k in ['bkg', 'physics_total', 'profile_align', 'iri_struct']:
             stats[k] += phy_dict.get(k, 0.0)
-        stats['giro_hmf2']   += giro_dict.get('giro_hmf2', 0.0)
-        stats['giro_nmf2']   += giro_dict.get('giro_nmf2', 0.0)
-        stats['giro_ne_val'] += giro_dict.get('giro_ne_val', 0.0)
-        stats['giro_argmax'] += giro_dict.get('giro_argmax', 0.0)
         if gate is not None:
             stats['gate_mean'] += gate.mean().item()
         # P0-D 监控
         stats['alt_weight_mean'] += alt_weight.mean().item()
         stats['low_alt_frac']    += (coords[:, 2] < 200).float().mean().item()
-        # run22 DA 监控
-        stats['l_shape'] += l_shape_val.item() if isinstance(l_shape_val, torch.Tensor) else float(l_shape_val)
-        # run25 DA 自动加权 IRI 峰锚定监控
-        stats['peak_iri_hmf2']  += l_peak_iri_hmf2.item() if isinstance(l_peak_iri_hmf2, torch.Tensor) else 0.0
-        stats['peak_iri_nmf2']  += l_peak_iri_nmf2.item() if isinstance(l_peak_iri_nmf2, torch.Tensor) else 0.0
         stats['trust_iri_mean'] += trust_iri_mean_val
-        # run26 (B2): sample-adaptive α 监控
-        with torch.no_grad():
-            _ae = extras.get('alpha_eff')
-            if _ae is not None and isinstance(_ae, torch.Tensor) and _ae.numel() > 0:
-                stats['alpha_eff_mean'] += _ae.mean().item()
         with torch.no_grad():
             if extras.get('K_FY') is not None:
-                stats['K_FY_mean']       += extras['K_FY'].mean().item()
-                stats['K_vert_mean']     += extras['K_vert'].mean().item()
-                stats['b_mean']          += extras['b'].mean().item()
-                stats['r_fy_mean']       += extras['r_fy'].mean().item()
-                stats['innov_FY_norm']   += extras['innov_FY'].norm(dim=-1).mean().item()
-                stats['innov_vert_norm'] += extras['innov_vert'].norm(dim=-1).mean().item()
-            # run28 NeuralETKFLayer ensemble 监控（per-batch 累加，per-epoch 平均）
+                stats['K_FY_mean']         += extras['K_FY'].mean().item()
+                stats['K_COSMIC_mean']     += extras['K_COSMIC'].mean().item()
+                stats['b_mean']            += extras['b'].mean().item()
+                stats['r_fy_mean']         += extras['r_fy'].mean().item()
+                stats['innov_FY_norm']     += extras['innov_FY'].norm(dim=-1).mean().item()
+                stats['innov_COSMIC_norm'] += extras['innov_COSMIC'].norm(dim=-1).mean().item()
             _infl = extras.get('inflation_scale')
             if _infl is not None:
                 stats['inflation'] += _infl.item()
-            # run59 监控：参考 R
             _r_ref_FY = extras.get('r_ref_FY')
             if _r_ref_FY is not None:
                 stats['r_ref_FY']   += _r_ref_FY.detach().item()
-            _r_ref_v = extras.get('r_ref_vert')
-            if _r_ref_v is not None:
-                stats['r_ref_vert'] += _r_ref_v.detach().item()
+            _r_ref_csm = extras.get('r_ref_COSMIC')
+            if _r_ref_csm is not None:
+                stats['r_ref_COSMIC'] += _r_ref_csm.detach().item()
         with torch.no_grad():
             _mw = extras.get('member_weights')
             if _mw is not None:
@@ -702,9 +514,6 @@ def train_one_epoch(model, train_loader, batch_processor,
             stats['ne_bkg_mean']    += extras['ne_bkg'].mean().item()
             stats['ne_fused_mean']  += Ne_fused.mean().item()
             stats['delta_pos_frac'] += (extras['ne_residual'] > 0).float().mean().item()
-            _hf_pred = extras.get('peak_params', {}).get('hmF2')
-            if _hf_pred is not None and iri_peak_batch is not None:
-                stats['hmf2_iri_diff'] += (_hf_pred - iri_peak_batch[:, 0]).abs().mean().item()
         stats['csm_mse'] += csm_mse_val
         num_batches += 1
 
@@ -722,8 +531,7 @@ def train_one_epoch(model, train_loader, batch_processor,
 # ======================== 验证 ========================
 
 def validate(model, val_loader, batch_processor, device, config,
-             giro_val_loaders=None, sw_manager=None, iri_peak_manager=None,
-             cosmic_val_loader=None):
+             sw_manager=None, iri_peak_manager=None, cosmic_val_loader=None):
     model.eval()
     total_loss = 0.0
     all_preds, all_targets = [], []
@@ -787,165 +595,7 @@ def validate(model, val_loader, batch_processor, device, config,
     val_dict['val_csm_mse']  = val_csm_loss
     val_dict['val_combined'] = val_combined
 
-    # 阶段一：GIRO 验证集峰值指标（hmF2/NmF2 MAE）
-    # GIRO batch shape: [B, 5] = [lat_geo, lon_geo, rel_hour, value, lat_aacgm]
-    # coords_g: [B, 5] = [lat_geo, lon_geo, alt_dummy, rel_hour, lat_aacgm]
-    _DUMMY_ALT = 300.0
-    val_giro_peak_mae = float('inf')
-    if giro_val_loaders is not None and sw_manager is not None:
-        giro_hmf2_val, giro_nmf2_val = giro_val_loaders
-        hmf2_errs, nmf2_errs = [], []
-        with torch.no_grad():
-            if giro_hmf2_val is not None:
-                for raw_batch in giro_hmf2_val:
-                    raw_batch = raw_batch.to(device)
-                    lat_g, lon_g, rel_h, hmf2_target = (
-                        raw_batch[:, 0], raw_batch[:, 1],
-                        raw_batch[:, 2], raw_batch[:, 3])
-                    alt_d  = torch.full_like(lat_g, _DUMMY_ALT)
-                    lat_aa = raw_batch[:, 4]
-                    coords_g = torch.stack([lat_g, lon_g, alt_d, rel_h, lat_aa], dim=1)
-                    sw_seq_g = sw_manager.get_drivers_sequence(rel_h)
-                    iri_peak_v = None
-                    if iri_peak_manager is not None:
-                        iri_peak_v = iri_peak_manager.get_iri_peak(coords_g)
-                    _, _, _, _, g_extras = model(coords_g, sw_seq_g,
-                                                 giro_mode=True, iri_peak=iri_peak_v)
-                    pred_hmf2 = g_extras.get('peak_params', {}).get('hmF2')
-                    if pred_hmf2 is not None:
-                        hmf2_errs.append((pred_hmf2 - hmf2_target).abs().cpu())
-            if giro_nmf2_val is not None:
-                for raw_batch in giro_nmf2_val:
-                    raw_batch = raw_batch.to(device)
-                    lat_g, lon_g, rel_h, nmf2_target = (
-                        raw_batch[:, 0], raw_batch[:, 1],
-                        raw_batch[:, 2], raw_batch[:, 3])
-                    alt_d  = torch.full_like(lat_g, _DUMMY_ALT)
-                    lat_aa = raw_batch[:, 4]
-                    coords_g = torch.stack([lat_g, lon_g, alt_d, rel_h, lat_aa], dim=1)
-                    sw_seq_g = sw_manager.get_drivers_sequence(rel_h)
-                    iri_peak_v = None
-                    if iri_peak_manager is not None:
-                        iri_peak_v = iri_peak_manager.get_iri_peak(coords_g)
-                    _, _, _, _, g_extras = model(coords_g, sw_seq_g,
-                                                 giro_mode=True, iri_peak=iri_peak_v)
-                    pred_nmf2 = g_extras.get('peak_params', {}).get('NmF2')
-                    if pred_nmf2 is not None:
-                        nmf2_errs.append((pred_nmf2 - nmf2_target).abs().cpu())
-
-        hmf2_mae = torch.cat(hmf2_errs).mean().item() if hmf2_errs else 0.0
-        nmf2_mae = torch.cat(nmf2_errs).mean().item() if nmf2_errs else 0.0
-        # 归一化：hmF2 MAE (km) / 50 使量级与 NmF2 MAE (log10) 相当
-        val_giro_peak_mae = hmf2_mae / 50.0 + nmf2_mae
-        val_dict['val_giro_peak_mae'] = val_giro_peak_mae
-        val_dict['val_hmf2_mae'] = hmf2_mae
-        val_dict['val_nmf2_mae'] = nmf2_mae
-
-    return val_ne_loss, val_giro_peak_mae, val_dict
-
-
-# ======================== 1-D: GIRO → Ne_fused 直接约束 ========================
-
-def _compute_giro_direct_loss(model, direct_iter, giro_hmf2_loader,
-                               sw_manager, iri_peak_manager, device, config):
-    """
-    GIRO → Ne_fused 直接约束（Plan 1-D）
-
-    在 GIRO 观测峰高 hmF2_obs 处运行完整前向（非 giro_mode），约束：
-      L_giro_ne_val  : MSE(Ne_fused(hmF2_obs), NmF2_fused.detach())  峰值自洽
-      L_giro_argmax  : relu(Ne_up - Ne_pk) + relu(Ne_dn - Ne_pk)    弱 argmax 峰结构
-
-    使用 precomputed_h_sw 避免重复 SW 编码；3B 坐标拼接减少 forward 次数。
-
-    Returns:
-        l_direct:    scalar Tensor 或 0.0
-        direct_dict: {'giro_ne_val': float, 'giro_argmax': float}
-        direct_iter: (更新后的迭代器)
-    """
-    w_ne_val = config.get('w_giro_ne_val', 0.0)
-    w_argmax = config.get('w_giro_argmax', 0.0)
-    Dh       = config.get('giro_argmax_dh', 10.0)
-
-    zero_dict = {'giro_ne_val': 0.0, 'giro_argmax': 0.0}
-
-    if (w_ne_val <= 0 and w_argmax <= 0) or giro_hmf2_loader is None:
-        return 0.0, zero_dict, direct_iter
-
-    # 从 hmF2 loader 获取一个 GIRO batch
-    try:
-        raw_batch = next(direct_iter)
-    except StopIteration:
-        direct_iter = iter(giro_hmf2_loader)
-        try:
-            raw_batch = next(direct_iter)
-        except StopIteration:
-            return 0.0, zero_dict, direct_iter
-
-    raw_batch = raw_batch.to(device)
-    lat_g    = raw_batch[:, 0]
-    lon_g    = raw_batch[:, 1]
-    rel_h    = raw_batch[:, 2]
-    hmF2_obs = raw_batch[:, 3]   # GIRO 观测峰高 [km]
-    lat_aa   = raw_batch[:, 4]
-
-    # 构建 3B coords：hmF2_obs / hmF2_obs+Δh / hmF2_obs-Δh
-    def _make_coords(alt_vals):
-        return torch.stack([lat_g, lon_g, alt_vals, rel_h, lat_aa], dim=1)
-
-    coords_pk = _make_coords(hmF2_obs)
-    coords_up = _make_coords(hmF2_obs + Dh)
-    coords_dn = _make_coords(hmF2_obs - Dh)
-    coords_3B = torch.cat([coords_pk, coords_up, coords_dn])     # [3B, 5]
-
-    # 预计算 h_sw（GIRO 站点共享相同时刻，拼接复用）
-    sw_seq_g = sw_manager.get_drivers_sequence(rel_h)             # [B, seq_len, 2]
-    with torch.no_grad():
-        h_sw_g, _, _ = model.sw_encoder(sw_seq_g)                 # [B, 64]
-    h_sw_3B  = h_sw_g.repeat(3, 1)                                # [3B, 64]
-    sw_seq_3B = sw_seq_g.repeat(3, 1, 1)                          # [3B, seq_len, 2]
-
-    # IRI 峰参数（3B coords）
-    iri_peak_3B = None
-    if iri_peak_manager is not None:
-        with torch.no_grad():
-            iri_peak_3B = iri_peak_manager.get_iri_peak(coords_3B)
-
-    # 完整前向（非 giro_mode），复用 h_sw
-    Ne_3B, _, _, _, extras_3B = model(
-        coords_3B, sw_seq_3B,
-        precomputed_h_sw=h_sw_3B,
-        iri_peak=iri_peak_3B,
-    )
-
-    B_g   = coords_pk.shape[0]
-    Ne_pk = Ne_3B[:B_g].squeeze(-1)           # [B]
-    Ne_up = Ne_3B[B_g:2*B_g].squeeze(-1)      # [B]
-    Ne_dn = Ne_3B[2*B_g:].squeeze(-1)         # [B]
-
-    l_direct   = torch.tensor(0.0, device=device)
-    l_ne_val_v = 0.0
-    l_argmax_v = 0.0
-
-    # L_giro_ne_val：Ne_fused 在观测峰高处应与 PeakHead 预测幅度一致
-    # NmF2_fused（从 full forward）是 PeakHead 的预测，已被 GIRO NmF2 监督训练
-    # → 间接将 GIRO NmF2 观测信息注入 3D 场
-    if w_ne_val > 0:
-        nmf2_fused = extras_3B.get('peak_params', {}).get('NmF2')
-        if nmf2_fused is not None:
-            nmf2_target = nmf2_fused[:B_g].detach()
-            l_ne_val    = F.mse_loss(Ne_pk, nmf2_target)
-            l_direct    = l_direct + w_ne_val * l_ne_val
-            l_ne_val_v  = l_ne_val.item()
-
-    # L_giro_argmax：弱 argmax——Ne_fused 在观测峰高处应为局部极大值
-    # 只在违反峰结构时激活（relu），对正常峰形无梯度
-    if w_argmax > 0:
-        l_argmax   = (torch.relu(Ne_up - Ne_pk) +
-                      torch.relu(Ne_dn - Ne_pk)).mean()
-        l_direct   = l_direct + w_argmax * l_argmax
-        l_argmax_v = l_argmax.item()
-
-    return l_direct, {'giro_ne_val': l_ne_val_v, 'giro_argmax': l_argmax_v}, direct_iter
+    return val_ne_loss, val_dict
 
 
 # ======================== 主训练函数 ========================
@@ -1001,13 +651,12 @@ def train_fsia(config=None):
         iri_peak_manager = IRIPeakManager(
             hmf2_path=_hmf2_p,
             nmf2_path=_nmf2_p,
-            total_hours=config['total_hours'],
             device=device,
         )
-        print('  IRI 峰参数管理器已加载（作为 PeakHead 背景输入）')
+        print('  IRI 峰参数管理器已加载（结构参考）')
     else:
         print('  警告: iri_hmf2_path/iri_nmf2_path 未配置或文件不存在，'
-              'PeakHead 将使用中性值 (300km, 11.5)')
+              '将使用中性峰值参考 (300km, 11.5)')
 
     # ========== 步骤 3: 数据集 ==========
     print('\n[步骤 3] 准备数据集...')
@@ -1089,12 +738,6 @@ def train_fsia(config=None):
               f' | val_days={_csm_val_days}')
     else:
         print('  w_cosmic=0 或 cosmic_path 未配置/不存在，跳过 COSMIC 数据加载')
-
-    # ========== 步骤 3.5: GIRO 数据 ==========
-    print('\n[步骤 3.5] 载入 GIRO 电离层测高仪数据...')
-    giro_hmf2_loader, giro_nmf2_loader = build_giro_loaders(config, device=None)
-    if giro_hmf2_loader is None and giro_nmf2_loader is None:
-        print('  未配置 GIRO 数据，跳过')
 
     # ========== 步骤 4: FSIA-INR 模型 ==========
     print('\n[步骤 4] 初始化 FSIA-INR 模型...')
@@ -1188,7 +831,14 @@ def train_fsia(config=None):
         use_amp = False
 
     if resume_state is not None:
-        optimizer.load_state_dict(resume_state['optimizer_state_dict'])
+        optimizer_migrated = _load_optimizer_state(
+            optimizer,
+            resume_state['optimizer_state_dict'],
+            model,
+            resume_state.get('optimizer_param_names'),
+        )
+        if optimizer_migrated:
+            print('  已剔除冻结参数的旧优化器状态')
         if scheduler is not None and resume_state.get('scheduler_state_dict') is not None:
             scheduler.load_state_dict(resume_state['scheduler_state_dict'])
         if scaler is not None and resume_state.get('scaler_state_dict') is not None:
@@ -1215,33 +865,16 @@ def train_fsia(config=None):
     val_losses = [row['val_mse'] for row in history]
     if resume_state:
         best_val_ne = float(resume_state['best_val_ne'])
-        best_val_peak = float(resume_state['best_val_peak'])
         best_epoch = resume_state.get('best_epoch')
         ne_patience_counter = int(resume_state.get('ne_patience_counter', 0))
-        peak_patience_counter = int(resume_state.get('peak_patience_counter', 0))
     else:
         best_val_ne_cfg = config.get('resume_best_val')
-        best_val_peak_cfg = config.get('resume_best_peak')
         best_val_ne = (float(best_val_ne_cfg)
                        if best_val_ne_cfg is not None else float('inf'))
-        best_val_peak = (float(best_val_peak_cfg)
-                         if best_val_peak_cfg is not None else float('inf'))
         best_epoch = config.get('resume_best_epoch')
         ne_patience_counter = 0
-    peak_patience_counter = 0
     best_ckpt = os.path.join(config['save_dir'], 'best_fsia_model.pth')
     last_state_ckpt = os.path.join(config['save_dir'], 'last_training_state.pth')
-
-    # 构建 GIRO 验证集（用于双域早停）
-    giro_hmf2_val_loader = None
-    giro_nmf2_val_loader = None
-    try:
-        from .giro_dataloader import build_giro_loaders as _build_giro
-    except ImportError:
-        from giro_dataloader import build_giro_loaders as _build_giro
-    _val_cfg = dict(config)
-    _val_cfg['giro_batch_size'] = min(config.get('giro_batch_size', 256), 512)
-    giro_hmf2_val_loader, giro_nmf2_val_loader = _build_giro(_val_cfg, device=None)
 
     for epoch in range(start_epoch, config['epochs']):
         epoch_t0 = time.time()
@@ -1252,8 +885,6 @@ def train_fsia(config=None):
         train_loss, train_dict = train_one_epoch(
             model, train_loader, batch_processor,
             optimizer, device, config, epoch, scaler,
-            giro_hmf2_loader=giro_hmf2_loader,
-            giro_nmf2_loader=giro_nmf2_loader,
             sw_manager=sw_manager,
             iri_peak_manager=iri_peak_manager,
             cosmic_train_loader=cosmic_train_loader,
@@ -1261,12 +892,8 @@ def train_fsia(config=None):
         )
         train_losses.append(train_loss)
 
-        giro_val_loaders = (giro_hmf2_val_loader, giro_nmf2_val_loader) \
-            if (giro_hmf2_val_loader is not None or giro_nmf2_val_loader is not None) \
-            else None
-        val_loss, val_peak_mae, val_metrics = validate(
+        val_loss, val_metrics = validate(
             model, val_loader, batch_processor, device, config,
-            giro_val_loaders=giro_val_loaders,
             sw_manager=sw_manager,
             iri_peak_manager=iri_peak_manager,
             cosmic_val_loader=cosmic_val_loader,
@@ -1279,33 +906,18 @@ def train_fsia(config=None):
         print(f"    MSE:          {train_dict['mse']:.6f}")
         print(f"    NLL:          {train_dict['nll']:.6f}")
         print(f"    Bkg Trust:    {train_dict['bkg']:.6f}")
-        print(f"    EIA Uplift:   {train_dict['uplift']:.6f}")
-        print(f"    Trough Depl:  {train_dict['depletion']:.6f}")
-        if giro_hmf2_loader is not None:
-            print(f"    GIRO hmF2:    {train_dict['giro_hmf2']:.4f}")
-            print(f"    GIRO Ne_val:  {train_dict['giro_ne_val']:.4f}  "
-                  f"argmax={train_dict['giro_argmax']:.4f}")
-        if giro_nmf2_loader is not None:
-            print(f"    GIRO NmF2:    {train_dict['giro_nmf2']:.6f}")
         if train_dict.get('iri_struct', 0.0) > 0:
             print(f"    IRI Struct:   {train_dict['iri_struct']:.4f}")
-        if train_dict.get('l_shape', 0.0) > 0:
-            print(f"    L_shape:      {train_dict['l_shape']:.4f}")
-        # run22 DA 监控
         _k_fy = train_dict.get('K_FY_mean', 0.0)
-        _k_vt = train_dict.get('K_vert_mean', 0.0)
+        _k_csm = train_dict.get('K_COSMIC_mean', 0.0)
         _b_da = train_dict.get('b_mean', 0.0)
         _r_fy = train_dict.get('r_fy_mean', 0.0)
-        print(f"  [DA] K_FY={_k_fy:.3f}  K_vert={_k_vt:.3f}  b={_b_da:.3f}  r_fy={_r_fy:.3f}"
+        print(f"  [DA] K_FY={_k_fy:.3f}  K_COSMIC={_k_csm:.3f}  b={_b_da:.3f}  r_fy={_r_fy:.3f}"
               f"  innov_FY={train_dict.get('innov_FY_norm',0.0):.3f}"
-              f"  innov_vert={train_dict.get('innov_vert_norm',0.0):.3f}")
+              f"  innov_COSMIC={train_dict.get('innov_COSMIC_norm',0.0):.3f}")
         print(f"  Val Ne Loss:  {val_loss:.6f}")
         print(f"    MAE={val_metrics['mae']:.6f}  RMSE={val_metrics['rmse']:.6f}"
               f"  R²={val_metrics['r2']:.4f}")
-        if val_peak_mae < float('inf'):
-            print(f"  Val Peak MAE: {val_peak_mae:.4f}"
-                  f"  (hmF2={val_metrics.get('val_hmf2_mae', 0):.1f}km"
-                  f"  NmF2={val_metrics.get('val_nmf2_mae', 0):.4f})")
 
         tau_kp_val    = model.sw_encoder.tau_kp.item()
         tau_solar_val = model.sw_encoder.tau_solar.item()
@@ -1313,15 +925,12 @@ def train_fsia(config=None):
         print(f"  τ_kp:{tau_kp_val:.2f}h  τ_solar:{tau_solar_val:.2f}h"
               f"  gate_mean:{gate_mean_v:.4f}")
         print(f"  LR: {optimizer.param_groups[0]['lr']:.2e}")
-        # [DIAG] 步骤一：融合诊断摘要
         _bkg_mse_ratio = train_dict['bkg'] / max(train_dict['mse'], 1e-8)
-        _hmf2_warn = " ⚠ PeakHead过冲!" if train_dict['hmf2_iri_diff'] > 20.0 else ""
         _bias_warn = " ⚠ 全局正偏置!" if train_dict['delta_pos_frac'] > 0.85 else ""
         print(f"  [DIAG] |Ne_delta|={train_dict['ne_delta_abs']:.4f}  "
               f"delta>0={train_dict['delta_pos_frac']:.3f}{_bias_warn}  "
               f"bkg={train_dict['ne_bkg_mean']:.3f}  fused={train_dict['ne_fused_mean']:.3f}  "
-              f"bkg/mse={_bkg_mse_ratio:.2f}x  "
-              f"hmF2_iri_diff={train_dict['hmf2_iri_diff']:.1f}km{_hmf2_warn}")
+              f"bkg/mse={_bkg_mse_ratio:.2f}x")
 
         history.append({
             'epoch': epoch + 1,
@@ -1332,33 +941,22 @@ def train_fsia(config=None):
             'train_nll': train_dict['nll'],
             'total_loss': train_dict['total'],
             'bkg':              train_dict['bkg'],
-            'uplift':           train_dict['uplift'],
-            'depletion':        train_dict['depletion'],
             'profile_align':    train_dict['profile_align'],
-            'peak_smooth':      train_dict['peak_smooth'],
             'iri_struct':       train_dict['iri_struct'],
-            'giro_hmf2':        train_dict['giro_hmf2'],
-            'giro_nmf2':        train_dict['giro_nmf2'],
-            'giro_ne_val':      train_dict['giro_ne_val'],
-            'giro_argmax':      train_dict['giro_argmax'],
-            'val_giro_peak_mae': val_peak_mae if val_peak_mae < float('inf') else None,
             'tau_kp':           tau_kp_val,
             'tau_solar':        tau_solar_val,
             'gate_mean':        gate_mean_v,
-            'l_shape':          train_dict.get('l_shape', 0.0),
             'K_FY_mean':        train_dict.get('K_FY_mean', 0.0),
-            'K_vert_mean':      train_dict.get('K_vert_mean', 0.0),
+            'K_COSMIC_mean':    train_dict.get('K_COSMIC_mean', 0.0),
             'b_mean':           train_dict.get('b_mean', 0.0),
             'r_fy_mean':        train_dict.get('r_fy_mean', 0.0),
-            # run28 NeuralETKFLayer
             'inflation':        train_dict.get('inflation', 0.0),
-            'member_w_max':    train_dict.get('member_w_max', 0.0),
+            'member_w_max':     train_dict.get('member_w_max', 0.0),
         })
 
         if scheduler:
             scheduler.step()
 
-        # 双域早停：Ne MSE（+ COSMIC，run64 val_combined）+ GIRO 峰值指标各自独立计数
         _val_combined = val_metrics.get('val_combined', val_loss)  # run64: FY + w_cosmic*COSMIC
         if _val_combined < best_val_ne:
             best_val_ne          = _val_combined
@@ -1372,14 +970,7 @@ def train_fsia(config=None):
         else:
             ne_patience_counter += 1
 
-        if val_peak_mae < best_val_peak:
-            best_val_peak          = val_peak_mae
-            peak_patience_counter  = 0
-        else:
-            peak_patience_counter += 1
-
-        print(f"  [早停] ne_pat={ne_patience_counter}/{config.get('ne_patience', 4)}"
-              f"  peak_pat={peak_patience_counter}/{config.get('peak_patience', 4)}")
+        print(f"  [早停] ne_pat={ne_patience_counter}/{config.get('ne_patience', 4)}")
 
         plot_training_curves(
             history,
@@ -1392,19 +983,18 @@ def train_fsia(config=None):
 
         _atomic_torch_save({
             'checkpoint_type': 'fsia_training_state',
-            'format_version': 1,
+            'format_version': 2,
             'completed_epochs': epoch + 1,
             'target_epochs': int(config['epochs']),
             'uncertainty_warmup_epochs': int(warmup),
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
+            'optimizer_param_names': _optimizer_parameter_names(model),
             'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
             'scaler_state_dict': scaler.state_dict() if scaler else None,
             'best_val_ne': best_val_ne,
-            'best_val_peak': best_val_peak,
             'best_epoch': best_epoch,
             'ne_patience_counter': ne_patience_counter,
-            'peak_patience_counter': peak_patience_counter,
             'history': history,
             'rng_state': {
                 'numpy': np.random.get_state(),
@@ -1415,15 +1005,13 @@ def train_fsia(config=None):
         }, last_state_ckpt)
         print(f'  [断点] 完整训练状态已保存: {last_state_ckpt}')
 
-        if config.get('early_stopping'):
-            if (ne_patience_counter >= config.get('ne_patience', 4) or
-                    peak_patience_counter >= config.get('peak_patience', 4)):
-                print(f'\n[早停] 触发 ne_pat={ne_patience_counter}'
-                      f' peak_pat={peak_patience_counter}')
-                break
+        if (config.get('early_stopping')
+                and ne_patience_counter >= config.get('ne_patience', 4)):
+            print(f'\n[早停] 触发 ne_pat={ne_patience_counter}')
+            break
 
     print(f"\n{'='*60}")
-    print(f"训练完成！最佳 Ne MSE: {best_val_ne:.6f}  最佳峰值 MAE: {best_val_peak:.4f}")
+    print(f"训练完成！最佳联合验证 MSE: {best_val_ne:.6f}")
 
     hist_path = os.path.join(config['save_dir'], 'fsia_training_history.json')
     with open(hist_path, 'w') as f:
@@ -1433,8 +1021,6 @@ def train_fsia(config=None):
     summary = {
         'best_epoch': best_epoch,
         'best_val_combined': best_val_ne,
-        'best_val_peak_mae': (best_val_peak
-                              if best_val_peak < float('inf') else None),
         'best_epoch_metrics': next(
             (row for row in history if row.get('epoch') == best_epoch), None),
         'fy_profiles': len(fy_nb_index.prof_starts),

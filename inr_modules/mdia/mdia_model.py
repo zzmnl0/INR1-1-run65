@@ -41,7 +41,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 
-from .siren_layers import ModulatedSIRENNet, SIRENNet
+from .siren_layers import ModulatedSIRENNet
 from .ewma_sw_encoder import DualScaleSWEncoder
 
 # ======================== 数值常数 ========================

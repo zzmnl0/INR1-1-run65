@@ -74,50 +74,6 @@ def _merge_to_grid(alt_segs, ts_segs, data_segs_dict, tol=1.0):
     return alt_1d, ts_1d, grids
 
 
-def _resample_to_std_alt(alt_1d, grids_dict, step_km=5.0):
-    """
-    将任意非均匀高度轴上的多个 2D 网格，插值到统一步长的标准高度轴。
-    对每个时刻独立插值，只在有效数据范围内插值（不外推）。
-
-    Args:
-        alt_1d:      [n_alt] float32 — 原始高度轴 (km)，可非均匀
-        grids_dict:  {name: [n_alt, n_time] ndarray} — 待重采样的数组
-        step_km:     标准高度步长 (km)，默认 5 km
-
-    Returns:
-        alt_new:     [n_alt_new] float32
-        new_grids:   {name: [n_alt_new, n_time] ndarray}  dtype 与输入一致
-    """
-    a_min = float(np.ceil(alt_1d.min() / step_km) * step_km)
-    a_max = float(np.floor(alt_1d.max() / step_km) * step_km)
-    if a_max <= a_min:
-        return alt_1d, grids_dict
-
-    alt_new  = np.arange(a_min, a_max + step_km * 0.1, step_km, dtype=np.float32)
-    n_time   = next(iter(grids_dict.values())).shape[1]
-    new_grids = {
-        k: np.full((len(alt_new), n_time), np.nan, dtype=v.dtype)
-        for k, v in grids_dict.items()
-    }
-
-    for t in range(n_time):
-        # 以 ne（第一个键）确定哪些高度行有效
-        ne_key = list(grids_dict.keys())[0]
-        valid = np.isfinite(grids_dict[ne_key][:, t])
-        if valid.sum() < 2:
-            continue
-        av = alt_1d[valid].astype(np.float64)
-        for k, grid in grids_dict.items():
-            fp = grid[:, t][valid].astype(np.float64)
-            # np.interp 不外推，超出范围返回端点值；手动置 NaN
-            interped = np.interp(alt_new.astype(np.float64), av, fp)
-            out_of_range = (alt_new < av[0]) | (alt_new > av[-1])
-            interped[out_of_range] = np.nan
-            new_grids[k][:, t] = interped.astype(grid.dtype)
-
-    return alt_new, new_grids
-
-
 def _build_record(date_str, station, lat, lon,
                   alt_1d, ts_1d, ne_2d, dne_2d,
                   cgm_lat_2d=None, cgm_lon_2d=None,

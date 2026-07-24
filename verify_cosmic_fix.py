@@ -75,8 +75,7 @@ def main():
         cfg["sw_path"], cfg["start_date_str"], cfg["total_hours"],
         cfg["seq_len"], device)
     peak_manager = IRIPeakManager(
-        cfg["iri_hmf2_path"], cfg["iri_nmf2_path"],
-        cfg["total_hours"], device)
+        cfg["iri_hmf2_path"], cfg["iri_nmf2_path"], device)
     sw_seq = sw_manager.get_drivers_sequence(coords[:, 3])
     iri_peak = peak_manager.get_iri_peak(coords)
     model = load_model(cfg, device)
@@ -109,7 +108,6 @@ def main():
 
     params = list(model.cosmic_obs_encoder.parameters()) + [
         model.kalman_layer.H_COSMIC_w,
-        *model.kalman_layer.R_COSMIC_net.parameters(),
         model.kalman_layer.log_r_ref_COSMIC,
     ]
     optimizer = torch.optim.Adam(params, lr=1e-2)

@@ -82,7 +82,7 @@ def plot_vertical_slice_lt(
         model, sw_manager, device,
         global_times,
         lon_sector,
-        save_dir, config,
+        save_dir,
         model_name='FSIA-INR',
         n_lat=181,
         n_alt=77,
@@ -173,7 +173,7 @@ def plot_vertical_slice_lt(
         ne_lin    = (10.0 ** result['ne_fused']).reshape(n_lat, n_alt)
         hmf2_line = _hmf2_from_ne(ne_lin, alt_grid)          # [n_lat] 廓线 argmax
 
-        # PeakHead 直接输出 hmF2（FSIA v3.0，km；无 iri_peak_manager 时为 NaN）
+        # IRI structural-reference hmF2 (km).
         _hmf2_pk_raw = result['hmf2_f2'].reshape(n_lat, n_alt)[:, 0]   # [n_lat]
         _has_pk = not np.all(np.isnan(_hmf2_pk_raw))
 
@@ -195,7 +195,7 @@ def plot_vertical_slice_lt(
                 alpha=0.85, label='hmF2 (profile)')
         if _has_pk:
             ax.plot(lat_grid, _hmf2_pk_raw, color='orange', lw=1.2, ls=':',
-                    alpha=0.80, label='hmF2 (PeakHead)')
+                    alpha=0.80, label='hmF2 (IRI reference)')
 
         # ---- 子图标题 ----
         ax.set_title(
@@ -321,7 +321,7 @@ def plot_lt_lat_map(
         model, sw_manager, device,
         target_day,
         lon_sector,
-        save_dir, config,
+        save_dir,
         model_name='FSIA-INR',
         n_lat=181,
         n_alt=77,
@@ -389,7 +389,7 @@ def plot_lt_lat_map(
         nmf2_grid[:, j] = np.max(ne_fsia, axis=1)
 
         # hmF2 来自最终模型输出 Ne_fused 廓线 argmax + 抛物线插值精化
-        # （不使用 PeakHead 中间产物 result['hmf2_f2']）
+        # (independent of the IRI reference in result['hmf2_f2'])
         hmf2_grid[:, j] = _hmf2_from_ne(ne_fsia, alt_grid)
 
         ne_iri  = (10.0 ** result['ne_bkg']).reshape(n_lat, n_alt)
@@ -542,7 +542,7 @@ if __name__ == '__main__':
             )
             print('[可视化] IRIPeakManager 已加载')
         except Exception as _e:
-            print(f'[可视化] IRIPeakManager 初始化失败（{_e}），PeakHead 使用中性后备值')
+            print(f'[可视化] IRIPeakManager 初始化失败（{_e}），使用中性峰值参考')
 
     # ---- 加载模型 ----
     if model_type == 'fsia':
@@ -559,49 +559,7 @@ if __name__ == '__main__':
         raise FileNotFoundError(f'检查点不存在: {ckpt_path}')
     _sd = torch.load(ckpt_path, map_location=device)
 
-    # ---- run27 兼容：检查点用 MultiHeadDiagonalKalmanLayer (n_heads>1)，
-    # 当前 FSIA_INR_Model 默认装配 NeuralETKFLayer。检测到 H_FY_w 为 3D
-    # ([H, d, d]) 时，先把 model.kalman_layer 替换为 MHDK 再 load。
-    # FSIA_INR_Model.forward 调用签名为 13 实参（含 alt_km, hmF2_det，run28 NeuralETKFLayer
-    # 专用），MHDK 只取前 11 个 → 用 *args/**kwargs 包一层吞掉多余参数。----
     if model_type == 'fsia':
-        _hfy = _sd.get('kalman_layer.H_FY_w', None)
-        if _hfy is not None and _hfy.dim() == 3:
-            from inr_modules.mdia.fsia_model import MultiHeadDiagonalKalmanLayer
-            _n_heads, _d_in_b, _d_model = _sd['kalman_layer.B_w1'].shape
-            _, _d_in_r, _ = _sd['kalman_layer.R_w1'].shape
-            _hidden = _sd['kalman_layer.B_w2'].shape[1]
-            _hg_hidden = _sd['kalman_layer.head_gate.0.bias'].shape[0]
-            print(f'[可视化] 检测到 MHDK 检查点：n_heads={_n_heads}, d={_d_model}, '
-                  f'b_in={_d_in_b}, r_in={_d_in_r}, hidden={_hidden}, head_gate_h={_hg_hidden}')
-
-            class _MHDKShim(MultiHeadDiagonalKalmanLayer):
-                """吞掉 FSIA_INR_Model 传给 NeuralETKFLayer 的额外 (alt_km, hmF2_det) 参数。"""
-                def forward(self, f_iri, h_obs_FY, h_res, h_sw,
-                            lat_n, cos_SZA, sin_doy, cos_doy, sin_I,
-                            alt_n, delta_alt_n, *extra, **kw):
-                    return super().forward(
-                        f_iri, h_obs_FY, h_res, h_sw,
-                        lat_n, cos_SZA, sin_doy, cos_doy, sin_I,
-                        alt_n, delta_alt_n,
-                    )
-
-                @torch.no_grad()
-                def compute_proxy_trust_iri(self, h_sw, lat_n, cos_SZA, sin_doy, cos_doy,
-                                            sin_I, alt_n, delta_alt_iri, *extra, **kw):
-                    return super().compute_proxy_trust_iri(
-                        h_sw, lat_n, cos_SZA, sin_doy, cos_doy, sin_I, alt_n, delta_alt_iri,
-                    )
-
-            model.kalman_layer = _MHDKShim(
-                d_model=_d_model,
-                b_net_in=_d_in_b,
-                r_fy_net_in=_d_in_r,
-                n_heads=_n_heads,
-                head_gate_hidden=_hg_hidden,
-                hidden=_hidden,
-            ).to(device)
-
         # ---- N-adaptive：检查点 N_members 可能与当前 model 不同（如 run56=8, run57=4）----
         _ckpt_P_w1 = _sd.get('kalman_layer.P_w1')
         if _ckpt_P_w1 is not None and _ckpt_P_w1.shape[0] != model.enkf_n_members:
@@ -619,24 +577,6 @@ if __name__ == '__main__':
                 n_rank_h   = _kl.n_rank_h,
             ).to(device)
             model.enkf_n_members = _ckpt_n
-
-        # ---- PeakHead spatial_dim-adaptive（run<58: 144D 用 h_spatial[64]，run58+: 90D）----
-        _ckpt_peak_w = _sd.get('peak_head.net.0.weight')
-        if _ckpt_peak_w is not None:
-            _ckpt_peak_indim = int(_ckpt_peak_w.shape[1])
-            _curr_peak_indim = model.peak_head.net[0].in_features
-            if _ckpt_peak_indim != _curr_peak_indim:
-                _ckpt_spatial = _ckpt_peak_indim - 64 - 2 - 14   # sw=64, iri=2, sh=14
-                print(f'[可视化] 检查点 PeakHead 输入 {_ckpt_peak_indim}D ≠ 当前 {_curr_peak_indim}D，'
-                      f'自适应重建 PeakHead(spatial_dim={_ckpt_spatial})')
-                from inr_modules.mdia.fsia_model import PeakHead as _PeakHead
-                _ph = model.peak_head
-                model.peak_head = _PeakHead(
-                    spatial_dim=_ckpt_spatial,
-                    sw_dim=64,
-                    hmf2_range=(_ph.lo_h, _ph.lo_h + _ph.span_h),
-                    nmf2_range=(_ph.lo_n, _ph.lo_n + _ph.span_n),
-                ).to(device)
 
     _missing, _unexpected = model.load_state_dict(_sd, strict=False)
     if _missing:
@@ -673,7 +613,6 @@ if __name__ == '__main__':
         global_times      = CONFIG['global_times'],
         lon_sector        = CONFIG['lon_sector'],
         save_dir          = save_dir_out,
-        config            = mdia_cfg,
         model_name        = CONFIG['model_name'],
         iri_peak_manager  = iri_peak_manager,
     )
@@ -686,7 +625,6 @@ if __name__ == '__main__':
         target_day        = 4,
         lon_sector        = CONFIG['lon_sector'],
         save_dir          = save_dir_out,
-        config            = mdia_cfg,
         model_name        = CONFIG['model_name'],
         iri_peak_manager  = iri_peak_manager,
     )

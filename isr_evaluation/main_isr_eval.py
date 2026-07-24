@@ -43,7 +43,7 @@ CONFIG = {
     'model_type': 'fsia',
 
     # ---- 检查点路径（None = 根据 model_type 自动推断）----
-    'checkpoint_path': r"D:\code11\IRI01\IRI03\INR1-1-run65\checkpoints_fsia\run65\best_fsia_model.pth",
+    'checkpoint_path': r"D:\code11\IRI01\IRI03\INR1-1-run65\checkpoints_fsia\run65-profile-fixed\best_fsia_model.pth",
 
     # ---- ISR 数据目录 ----
     # 每个目录下应包含 .hdf5 / .h5 文件（可多个文件，同站同月）
@@ -63,7 +63,7 @@ CONFIG = {
     'batch_size':      2048,    # 单次推理点数
 
     # ---- 输出目录 ----
-    'save_dir': os.path.join(_FSIA_DIR, r'isr_validation_outputs\run65-obs'),
+    'save_dir': os.path.join(_FSIA_DIR, r'isr_validation_outputs\run65-profile-fixed'),
 
     # ---- 是否处理各站点（可单独关闭）----
     'run_jicamarca':  True,
@@ -327,7 +327,7 @@ def _load_model_and_managers(config, device):
         device=device,
     )
 
-    # IRIPeakManager（FSIA v2.2）：提供 IRI 峰参数背景给 PeakHead
+    # IRI peak parameters provide the FSIA structural reference.
     iri_peak_manager = None
     fy_nb_index = None
     cosmic_nb_index = None
@@ -340,7 +340,6 @@ def _load_model_and_managers(config, device):
                 iri_peak_manager = IRIPeakManager(
                     hmf2_path=hmf2_path,
                     nmf2_path=nmf2_path,
-                    total_hours=cfg.get('total_hours', 720.0),
                     device=device,
                 )
                 print(f'[main] IRIPeakManager 加载完成')
@@ -373,8 +372,7 @@ def _process_station(station_name, day_records, model, sw_manager,
         dict — 该站点的汇总指标 report
     """
     from isr_evaluation.model_query import query_model_grid, extract_model_nmf2_hmf2
-    from isr_evaluation.metrics import (compute_pointwise_metrics,
-                                        extract_isr_nmf2_hmf2,
+    from isr_evaluation.metrics import (extract_isr_nmf2_hmf2,
                                         compute_nmf2_hmf2_metrics)
     from isr_evaluation.plots import (plot_time_altitude_comparison,
                                       plot_nmf2_scatter,
@@ -385,7 +383,7 @@ def _process_station(station_name, day_records, model, sw_manager,
     station_dir = os.path.join(save_dir, station_name)
     os.makedirs(station_dir, exist_ok=True)
 
-    from isr_evaluation.metrics import _valid_pair, compute_nmf2_hmf2_metrics
+    from isr_evaluation.metrics import _valid_pair
 
     # ---- 累积列表 ----
     # 逐点：分别存 obs/mdia/iri，三者用同一公共有效掩码对齐

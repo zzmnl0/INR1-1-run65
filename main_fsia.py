@@ -1,26 +1,4 @@
-"""
-FSIA-INR 主程序入口 — run22 (Neural Data Assimilation)
-
-Feature-Space Informed Assimilation INR
-特征空间信息同化隐式神经表示
-
-run22 改进要点（相对于 run18）：
-    1. CrossSourceAttention → DiagonalKalmanLayer（神经 DA，对角 Kalman 增益）
-    2. B_net(h_sw,lat,sin_lt,cos_lt,sin_I) → b[64]（背景误差协方差）
-    3. R_FY_net(alt_n,delta_alt_n,sin_lt,cos_lt) → r_fy[64]（观测误差协方差）
-    4. 移除 IRITrustNet（循环依赖）、LT-FiLM、lt_gate_modulation
-    5. L_shape = 1 - Pearson-r(Ne_fused, ne_bkg) — IRI 形态守恒约束
-
-运行方式：
-    cd FSIA_INR
-    python main_fsia.py
-
-检查点输出：./checkpoints_fsia/run22/best_fsia_model.pth
-可视化：    python plot_fsia.py
-
-数据路径（在 inr_modules/config_mdia.py 中修改）：
-    fy_path, iri_proxy_path, sw_path, giro_hmf2_path, giro_nmf2_path
-"""
+"""Train, resume, evaluate, and visualize the FSIA-INR model."""
 
 import argparse
 import contextlib
@@ -49,7 +27,6 @@ _RESUME_CKPT = str(_PROFILE_FIXED_DIR / 'best_fsia_model.pth')
 # 当前日志显示 Epoch 1 已完整保存，Epoch 2 仅运行到 batch 200，故从全局 Epoch 2 重跑。
 _RESUME_COMPLETED_EPOCHS = 1
 _RESUME_BEST_VAL = 0.146658
-_RESUME_BEST_PEAK = 0.6334
 
 
 class _Tee:
@@ -88,8 +65,12 @@ def _code_identity(root):
 
 
 def _write_run_manifest(config):
-    data_keys = [key for key, value in config.items()
-                 if key.endswith('_path') and value and os.path.isfile(value)]
+    data_keys = [
+        key for key in (
+            'fy_path', 'fy_profile_path', 'cosmic_path', 'iri_proxy_path',
+            'iri_hmf2_path', 'iri_nmf2_path', 'sw_path')
+        if config.get(key) and os.path.isfile(config[key])
+    ]
     manifest = {
         'created_utc': datetime.now(timezone.utc).isoformat(),
         'config': config,
@@ -147,7 +128,6 @@ def main(eval_only=False):
         resume_ckpt=None,
         resume_completed_epochs=None,
         resume_best_val=None,
-        resume_best_peak=None,
         resume_best_epoch=None,
         eval_only=False,
     )
@@ -163,27 +143,13 @@ def main(eval_only=False):
             resume_ckpt=resume_path,
             resume_completed_epochs=_RESUME_COMPLETED_EPOCHS,
             resume_best_val=_RESUME_BEST_VAL,
-            resume_best_peak=_RESUME_BEST_PEAK,
             resume_best_epoch=_RESUME_COMPLETED_EPOCHS,
         )
         print(f'\n[续训模式] 检查点: {resume_path}')
-    # run61 重构（基于 run60）：FY 邻域观测特征替代坐标 SIREN
-    #   核心缺陷修复：h_spatial（DualFreqSpatialNet）只编码坐标，不含 FY 观测值，
-    #     FY 损失将 h_spatial 推向 FY-optimal → 污染 PeakHead hmF2 估计
-    #   A. 新增 FYObsEncoder：K 个最近 FY 邻居（9D）→ CrossAttn → h_FY [B,64]
-    #      无覆盖时 h_FY=0 → ETKF innovation=0 → update=0 → IRI baseline（安全退化）
-    #   B. PeakHead 完全绕过：hmF2_fused=hmF2_IRI, NmF2_fused=NmF2_IRI（直接 passthrough）
-    #   C. 删除 DualFreqSpatialNet/AltitudeMultiScaleEmbedding/ResidualSIREN/MagFiLM 等
-    #   D. CRF proj_pre 192D→128D（f_iri+h_FY，去掉 h_res）
-    #   E. 关闭 GIRO 直接约束（w_giro_ne_val/argmax=0，调试阶段）
     # update_config_mdia(epochs=3, batch_size=512)  # 快速调试
 
     print_config_mdia()
-    print('\n[FSIA-INR] 配置覆盖:')
-    print(f'  save_dir    : {config["save_dir"]}')
-    print(f'  fsia_nhead  : {config["fsia_nhead"]}')
-    print(f'  fsia_nlayers: {config["fsia_nlayers"]}')
-    print(f'  fsia_dim_ff : {config["fsia_dim_ff"]}')
+    print(f'\n[FSIA-INR] save_dir: {config["save_dir"]}')
 
     # ==================== 路径检查 ====================
     required_paths = ['fy_path', 'fy_profile_path', 'iri_proxy_path', 'sw_path']
@@ -249,10 +215,10 @@ def main(eval_only=False):
 
     save_dir = config['save_dir']
     evaluate_and_save_report(
-        model, train_loader, val_loader, batch_processor, device, save_dir,
+        model, train_loader, val_loader, batch_processor, save_dir,
         iri_peak_manager=iri_peak_manager)
     evaluate_parity(
-        model, val_loader, batch_processor, device, save_dir,
+        model, val_loader, batch_processor, save_dir,
         iri_peak_manager=iri_peak_manager)
 
     # ==================== 可视化 ====================
@@ -269,13 +235,13 @@ def main(eval_only=False):
             plot_global_slice(
                 model, sw_manager, device,
                 target_day=vis_day, target_hour=vis_hour,
-                save_dir=save_dir, config=config,
+                save_dir=save_dir,
                 alt_levels=_alt_levels, model_name='FSIA-INR')
 
         plot_hmf2_nmf2_map(
             model, sw_manager, device,
             time_steps=[(vis_day, h) for h in _vis_hours],
-            save_dir=save_dir, config=config,
+            save_dir=save_dir,
             label=f'day{vis_day:02d}', model_name='FSIA-INR')
 
     # ---- Jicamarca EDP + ISR 真值（Sep 5, 05/10/15/20 UT）----

@@ -4,7 +4,7 @@ import torch
 from torch.utils.data import Dataset, Sampler, DataLoader
 import numpy as np
 import os
-from typing import List, Iterator, Tuple
+from typing import List, Iterator
 
 class FY3D_Dataset(Dataset):
     """

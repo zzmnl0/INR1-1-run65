@@ -34,7 +34,7 @@ def test_collect_predictions_passes_both_observation_sources():
             return pred, pred, pred, pred, {'ne_bkg': torch.zeros_like(pred)}
 
     pred, bkg, target = _collect_predictions(
-        Model(), [None], Processor(), 'cpu', PeakManager())
+        Model(), [None], Processor(), PeakManager())
     np.testing.assert_array_equal(pred, [1.0, 1.0])
     np.testing.assert_array_equal(bkg, [0.0, 0.0])
     np.testing.assert_array_equal(target, [1.0, 2.0])

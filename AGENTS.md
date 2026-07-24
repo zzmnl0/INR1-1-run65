@@ -35,7 +35,7 @@ No dedicated test framework or coverage threshold is currently configured. For n
 
 ## Commit & Pull Request Guidelines
 
-Git history is unavailable in this checkout, so use short imperative commits such as `Fix COSMIC neighbor masking`. Keep each commit single-purpose. Pull requests should describe the data flow affected, configuration changes, validation command and result, and any checkpoint compatibility impact. Include representative plots only when numerical or visualization behavior changes.
+Existing commits use short imperative subjects such as `Fix true-profile assimilation grouping`. Keep each commit single-purpose. Pull requests should describe the data flow affected, configuration changes, validation command and result, and any checkpoint compatibility impact. Include representative plots only when numerical or visualization behavior changes.
 
 ## Configuration & Data Safety
 

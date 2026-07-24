@@ -62,7 +62,7 @@ CONFIG = {
 # ─────────────────────────────────────────────
 
 
-def _resolve_paths(config, mdia_cfg):
+def _resolve_paths(config):
     """解析检查点路径和输出目录，填充 None 值。"""
     if config['checkpoint_path'] is None:
         config['checkpoint_path'] = os.path.join(
@@ -172,7 +172,7 @@ def main():
     from inr_modules.config_mdia import get_config_mdia
     mdia_cfg = get_config_mdia()
 
-    _resolve_paths(CONFIG, mdia_cfg)
+    _resolve_paths(CONFIG)
     os.makedirs(CONFIG['save_dir'], exist_ok=True)
 
     print(f'[plot] 检查点:   {CONFIG["checkpoint_path"]}')
@@ -207,7 +207,7 @@ def main():
                 plot_global_slice(
                     model, sw_manager, device,
                     target_day=vis_day, target_hour=vis_hour,
-                    save_dir=save_dir, config=mdia_cfg,
+                    save_dir=save_dir,
                     alt_levels=alt_levels, model_name=model_name,
                     iri_peak_manager=iri_peak_manager,
                 )
@@ -218,7 +218,7 @@ def main():
             plot_hmf2_nmf2_map(
                 model, sw_manager, device,
                 time_steps=[(vis_day, h) for h in vis_hours],
-                save_dir=save_dir, config=mdia_cfg,
+                save_dir=save_dir,
                 label=f'day{vis_day:02d}', model_name=model_name,
                 iri_peak_manager=iri_peak_manager,
             )

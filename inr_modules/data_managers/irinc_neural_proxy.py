@@ -1,9 +1,6 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import numpy as np
-from torch.utils.data import DataLoader, TensorDataset
-import tqdm
 import matplotlib.pyplot as plt
 import os
 
@@ -111,25 +108,6 @@ class IRINeuralProxy(nn.Module):
         for param in self.parameters():
             param.requires_grad = False
         self.eval()
-
-    def get_derivatives(self, coords):
-        """
-        Compute gradients of Ne w.r.t input coordinates.
-        """
-        if not coords.requires_grad:
-            coords.requires_grad = True
-            
-        output = self.forward(coords)
-        
-        grads = torch.autograd.grad(
-            outputs=output,
-            inputs=coords,
-            grad_outputs=torch.ones_like(output),
-            create_graph=True,
-            retain_graph=True
-        )[0]
-        
-        return output, grads
 
     def fit_to_grid(self, coords_tensor, values_tensor, epochs=100, batch_size=65536, lr=1e-3, device='cpu', 
                     patience=15, min_delta=1e-5):

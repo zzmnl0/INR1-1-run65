@@ -1,7 +1,7 @@
 """
 IRI-2020 预计算峰参数管理器
 
-提供 PeakHead 所需的 IRI 背景锚点（双通道）：
+提供 FSIA 结构参考所需的 IRI 峰参数（双通道）：
     [hmF2_IRI_km, NmF2_IRI_log10]
 
 数据格式（D:/IRI/data01/edp_peak_npy/readme.txt）：
@@ -44,13 +44,11 @@ class IRIPeakManager:
     _NMF2_CLIP_MIN  = 9.0
     _NMF2_CLIP_MAX  = 13.0
 
-    def __init__(self, hmf2_path: str, nmf2_path: str,
-                 total_hours: float = 720.0, device='cpu'):
+    def __init__(self, hmf2_path: str, nmf2_path: str, device='cpu'):
         """
         Args:
             hmf2_path:   IRI_hmF2_*.npy 路径
             nmf2_path:   IRI_NmF2_*.npy 路径（单位 m⁻³，自动转 log10）
-            total_hours: 训练窗口总时长（用于边界检查）
             device:      目标设备
         """
         if not os.path.exists(hmf2_path):

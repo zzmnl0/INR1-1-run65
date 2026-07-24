@@ -36,7 +36,7 @@ def query_model_grid(model, sw_manager, day_record, start_unix, device,
         start_unix:       训练起始 Unix 时间戳（由 start_date_str 解析）
         device:           torch.device
         batch_size:       推理分块大小
-        iri_peak_manager: IRIPeakManager 或 None（PeakHead 背景输入）
+        iri_peak_manager: IRIPeakManager or None (IRI structural reference)
         fy_nb_index:      FYNeighborhoodIndex 或 None
         cosmic_nb_index:  COSMICNeighborhoodIndex 或 None
 

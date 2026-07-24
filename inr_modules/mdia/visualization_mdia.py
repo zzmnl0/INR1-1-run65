@@ -78,7 +78,6 @@ def _infer_grid(model, coords_np, sw_seq_single, device, vis_batch=1024,
         dict:
             'ne_fused'   [N] — 最终预测
             'ne_bkg'     [N] — IRI 背景
-            'ne_chapman' [N] — NeQuick 廓线（MDIA-INR）/ 零占位（FSIA v2）
             'ne_delta'   [N] — log₁₀ 空间残差 = ne_fused − ne_bkg
             'hmf2_f2'    [N] — F2 峰高 (km)
     """
@@ -86,7 +85,6 @@ def _infer_grid(model, coords_np, sw_seq_single, device, vis_batch=1024,
     N = len(coords_np)
     ne_fused_buf  = np.empty(N, dtype=np.float32)
     ne_bkg_buf    = np.empty(N, dtype=np.float32)
-    ne_chap_buf   = np.empty(N, dtype=np.float32)
     ne_delta_buf  = np.empty(N, dtype=np.float32)
     hmf2_buf      = np.full(N, 300.0, dtype=np.float32)   # 默认 300 km
     nmf2_buf      = np.full(N, 11.5,  dtype=np.float32)   # 默认 11.5 log10
@@ -103,12 +101,11 @@ def _infer_grid(model, coords_np, sw_seq_single, device, vis_batch=1024,
             iri_peak = None
             if iri_peak_manager is not None:
                 iri_peak = iri_peak_manager.get_iri_peak(chunk)
-            Ne_fused, _, Ne_chapman, _, extras = model(chunk, sw_chunk,
-                                                       iri_peak=iri_peak)
+            Ne_fused, _, _, _, extras = model(
+                chunk, sw_chunk, iri_peak=iri_peak)
 
             ne_fused_buf[start:end] = Ne_fused.reshape(-1).cpu().numpy()
             ne_bkg_buf[start:end]   = extras['ne_bkg'].reshape(-1).cpu().numpy()
-            ne_chap_buf[start:end]  = Ne_chapman.reshape(-1).cpu().numpy()
             ne_delta_buf[start:end] = (Ne_fused - extras['ne_bkg']).reshape(-1).cpu().numpy()
             _cp   = extras.get('peak_params', {})
             _hmf2 = _cp.get('hmF2')
@@ -121,8 +118,7 @@ def _infer_grid(model, coords_np, sw_seq_single, device, vis_batch=1024,
     return {
         'ne_fused':   ne_fused_buf,
         'ne_bkg':     ne_bkg_buf,
-        'ne_chapman': ne_chap_buf,
-        'ne_delta':   ne_delta_buf,  # log₁₀ 空间残差（对 FSIA v2 有意义）
+        'ne_delta':   ne_delta_buf,
         'hmf2_f2':    hmf2_buf,
         'nmf2_f2':    nmf2_buf,   # log10 单位；plot 时用 10** 转换为 el/m³
     }
@@ -261,7 +257,7 @@ def _fmt_log_ticks(cb, bounds):
 # ======================== 全球纬经度切片 ========================
 
 def plot_global_slice(model, sw_manager, device, target_day, target_hour,
-                      save_dir, config, alt_levels=None, model_name='MDIA-INR',
+                      save_dir, alt_levels=None, model_name='MDIA-INR',
                       iri_peak_manager=None):
     """
     绘制全球纬经度切片图（多高度层）。
@@ -270,7 +266,7 @@ def plot_global_slice(model, sw_manager, device, target_day, target_hour,
         Col 1: IRI Background
         Col 2: {model_name} Ne_fused
         Col 3: Residual = Ne_fused - IRI
-        Col 4: Ne_chapman
+        Col 4: log₁₀-space residual
 
     Args:
         model:        MDIA_INR_Model 或 FSIA_INR_Model
@@ -279,7 +275,6 @@ def plot_global_slice(model, sw_manager, device, target_day, target_hour,
         target_day:   天数（相对于 start_date，0 索引，0 = 第 1 天）
         target_hour:  整点小时（0–23）
         save_dir:     保存目录
-        config:       配置字典（用于坐标范围）
         alt_levels:   高度列表 (km)，默认 [200, 300, 400]
         model_name:   模型名称，用于标题和标签（默认 'MDIA-INR'）
     """
@@ -504,7 +499,7 @@ def plot_altitude_profile(model, sw_manager, device, lat, lon, time_hour,
 
 # ======================== hmF2 + NmF2 全时间步合并图 ========================
 
-def plot_hmf2_nmf2_map(model, sw_manager, device, time_steps, save_dir, config,
+def plot_hmf2_nmf2_map(model, sw_manager, device, time_steps, save_dir,
                        label=None, model_name='MDIA-INR', iri_peak_manager=None):
     """
     绘制 hmF2 + NmF2 全球分布合并图（所有时间步纵向排列，每行左右两列）。

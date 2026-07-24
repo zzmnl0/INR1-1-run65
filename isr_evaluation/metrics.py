@@ -37,61 +37,6 @@ def _ccc(obs, pred):
     return float(2.0 * cov / denom)
 
 
-def compute_pointwise_metrics(isr_ne_m3_2d, model_log10_2d):
-    """
-    逐点计算统计指标。
-
-    Args:
-        isr_ne_m3_2d:   [n_alt, n_time] float32 — ISR 线性电子密度 (m⁻³)
-        model_log10_2d: [n_alt, n_time] float32 — 模型 log10(Ne)，NaN=缺测
-
-    Returns:
-        dict with keys:
-            'n'       : int   — 有效对数
-            'rmse'    : float — RMSE in log10 units
-            'mae'     : float — MAE in log10 units
-            'r'       : float — Pearson R in log10 space
-            'bias'    : float — Mean(pred - obs) in log10 units
-    """
-    # ISR 转 log10，过滤非正值
-    with np.errstate(divide='ignore', invalid='ignore'):
-        isr_log10 = np.where(isr_ne_m3_2d > 0,
-                             np.log10(isr_ne_m3_2d.astype(np.float64)),
-                             np.nan).astype(np.float32)
-
-    mask = _valid_pair(isr_log10, model_log10_2d)
-    n = int(mask.sum())
-
-    if n < 2:
-        return {'n': n, 'rmse': np.nan, 'mae': np.nan, 'r': np.nan,
-                'ccc': np.nan, 'bias': np.nan}
-
-    obs  = isr_log10[mask].astype(np.float64)
-    pred = model_log10_2d[mask].astype(np.float64)
-
-    diff = pred - obs
-
-    # RMSE in log10
-    rmse = float(np.sqrt(np.mean(diff ** 2)))
-
-    # Bias in log10
-    bias = float(np.mean(diff))
-
-    # MAE in log10
-    mae = float(np.mean(np.abs(diff)))
-
-    # Pearson R in log10
-    if obs.std() < 1e-12 or pred.std() < 1e-12:
-        r = np.nan
-    else:
-        r = float(np.corrcoef(obs, pred)[0, 1])
-
-    # CCC in log10
-    ccc = _ccc(obs, pred)
-
-    return {'n': n, 'rmse': rmse, 'mae': mae, 'r': r, 'ccc': ccc, 'bias': bias}
-
-
 # ==================== NmF2 / hmF2 ====================
 
 def extract_isr_nmf2_hmf2(ne_2d, alt_1d, f2_alt_min=150.0):

@@ -26,7 +26,6 @@ GIRO/DIDBase 电离层测高仪数据预处理脚本
 """
 
 import os
-import sys
 import glob
 import argparse
 import numpy as np

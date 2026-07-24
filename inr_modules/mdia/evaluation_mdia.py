@@ -19,7 +19,7 @@ from scipy.stats import pearsonr
 
 # ======================== 内部辅助 ========================
 
-def _collect_predictions(model, dataloader, batch_processor, device,
+def _collect_predictions(model, dataloader, batch_processor,
                          iri_peak_manager=None):
     """
     遍历 DataLoader，收集完整预测结果。
@@ -68,7 +68,7 @@ def _calc_metrics(y_true, y_pred):
 # ======================== 评估报告 ========================
 
 def evaluate_and_save_report(model, train_loader, val_loader,
-                              batch_processor, device, save_dir,
+                              batch_processor, save_dir,
                               iri_peak_manager=None):
     """
     计算训练集 / 验证集评估指标，保存文本报告。
@@ -81,7 +81,6 @@ def evaluate_and_save_report(model, train_loader, val_loader,
         train_loader:    训练集 DataLoader
         val_loader:      验证集 DataLoader
         batch_processor: SlidingWindowBatchProcessor
-        device:          计算设备
         save_dir:        报告保存目录
 
     Returns:
@@ -91,11 +90,11 @@ def evaluate_and_save_report(model, train_loader, val_loader,
 
     print('[评估] 收集训练集预测...')
     t_pred, t_bkg, t_true = _collect_predictions(
-        model, train_loader, batch_processor, device, iri_peak_manager)
+        model, train_loader, batch_processor, iri_peak_manager)
 
     print('[评估] 收集验证集预测...')
     v_pred, v_bkg, v_true = _collect_predictions(
-        model, val_loader, batch_processor, device, iri_peak_manager)
+        model, val_loader, batch_processor, iri_peak_manager)
 
     t_inr = _calc_metrics(t_true, t_pred)
     t_iri = _calc_metrics(t_true, t_bkg)
@@ -117,7 +116,7 @@ def evaluate_and_save_report(model, train_loader, val_loader,
         '=' * W,
         '   FSIA-INR 电离层重构评估报告',
         '=' * W,
-        f'模型     : FSIA-INR (CrossSourceAttention + PeakHead + 可学习 EWMA)',
+        f'模型     : FSIA-INR (FY/COSMIC local-profile assimilation)',
         f'训练样本 : {len(t_true):>10,}',
         f'验证样本 : {len(v_true):>10,}',
         f'EWMA τ_kp    = {tau_kp:.2f} h',
@@ -151,7 +150,7 @@ def evaluate_and_save_report(model, train_loader, val_loader,
 
 # ======================== Parity 图 ========================
 
-def evaluate_parity(model, val_loader, batch_processor, device, save_dir,
+def evaluate_parity(model, val_loader, batch_processor, save_dir,
                     iri_peak_manager=None):
     """
     绘制双面板 Parity 图（验证集）。
@@ -169,14 +168,13 @@ def evaluate_parity(model, val_loader, batch_processor, device, save_dir,
         model:           训练好的 FSIA_INR_Model
         val_loader:      验证集 DataLoader
         batch_processor: SlidingWindowBatchProcessor
-        device:          计算设备
         save_dir:        保存目录
     """
     os.makedirs(save_dir, exist_ok=True)
 
     print('[评估] 生成 Parity 图（验证集）...')
     pred, bkg, true = _collect_predictions(
-        model, val_loader, batch_processor, device, iri_peak_manager)
+        model, val_loader, batch_processor, iri_peak_manager)
     print(f'  验证样本数: {len(true):,}')
 
     m_iri = _calc_metrics(true, bkg)

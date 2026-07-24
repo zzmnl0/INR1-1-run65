@@ -12,7 +12,6 @@ import numpy as np
 import matplotlib
 import matplotlib.font_manager as _fm
 import matplotlib.pyplot as plt
-import matplotlib.colors as mcolors
 
 
 def _setup_font():
@@ -31,51 +30,6 @@ def _setup_font():
 
 
 _setup_font()
-
-
-# ==================== 显示分箱（仅用于绘图，不修改原始数据）====================
-
-def _bin_for_display(alt_1d, *grids, bin_km=5.0):
-    """
-    将多个 [n_alt, n_time] 数组按高度分箱，合并到均匀显示网格，消除横条纹。
-
-    每个显示格点取箱内所有原始行的 nanmean。
-    NaN-only 的箱仍为 NaN（不填充竖向缺测）。
-    原始 day_record 中的数据不受影响，仅用于 pcolormesh 渲染。
-
-    Args:
-        alt_1d:  [n_alt] float32 — 原始高度轴 (km)
-        *grids:  任意个 [n_alt, n_time] 数组
-        bin_km:  显示分箱步长 (km)，默认 5 km
-
-    Returns:
-        disp_alt:   [n_bins] float32 — 显示高度轴（箱中心）
-        disp_grids: tuple of [n_bins, n_time] — 各 grid 的显示版本
-    """
-    import warnings
-    a_min = float(np.floor(alt_1d.min() / bin_km) * bin_km)
-    a_max = float(np.ceil(alt_1d.max()  / bin_km) * bin_km)
-    edges = np.arange(a_min, a_max + bin_km * 0.1, bin_km, dtype=np.float64)
-    if len(edges) < 2:
-        return alt_1d, grids
-
-    disp_alt  = ((edges[:-1] + edges[1:]) / 2).astype(np.float32)
-    n_bins    = len(disp_alt)
-    n_time    = grids[0].shape[1]
-    disp_list = [np.full((n_bins, n_time), np.nan, dtype=np.float32)
-                 for _ in grids]
-
-    for i in range(n_bins):
-        in_bin = (alt_1d >= edges[i]) & (alt_1d < edges[i + 1])
-        if not in_bin.any():
-            continue
-        for g_idx, g in enumerate(grids):
-            chunk = g[in_bin, :].astype(np.float64)
-            with warnings.catch_warnings():
-                warnings.simplefilter('ignore', RuntimeWarning)
-                disp_list[g_idx][i, :] = np.nanmean(chunk, axis=0).astype(np.float32)
-
-    return disp_alt, tuple(disp_list)
 
 
 # ==================== 颜色范围辅助 ====================

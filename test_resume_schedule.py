@@ -5,7 +5,12 @@ from pathlib import Path
 
 import torch
 
-from inr_modules.mdia.train_fsia import _atomic_torch_save, _remaining_phase_counts
+from inr_modules.mdia.train_fsia import (
+    _atomic_torch_save,
+    _load_optimizer_state,
+    _optimizer_parameter_names,
+    _remaining_phase_counts,
+)
 
 
 def test_resume_phase_counts():
@@ -45,6 +50,27 @@ def test_training_state_round_trip():
     assert restored_scheduler.last_epoch == scheduler.last_epoch
 
 
+def test_optimizer_state_drops_newly_frozen_parameter():
+    model = torch.nn.Sequential(torch.nn.Linear(2, 2), torch.nn.Linear(2, 1))
+    old_names = _optimizer_parameter_names(model)
+    old_optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
+    model(torch.ones(1, 2)).sum().backward()
+    old_optimizer.step()
+
+    model[0].requires_grad_(False)
+    new_optimizer = torch.optim.AdamW(
+        [param for param in model.parameters() if param.requires_grad],
+        lr=3e-4,
+    )
+    migrated = _load_optimizer_state(
+        new_optimizer, old_optimizer.state_dict(), model, old_names)
+
+    assert migrated
+    assert len(new_optimizer.param_groups[0]['params']) == 2
+    assert len(new_optimizer.state_dict()['state']) == 2
+
+
 if __name__ == '__main__':
     test_resume_phase_counts()
     test_training_state_round_trip()
+    test_optimizer_state_drops_newly_frozen_parameter()
