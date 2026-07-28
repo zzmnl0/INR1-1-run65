@@ -3,6 +3,50 @@
 import torch
 
 
+def query_observation_payload(index, coords, device, exclude_profile_ids=None):
+    if index is None:
+        return None
+    payload = index.query_observation_batch(
+        coords.detach().cpu().numpy(),
+        exclude_profile_ids=exclude_profile_ids)
+    return {
+        key: torch.from_numpy(value).to(device, non_blocking=True)
+        for key, value in payload.items()
+    }
+
+
+def attach_observation_background(
+        payload, model, sw_manager, iri_peak_manager=None, chunk_size=4096):
+    """Evaluate the exact shared Background at every valid observation point."""
+    if payload is None:
+        return None
+    valid = payload['valid_mask']
+    background = payload['value'].new_zeros(payload['value'].shape)
+    flat_coords = payload['coords'][valid]
+    valid_indices = valid.flatten().nonzero(as_tuple=True)[0]
+    flat_background = background.flatten()
+    if len(flat_coords):
+        unique_coords, inverse = torch.unique(
+            flat_coords, dim=0, sorted=False, return_inverse=True)
+    else:
+        unique_coords, inverse = flat_coords, torch.empty(
+            0, device=flat_coords.device, dtype=torch.long)
+    unique_background = background.new_empty(len(unique_coords))
+    with torch.no_grad():
+        for start in range(0, len(unique_coords), chunk_size):
+            coords = unique_coords[start:start + chunk_size]
+            sw_seq = sw_manager.get_drivers_sequence(coords[:, 3])
+            peak = (iri_peak_manager.get_iri_peak(coords)
+                    if iri_peak_manager is not None else None)
+            encoded = model.encode_background(coords, sw_seq, iri_peak=peak)
+            unique_background[start:start + len(coords)] = (
+                encoded['ne_bkg'].flatten())
+    flat_background[valid_indices] = unique_background[inverse]
+    result = dict(payload)
+    result['background'] = background
+    return result
+
+
 class SlidingWindowBatchProcessor:
     """
     滑动窗口批次处理器
@@ -12,25 +56,20 @@ class SlidingWindowBatchProcessor:
     """
 
     def __init__(self, sw_manager, device='cuda',
-                 fy_nb_index=None, cosmic_nb_index=None,
-                 fy_precomputed=None, csm_precomputed=None):
+                 fy_nb_index=None, cosmic_nb_index=None):
         """
         Args:
             sw_manager:       SpaceWeatherManager 实例
             device:           计算设备
             fy_nb_index:      FYNeighborhoodIndex 实例（run61，可选）
             cosmic_nb_index:  COSMICNeighborhoodIndex 实例（run64，可选）
-            fy_precomputed:   precompute_all 返回的 FY 邻域预计算数据（run65 P2，可选）
-            csm_precomputed:  precompute_all 返回的 COSMIC 邻域预计算数据（run65 P2，可选）
         """
         self.sw_manager = sw_manager
         self.device = device
         self.fy_nb_index = fy_nb_index          # run61: FY 邻域索引
         self.cosmic_nb_index = cosmic_nb_index  # run64: COSMIC 邻域索引
-        self.fy_precomputed  = fy_precomputed   # run65 P2: 预计算 FY 邻域数据
-        self.csm_precomputed = csm_precomputed  # run65 P2: 预计算 COSMIC 邻域数据
 
-    def process_batch(self, batch_item):
+    def process_batch(self, batch_item, query_neighbors=True):
         """
         Convert one FY batch and query the local FY/COSMIC profile indexes.
 
@@ -55,11 +94,16 @@ class SlidingWindowBatchProcessor:
         """
         # 解包元组（run65 P2：DataLoader 现返回 (data, ds_idx)）
         if isinstance(batch_item, (tuple, list)):
-            batch_data, batch_ds_idx = batch_item
-            batch_ds_idx_np = batch_ds_idx.numpy()
+            if len(batch_item) == 3:
+                batch_data, _, profile_ids = batch_item
+            else:
+                batch_data, _ = batch_item
+                profile_ids = torch.arange(len(batch_data), dtype=torch.long)
+            profile_ids_np = profile_ids.cpu().numpy()
         else:
             batch_data = batch_item
-            batch_ds_idx_np = None
+            profile_ids = torch.arange(len(batch_data), dtype=torch.long)
+            profile_ids_np = None
 
         batch_data = batch_data.to(self.device, non_blocking=True)
 
@@ -79,43 +123,20 @@ class SlidingWindowBatchProcessor:
         sw_seq = self.sw_manager.get_drivers_sequence(coords[:, 3])  # [Batch, Seq, 2]
 
         # run61/run65: FY 邻域观测查询（P2：优先用预计算数据）
-        if self.fy_nb_index is not None:
-            coords_np = coords.detach().cpu().numpy()
-            if (self.fy_precomputed is not None and batch_ds_idx_np is not None):
-                # P2: O(1) 索引，仅重算 Δalt delta 特征
-                nb_feats_np, has_obs_np = self.fy_nb_index.query_batch_precomputed(
-                    batch_ds_idx_np, coords_np[:, 2],
-                    self.fy_precomputed,
-                    coords_np[:, 0], coords_np[:, 1], coords_np[:, 3],
-                )
-            else:
-                # fallback: 在线剖面搜索
-                nb_feats_np, has_obs_np = self.fy_nb_index.query_batch_np(coords_np)
-            neighbors_feats = torch.from_numpy(nb_feats_np).to(self.device)
-            has_obs = torch.from_numpy(has_obs_np).to(self.device)
+        if query_neighbors and self.fy_nb_index is not None:
+            observations_fy = query_observation_payload(
+                self.fy_nb_index, coords, self.device,
+                exclude_profile_ids=profile_ids_np)
         else:
-            neighbors_feats = None
-            has_obs = None
+            observations_fy = None
 
         # run64/run65: COSMIC-2 邻域观测查询（P2：优先用预计算数据）
-        if self.cosmic_nb_index is not None:
-            coords_np_csm = coords.detach().cpu().numpy()
-            if (self.csm_precomputed is not None and batch_ds_idx_np is not None):
-                # P2: O(1) 索引
-                nb_csm_np, has_csm_np = self.cosmic_nb_index.query_batch_precomputed(
-                    batch_ds_idx_np, coords_np_csm[:, 2],
-                    self.csm_precomputed,
-                    coords_np_csm[:, 0], coords_np_csm[:, 1], coords_np_csm[:, 3],
-                )
-            else:
-                # fallback: 在线剖面搜索
-                nb_csm_np, has_csm_np = self.cosmic_nb_index.query_batch_np(coords_np_csm)
-            neighbors_feats_cosmic = torch.from_numpy(nb_csm_np).to(self.device)
-            has_obs_cosmic = torch.from_numpy(has_csm_np).to(self.device)
+        if query_neighbors and self.cosmic_nb_index is not None:
+            observations_cosmic = query_observation_payload(
+                self.cosmic_nb_index, coords, self.device)
         else:
-            neighbors_feats_cosmic = None
-            has_obs_cosmic = None
+            observations_cosmic = None
 
         return (coords, target_ne, sw_seq,
-                neighbors_feats, has_obs,
-                neighbors_feats_cosmic, has_obs_cosmic)
+                observations_fy, observations_cosmic,
+                profile_ids.to(self.device, non_blocking=True))

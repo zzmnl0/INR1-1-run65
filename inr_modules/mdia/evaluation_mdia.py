@@ -2,9 +2,8 @@
 FSIA-INR 评估模块
 
 功能：
-  1. evaluate_and_save_report  — 训练集 / 验证集指标报告（RMSE / R² / Pearson R / Bias）
-                                  对比两个输出：IRI Background | FSIA-INR fused
-  2. evaluate_parity           — 双面板 Parity 图（散点 + 密度），IRI | FSIA-INR
+  1. evaluate_and_save_report  — 对比 Raw IRI / FNDA Background / FSIA-INR M11
+  2. evaluate_parity           — 三面板 Parity 图（散点 + 密度）
 """
 
 import os
@@ -15,6 +14,7 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 from matplotlib.colors import LogNorm
 from sklearn.metrics import r2_score, mean_squared_error
 from scipy.stats import pearsonr
+from .sliding_dataset import attach_observation_background
 
 
 # ======================== 内部辅助 ========================
@@ -25,34 +25,39 @@ def _collect_predictions(model, dataloader, batch_processor,
     遍历 DataLoader，收集完整预测结果。
 
     Returns:
-        pred   [N] — Ne_fused 预测值
-        bkg    [N] — IRI 背景值
+        pred   [N] — M11 Analysis
+        bkg    [N] — FNDA Background (M00)
+        iri    [N] — Raw IRI
         target [N] — 观测值
     """
     model.eval()
-    preds, bkgs, targets = [], [], []
+    preds, bkgs, iris, targets = [], [], [], []
 
     with torch.no_grad():
         for batch_data in dataloader:
             (coords, target_ne, sw_seq,
-             neighbors_feats, has_obs,
-             neighbors_feats_cosmic,
-             has_obs_cosmic) = batch_processor.process_batch(batch_data)
+             observations_fy, observations_cosmic,
+             _) = batch_processor.process_batch(batch_data)
             iri_peak = (iri_peak_manager.get_iri_peak(coords)
                         if iri_peak_manager is not None else None)
+            observations_fy = attach_observation_background(
+                observations_fy, model, batch_processor.sw_manager,
+                iri_peak_manager)
+            observations_cosmic = attach_observation_background(
+                observations_cosmic, model, batch_processor.sw_manager,
+                iri_peak_manager)
             Ne_fused, _, _, _, extras = model(
                 coords, sw_seq,
                 iri_peak=iri_peak,
-                neighbors_feats=neighbors_feats,
-                has_obs=has_obs,
-                neighbors_feats_cosmic=neighbors_feats_cosmic,
-                has_obs_cosmic=has_obs_cosmic)
+                observations_fy=observations_fy,
+                observations_cosmic=observations_cosmic)
 
             preds.append(Ne_fused.reshape(-1).cpu().numpy())
             bkgs.append(extras['ne_bkg'].reshape(-1).cpu().numpy())
+            iris.append(extras['ne_iri'].reshape(-1).cpu().numpy())
             targets.append(target_ne.reshape(-1).cpu().numpy())
 
-    return (np.concatenate(preds), np.concatenate(bkgs),
+    return (np.concatenate(preds), np.concatenate(bkgs), np.concatenate(iris),
             np.concatenate(targets))
 
 
@@ -73,7 +78,7 @@ def evaluate_and_save_report(model, train_loader, val_loader,
     """
     计算训练集 / 验证集评估指标，保存文本报告。
 
-    报告包含两行对比：IRI Background | FSIA-INR fused
+    报告包含 Raw IRI、FNDA Background 和 FSIA-INR M11 三行。
     对应四列指标：RMSE / R² / Pearson R / Bias
 
     Args:
@@ -89,17 +94,19 @@ def evaluate_and_save_report(model, train_loader, val_loader,
     os.makedirs(save_dir, exist_ok=True)
 
     print('[评估] 收集训练集预测...')
-    t_pred, t_bkg, t_true = _collect_predictions(
+    t_pred, t_bkg, t_iri, t_true = _collect_predictions(
         model, train_loader, batch_processor, iri_peak_manager)
 
     print('[评估] 收集验证集预测...')
-    v_pred, v_bkg, v_true = _collect_predictions(
+    v_pred, v_bkg, v_iri, v_true = _collect_predictions(
         model, val_loader, batch_processor, iri_peak_manager)
 
     t_inr = _calc_metrics(t_true, t_pred)
-    t_iri = _calc_metrics(t_true, t_bkg)
+    t_background = _calc_metrics(t_true, t_bkg)
+    t_iri_metrics = _calc_metrics(t_true, t_iri)
     v_inr = _calc_metrics(v_true, v_pred)
-    v_iri = _calc_metrics(v_true, v_bkg)
+    v_background = _calc_metrics(v_true, v_bkg)
+    v_iri_metrics = _calc_metrics(v_true, v_iri)
 
     tau_kp    = model.sw_encoder.tau_kp.item()
     tau_solar = model.sw_encoder.tau_solar.item()
@@ -125,12 +132,14 @@ def evaluate_and_save_report(model, train_loader, val_loader,
         f'  {"分量":<22}  {"RMSE":>9}  {"R²":>9}  {"R":>9}  {"Bias":>9}',
         '-' * W,
         '[训练集]',
-        row('IRI Background',   t_iri),
-        row('FSIA-INR fused',   t_inr),
+        row('Raw IRI',          t_iri_metrics),
+        row('FNDA Background',  t_background),
+        row('FSIA-INR M11',     t_inr),
         '-' * W,
         '[验证集]',
-        row('IRI Background',   v_iri),
-        row('FSIA-INR fused',   v_inr),
+        row('Raw IRI',          v_iri_metrics),
+        row('FNDA Background',  v_background),
+        row('FSIA-INR M11',     v_inr),
         '=' * W,
     ]
 
@@ -143,8 +152,10 @@ def evaluate_and_save_report(model, train_loader, val_loader,
     print(f'\n报告已保存: {report_path}')
 
     return {
-        'train': {'inr': t_inr, 'iri': t_iri},
-        'val':   {'inr': v_inr, 'iri': v_iri},
+        'train': {'analysis': t_inr, 'background': t_background,
+                  'iri': t_iri_metrics},
+        'val':   {'analysis': v_inr, 'background': v_background,
+                  'iri': v_iri_metrics},
     }
 
 
@@ -153,12 +164,12 @@ def evaluate_and_save_report(model, train_loader, val_loader,
 def evaluate_parity(model, val_loader, batch_processor, save_dir,
                     iri_peak_manager=None):
     """
-    绘制双面板 Parity 图（验证集）。
+    绘制三面板 Parity 图（验证集）。
 
     布局：
         上行 — 散点图  (alpha=0.05, rasterized)
         下行 — 密度图  (hist2d + LogNorm)
-        两列 — IRI Background | FSIA-INR fused
+        三列 — Raw IRI | FNDA Background | FSIA-INR M11
 
     保存文件：
         parity_scatter_fsia.png
@@ -173,27 +184,31 @@ def evaluate_parity(model, val_loader, batch_processor, save_dir,
     os.makedirs(save_dir, exist_ok=True)
 
     print('[评估] 生成 Parity 图（验证集）...')
-    pred, bkg, true = _collect_predictions(
+    pred, bkg, iri, true = _collect_predictions(
         model, val_loader, batch_processor, iri_peak_manager)
     print(f'  验证样本数: {len(true):,}')
 
-    m_iri = _calc_metrics(true, bkg)
+    m_iri = _calc_metrics(true, iri)
+    m_bkg = _calc_metrics(true, bkg)
     m_inr = _calc_metrics(true, pred)
 
-    ax_min = np.floor(min(true.min(), bkg.min(), pred.min()) * 10) / 10
-    ax_max = np.ceil( max(true.max(), bkg.max(), pred.max()) * 10) / 10
+    ax_min = np.floor(min(true.min(), iri.min(), bkg.min(), pred.min()) * 10) / 10
+    ax_max = np.ceil(max(true.max(), iri.max(), bkg.max(), pred.max()) * 10) / 10
 
     def _make_title(label, m):
         return (f'{label} vs 观测\n'
                 f'RMSE={m[0]:.4f}  R²={m[1]:.4f}  R={m[2]:.4f}')
 
-    panel_labels = ['IRI Background', 'FSIA-INR fused']
-    ys     = [bkg,         pred]
-    colors = ['steelblue', 'darkorange']
-    titles = [_make_title(l, m) for l, m in zip(panel_labels, [m_iri, m_inr])]
+    panel_labels = ['Raw IRI', 'FNDA Background', 'FSIA-INR M11']
+    ys = [iri, bkg, pred]
+    colors = ['steelblue', 'gray', 'darkorange']
+    titles = [
+        _make_title(label, metrics)
+        for label, metrics in zip(panel_labels, [m_iri, m_bkg, m_inr])
+    ]
 
     # ---- 散点图 ----
-    fig1, axes = plt.subplots(1, 2, figsize=(13, 6), dpi=150)
+    fig1, axes = plt.subplots(1, 3, figsize=(19, 6), dpi=150)
     for ax, y, title, color in zip(axes, ys, titles, colors):
         ax.scatter(true, y, alpha=0.05, s=0.5, c=color, rasterized=True)
         ax.plot([ax_min, ax_max], [ax_min, ax_max], 'r--', lw=1.5, alpha=0.8, label='1:1')
@@ -214,7 +229,7 @@ def evaluate_parity(model, val_loader, batch_processor, save_dir,
 
     # ---- 密度图 ----
     plot_range = [[ax_min, ax_max], [ax_min, ax_max]]
-    fig2, axes = plt.subplots(1, 2, figsize=(14, 6), dpi=150)
+    fig2, axes = plt.subplots(1, 3, figsize=(20, 6), dpi=150)
     for ax, y, title in zip(axes, ys, titles):
         h = ax.hist2d(true, y, bins=300, range=plot_range,
                       cmap='turbo', norm=LogNorm(), cmin=1)

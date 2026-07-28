@@ -21,12 +21,17 @@ from inr_modules.mdia.evaluation_mdia import evaluate_and_save_report, evaluate_
 from inr_modules.mdia.visualization_mdia import (plot_global_slice, plot_altitude_profile,
                                                   plot_hmf2_nmf2_map)
 
-_PROFILE_FIXED_DIR = Path(current_dir) / 'checkpoints_fsia' / 'run65-profile-fixed'
+_DEFAULT_RUN_NAME = 'run66-qc2-latent-etkf-density-H-global-localized'
+_DEFAULT_BACKGROUND_SEED = (
+    Path(current_dir) / 'checkpoints_fsia' / 'run66-etkf-loss'
+    / 'best_background_model.pth')
 _OLD_RUN65_CKPT = Path(current_dir) / 'checkpoints_fsia' / 'run65' / 'best_fsia_model.pth'
-_RESUME_CKPT = str(_PROFILE_FIXED_DIR / 'best_fsia_model.pth')
-# 当前日志显示 Epoch 1 已完整保存，Epoch 2 仅运行到 batch 200，故从全局 Epoch 2 重跑。
-_RESUME_COMPLETED_EPOCHS = 1
-_RESUME_BEST_VAL = 0.146658
+
+
+def _run_directory(run_name):
+    if Path(run_name).name != run_name or run_name in ('', '.', '..'):
+        raise ValueError('run_name must be one directory name')
+    return Path(current_dir) / 'checkpoints_fsia' / run_name
 
 
 class _Tee:
@@ -67,7 +72,9 @@ def _code_identity(root):
 def _write_run_manifest(config):
     data_keys = [
         key for key in (
-            'fy_path', 'fy_profile_path', 'cosmic_path', 'iri_proxy_path',
+            'fy_path', 'fy_profile_path', 'fy_profile_index_path',
+            'fy_qc_report_path', 'cosmic_path', 'cosmic_profile_index_path',
+            'cosmic_qc_report_path', 'iri_proxy_path',
             'iri_hmf2_path', 'iri_nmf2_path', 'sw_path')
         if config.get(key) and os.path.isfile(config[key])
     ]
@@ -115,46 +122,73 @@ def _strict_load_finite(model, checkpoint, device):
         raise ValueError(f'checkpoint contains non-finite parameters: {bad[:5]}')
 
 
-def main(eval_only=False):
-    # ==================== 断点续训接口 ====================
-    # config['epochs'] 始终表示目标总轮数；旧 raw state_dict 必须显式给出已完成轮数。
-
+def main(eval_only=False, resume_ckpt=None, run_name=_DEFAULT_RUN_NAME,
+         r_mode='global', background_seed=None, qc_data=True,
+         distance_localization=True):
     # ==================== 加载配置 ====================
     config = get_config_mdia()
+    run_dir = _run_directory(run_name)
+    background_seed = (
+        str(_DEFAULT_BACKGROUND_SEED)
+        if background_seed is None else background_seed)
 
     # FSIA 检查点目录（每次新训练实验递增 run 编号）
     update_config_mdia(
-        save_dir=str(_PROFILE_FIXED_DIR),
+        save_dir=str(run_dir),
         resume_ckpt=None,
-        resume_completed_epochs=None,
-        resume_best_val=None,
-        resume_best_epoch=None,
         eval_only=False,
+        r_mode=r_mode,
+        use_distance_localization=distance_localization,
+        background_seed_ckpt=background_seed,
     )
+    if qc_data:
+        update_config_mdia(
+            fy_path=r'D:\FYsatellite\EDP_data\fy_202409_qc_v2.npy',
+            fy_profile_path=None,
+            fy_profile_index_path=(
+                r'D:\FYsatellite\EDP_data\fy_202409_qc_v2_index.npz'),
+            fy_qc_report_path=(
+                r'D:\FYsatellite\EDP_data\fy_202409_qc_v2_report.json'),
+            cosmic_path=(
+                r'D:\cosmic2\cosmic245-274-September'
+                r'\cosmic_september_2024_qc.npy'),
+            cosmic_profile_index_path=(
+                r'D:\cosmic2\cosmic245-274-September'
+                r'\cosmic_september_2024_qc_index.npz'),
+            cosmic_qc_report_path=(
+                r'D:\cosmic2\cosmic245-274-September'
+                r'\cosmic_september_2024_qc_report.json'),
+        )
 
     if eval_only:
         update_config_mdia(
             eval_only=True,
             resume_ckpt=os.path.join(config['save_dir'], 'best_fsia_model.pth'))
-    elif _RESUME_CKPT is not None:
-        last_state = _PROFILE_FIXED_DIR / 'last_training_state.pth'
-        resume_path = str(last_state) if last_state.exists() else _RESUME_CKPT
-        update_config_mdia(
-            resume_ckpt=resume_path,
-            resume_completed_epochs=_RESUME_COMPLETED_EPOCHS,
-            resume_best_val=_RESUME_BEST_VAL,
-            resume_best_epoch=_RESUME_COMPLETED_EPOCHS,
-        )
+    elif resume_ckpt is not None:
+        last_state = run_dir / 'last_training_state.pth'
+        resume_path = (
+            str(last_state) if resume_ckpt == 'auto' and last_state.exists()
+            else resume_ckpt)
+        if resume_path == 'auto':
+            raise FileNotFoundError(f'未找到自动续训状态: {last_state}')
+        update_config_mdia(resume_ckpt=resume_path)
         print(f'\n[续训模式] 检查点: {resume_path}')
-    # update_config_mdia(epochs=3, batch_size=512)  # 快速调试
+    # update_config_mdia(background_epochs=1, analysis_epochs=1, batch_size=512)
 
     print_config_mdia()
     print(f'\n[FSIA-INR] save_dir: {config["save_dir"]}')
 
     # ==================== 路径检查 ====================
-    required_paths = ['fy_path', 'fy_profile_path', 'iri_proxy_path', 'sw_path']
-    if config.get('w_cosmic', 0.0) > 0:
+    required_paths = ['fy_path', 'iri_proxy_path', 'sw_path']
+    required_paths.append(
+        'fy_profile_index_path'
+        if config.get('fy_profile_index_path') else 'fy_profile_path')
+    if config.get('use_cosmic', True):
         required_paths.append('cosmic_path')
+        if config.get('cosmic_profile_index_path'):
+            required_paths.append('cosmic_profile_index_path')
+    if qc_data:
+        required_paths.extend(['fy_qc_report_path', 'cosmic_qc_report_path'])
     missing = [k for k in required_paths
                if not config.get(k) or not os.path.exists(config[k])]
     if missing:
@@ -162,6 +196,20 @@ def main(eval_only=False):
         for k in missing:
             print(f'  {k}: {config[k]}')
         return
+    if qc_data:
+        for source, data_key, index_key, report_key in (
+                ('FY', 'fy_path', 'fy_profile_index_path', 'fy_qc_report_path'),
+                ('COSMIC', 'cosmic_path', 'cosmic_profile_index_path',
+                 'cosmic_qc_report_path')):
+            with open(config[report_key], encoding='utf-8') as stream:
+                report = json.load(stream)
+            if not report.get('audit', {}).get('passed'):
+                raise RuntimeError(f'{source} QC未通过审计门禁，拒绝启动训练')
+            expected = report.get('outputs', {})
+            for key, output_name in ((data_key, 'npy'), (index_key, 'npz')):
+                actual = _file_identity(config[key])['sha256']
+                if actual != expected.get(output_name, {}).get('sha256'):
+                    raise RuntimeError(f'{source} QC {output_name} SHA256不匹配')
 
     best_ckpt = Path(config['save_dir']) / 'best_fsia_model.pth'
     if best_ckpt.resolve() == _OLD_RUN65_CKPT.resolve():
@@ -236,13 +284,19 @@ def main(eval_only=False):
                 model, sw_manager, device,
                 target_day=vis_day, target_hour=vis_hour,
                 save_dir=save_dir,
-                alt_levels=_alt_levels, model_name='FSIA-INR')
+                alt_levels=_alt_levels, model_name='FSIA-INR',
+                iri_peak_manager=iri_peak_manager,
+                fy_nb_index=batch_processor.fy_nb_index,
+                cosmic_nb_index=batch_processor.cosmic_nb_index)
 
         plot_hmf2_nmf2_map(
             model, sw_manager, device,
             time_steps=[(vis_day, h) for h in _vis_hours],
             save_dir=save_dir,
-            label=f'day{vis_day:02d}', model_name='FSIA-INR')
+            label=f'day{vis_day:02d}', model_name='FSIA-INR',
+            iri_peak_manager=iri_peak_manager,
+            fy_nb_index=batch_processor.fy_nb_index,
+            cosmic_nb_index=batch_processor.cosmic_nb_index)
 
     # ---- Jicamarca EDP + ISR 真值（Sep 5, 05/10/15/20 UT）----
     _jic_record = None
@@ -272,18 +326,44 @@ def main(eval_only=False):
         time_hours=[4 * 24.0 + h for h in [5, 10, 15, 20]],
         save_dir=save_dir, config=config,
         model_name='FSIA-INR',
-        isr_record=_jic_record)
+        iri_peak_manager=iri_peak_manager,
+        isr_record=_jic_record,
+        fy_nb_index=batch_processor.fy_nb_index,
+        cosmic_nb_index=batch_processor.cosmic_nb_index)
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--eval-only', action='store_true',
                         help='load best checkpoint and skip training')
+    parser.add_argument(
+        '--resume', nargs='?', const='auto', default=None,
+        help='resume last_training_state.pth, or resume from an explicit path')
+    parser.add_argument('--run-name', default=_DEFAULT_RUN_NAME,
+                        help='output directory name under checkpoints_fsia')
+    parser.add_argument('--r-mode', choices=('global', 'stratified'),
+                        default='global')
+    parser.add_argument('--distance-localization', action='store_true',
+                        help='inflate fixed R using deterministic local distance')
+    parser.add_argument('--background-seed', default=None,
+                        help='shared Background checkpoint for Analysis-only runs')
+    parser.add_argument(
+        '--qc-data', action='store_true',
+        help='use audited FY/COSMIC NPY+NPZ QC products')
     args = parser.parse_args()
-    _PROFILE_FIXED_DIR.mkdir(parents=True, exist_ok=True)
-    log_path = _PROFILE_FIXED_DIR / 'training.log'
-    log_mode = 'a' if args.eval_only or _RESUME_CKPT else 'x'
+    run_dir = _run_directory(args.run_name)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    log_path = run_dir / 'training.log'
+    log_mode = 'a' if args.eval_only or args.resume else 'x'
     with log_path.open(log_mode, encoding='utf-8', buffering=1) as log_stream:
         with contextlib.redirect_stdout(_Tee(sys.stdout, log_stream)), \
                 contextlib.redirect_stderr(_Tee(sys.stderr, log_stream)):
-            main(eval_only=args.eval_only)
+            main(
+                eval_only=args.eval_only,
+                resume_ckpt=args.resume,
+                run_name=args.run_name,
+                r_mode=args.r_mode,
+                background_seed=args.background_seed,
+                qc_data=args.qc_data,
+                distance_localization=args.distance_localization,
+            )

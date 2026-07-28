@@ -1,57 +1,38 @@
-"""Active physics losses for FSIA-INR training."""
+"""Loss primitives for the run66 two-stage FNDA training."""
 
 import torch
+import torch.nn.functional as F
 
 
-_ALT_RANGE_HALF = 190.0
+def profile_huber_loss(pred, target, profile_ids, delta=0.2):
+    """Average Huber loss within each profile, then equally across profiles."""
+    point_loss = F.huber_loss(pred, target, reduction='none', delta=delta).flatten()
+    _, inverse = torch.unique(profile_ids.flatten(), sorted=False, return_inverse=True)
+    sums = torch.zeros(inverse.max().item() + 1, device=pred.device, dtype=pred.dtype)
+    counts = torch.zeros_like(sums)
+    sums.scatter_add_(0, inverse, point_loss)
+    counts.scatter_add_(0, inverse, torch.ones_like(point_loss))
+    return (sums / counts.clamp_min(1.0)).mean()
 
 
-def profile_peak_alignment_loss(ne_at_peak, coords_peak):
-    """Penalize a non-zero vertical derivative at the IRI F2 peak."""
-    if not coords_peak.requires_grad:
-        return torch.zeros((), device=ne_at_peak.device)
-
-    with torch.amp.autocast('cuda', enabled=False):
-        try:
-            grad = torch.autograd.grad(
-                ne_at_peak.float().sum(),
-                coords_peak.float(),
-                create_graph=True,
-                retain_graph=True,
-            )[0]
-        except RuntimeError:
-            return torch.zeros((), device=ne_at_peak.device)
-
-    return (grad[:, 2] * _ALT_RANGE_HALF).square().mean()
-
-
-def combined_mdia_physics_loss(
-    pred_ne,
-    ne_bkg,
-    coords,
-    w_bkg_low=0.25,
-    w_bkg_high=0.02,
-    w_bkg_transition=250.0,
-    w_bkg_sharpness=25.0,
-    trust_iri=None,
-):
-    """Height-adaptive IRI background anchoring used by the current model."""
-    alt_km = coords[:, 2:3]
-    high_alt = torch.sigmoid(
-        (alt_km - w_bkg_transition) / w_bkg_sharpness)
-    weight = w_bkg_high * high_alt + w_bkg_low * (1.0 - high_alt)
-    if trust_iri is not None:
-        weight = weight * trust_iri.detach().view(-1, 1)
-
-    loss = (weight * (pred_ne - ne_bkg.detach()).square()).mean()
-    return loss, {'bkg': loss.item(), 'physics_total': loss.item()}
+def second_difference_loss(values, beta=0.05):
+    """Robust curvature penalty for [N, 3] samples ordered minus/center/plus."""
+    second = values[:, 0] - 2.0 * values[:, 1] + values[:, 2]
+    return F.smooth_l1_loss(second, torch.zeros_like(second), beta=beta)
 
 
 if __name__ == '__main__':
-    coords = torch.tensor(
-        [[0.0, 0.0, 150.0, 0.0], [0.0, 0.0, 400.0, 0.0]])
-    pred = torch.tensor([[11.0], [11.0]], requires_grad=True)
-    bkg = torch.zeros_like(pred)
-    loss, values = combined_mdia_physics_loss(pred, bkg, coords)
-    assert loss.requires_grad
-    assert values['bkg'] == values['physics_total']
+    pred = torch.tensor([[0.0], [1.0], [3.0], [3.0]], requires_grad=True)
+    target = torch.zeros_like(pred)
+    pids = torch.tensor([1, 1, 2, 2])
+    base = profile_huber_loss(pred, target, pids)
+    duplicated = profile_huber_loss(
+        torch.cat([pred[:2], pred[:2], pred[2:]]),
+        torch.zeros(6, 1),
+        torch.tensor([1, 1, 1, 1, 2, 2]),
+    )
+    assert torch.allclose(base, duplicated)
+    linear = torch.tensor([[0.0, 1.0, 2.0]])
+    spike = torch.tensor([[0.0, 2.0, 0.0]])
+    assert second_difference_loss(linear) == 0
+    assert second_difference_loss(spike) > 0

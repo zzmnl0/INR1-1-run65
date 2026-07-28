@@ -491,10 +491,10 @@ if __name__ == '__main__':
         'model_type':      'fsia',
 
         # 检查点路径（None = 自动推断 {save_dir}/best_fsia_model.pth）
-        'checkpoint_path': r"D:\code11\IRI01\IRI03\INR1-1\FSIA_INR18\checkpoints_fsia\run58\best_fsia_model.pth",
+        'checkpoint_path': None,
 
         # 输出目录（None = {save_dir}/plots/lt_slice/）
-        'save_dir_out':    r'D:\code11\IRI01\IRI03\INR1-1\FSIA_INR18\checkpoints_fsia\run58\plots\lt_slice10',
+        'save_dir_out':    None,
 
         # 经度扇区（°）
         'lon_sector':     -165.0,
@@ -557,7 +557,7 @@ if __name__ == '__main__':
     ckpt_path = CONFIG['checkpoint_path'] or _def_ckpt
     if not os.path.exists(ckpt_path):
         raise FileNotFoundError(f'检查点不存在: {ckpt_path}')
-    _sd = torch.load(ckpt_path, map_location=device)
+    _sd = torch.load(ckpt_path, map_location=device, weights_only=True)
 
     if model_type == 'fsia':
         # ---- N-adaptive：检查点 N_members 可能与当前 model 不同（如 run56=8, run57=4）----
@@ -571,24 +571,24 @@ if __name__ == '__main__':
             model.kalman_layer = NeuralETKFLayer(
                 d_model    = _kl.d_model,
                 b_net_in   = _kl.b_net_in,
-                r_fy_net_in= _kl.r_fy_net_in,
                 n_members  = _ckpt_n,
                 pert_hidden= _kl.pert_hidden,
-                n_rank_h   = _kl.n_rank_h,
+                r_fy       = _kl.r_fy.item(),
+                r_cosmic   = _kl.r_cosmic.item(),
             ).to(device)
             model.enkf_n_members = _ckpt_n
 
-    _missing, _unexpected = model.load_state_dict(_sd, strict=False)
-    if _missing:
-        print(f'[可视化] ⚠ 检查点缺失 {len(_missing)} 个键（新架构组件使用初始值）:')
-        for _k in _missing[:10]:
-            print(f'         - {_k}')
-        if len(_missing) > 10:
-            print(f'         ... 共 {len(_missing)} 个')
-    if _unexpected:
-        print(f'[可视化] ⚠ 检查点多余 {len(_unexpected)} 个键（已忽略）:')
-        for _k in _unexpected[:5]:
-            print(f'         - {_k}')
+    if model_type == 'fsia':
+        model.load_state_dict(_sd, strict=True)
+        if not all(torch.isfinite(value).all() for value in _sd.values()
+                   if torch.is_tensor(value)):
+            raise ValueError('FSIA checkpoint contains non-finite values')
+    else:
+        _missing, _unexpected = model.load_state_dict(_sd, strict=False)
+        if _missing:
+            print(f'[可视化] 检查点缺失 {len(_missing)} 个键')
+        if _unexpected:
+            print(f'[可视化] 检查点多余 {len(_unexpected)} 个键')
     model.eval()
     print(f'[可视化] 已加载: {ckpt_path}')
 

@@ -45,11 +45,8 @@ sys.path.insert(0, current_dir)
 sys.path.insert(0, os.path.join(current_dir, 'inr_modules'))
 
 # =====================================================================
-# 用户配置（与 main_fsia.py 的 save_dir 保持一致）
+# 运行目录由 config_mdia.py 的 save_dir 统一控制。
 # =====================================================================
-_SAVE_DIR  = r'D:\code11\IRI01\IRI03\INR1-1\FSIA_INR18\checkpoints_fsia\run65'
-_CKPT_PATH = os.path.join(_SAVE_DIR, 'best_fsia_model.pth')
-
 # 每批处理的 GIRO 站点数（每批 = N_STA × 47 次模型前向）
 _N_STA_BATCH = 8
 
@@ -100,11 +97,23 @@ def _metrics(y_true: np.ndarray, y_pred: np.ndarray):
 def evaluate_giro_peak(config=None):
     from inr_modules.config_mdia import get_config_mdia
     from inr_modules.mdia.fsia_model import FSIA_INR_Model
+    from inr_modules.mdia.sliding_dataset import attach_observation_background
     from inr_modules.data_managers.iri_peak_manager import IRIPeakManager
     from inr_modules.data_managers.space_weather_manager import SpaceWeatherManager
     from inr_modules.data_managers.FY_dataloader import (
         FYNeighborhoodIndex, COSMICNeighborhoodIndex,
     )
+
+    def prepare_observations(index, cached, model, device):
+        if index is None or cached is None:
+            return None
+        payload = {
+            key: torch.from_numpy(value).to(device)
+            for key, value in index.observation_payload_from_cached(
+                cached).items()
+        }
+        return attach_observation_background(
+            payload, model, sw_manager, iri_peak_manager)
 
     if config is None:
         config = get_config_mdia()
@@ -154,10 +163,14 @@ def evaluate_giro_peak(config=None):
 
     print('[评估] 加载模型...')
     model = FSIA_INR_Model(iri_proxy=iri_proxy, config=config).to(device)
-    ckpt  = torch.load(_CKPT_PATH, map_location=device)
-    model.load_state_dict(ckpt)
+    checkpoint_path = os.path.join(config['save_dir'], 'best_fsia_model.pth')
+    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=True)
+    model.load_state_dict(ckpt, strict=True)
+    if not all(torch.isfinite(value).all() for value in ckpt.values()
+               if torch.is_tensor(value)):
+        raise ValueError('FSIA checkpoint contains non-finite values')
     model.eval()
-    print(f'  checkpoint : {_CKPT_PATH}')
+    print(f'  checkpoint : {checkpoint_path}')
 
     # ----------------------------------------------------------------
     # 加载 GIRO 真值
@@ -180,7 +193,7 @@ def evaluate_giro_peak(config=None):
         -_ALT_FINE_HALF, _ALT_FINE_HALF + 1, 1.0, dtype=np.float32)  # [21]
     n_f = len(fine_offsets)
 
-    save_dir = os.path.join(_SAVE_DIR, 'giro_peak_eval')
+    save_dir = os.path.join(config['save_dir'], 'giro_peak_eval')
     os.makedirs(save_dir, exist_ok=True)
 
     # ----------------------------------------------------------------
@@ -240,17 +253,10 @@ def evaluate_giro_peak(config=None):
             cached_fy_c = _expand_cache(cached_fy_sta, n_c)       # [Ns*n_c, ...]
             alts_q_c    = np.tile(alts_coarse, Ns)                 # [Ns*n_c]
 
-            feats_fy_c, hobs_fy_c = fy_nb.featurize_with_cached(cached_fy_c, alts_q_c)
-
             if cached_csm_sta is not None:
                 cached_csm_c = _expand_cache(cached_csm_sta, n_c)
-                feats_csm_c, hobs_csm_c = cosmic_nb.featurize_with_cached(
-                    cached_csm_c, alts_q_c)
-                nb_feats_csm_c  = torch.from_numpy(feats_csm_c).to(device)
-                has_obs_csm_c   = torch.from_numpy(hobs_csm_c).to(device)
             else:
-                nb_feats_csm_c = None
-                has_obs_csm_c  = None
+                cached_csm_c = None
 
             coords_c_np = np.stack([
                 np.repeat(lats,  n_c),
@@ -262,17 +268,17 @@ def evaluate_giro_peak(config=None):
             coords_c_t  = torch.from_numpy(coords_c_np).to(device)
             sw_seq_c    = sw_seq_sta.repeat_interleave(n_c, dim=0)         # [Ns*n_c, seq, 2]
             iri_peak_c  = iri_peak_sta_t.repeat_interleave(n_c, dim=0)    # [Ns*n_c, 2]
-            nb_feats_c  = torch.from_numpy(feats_fy_c).to(device)
-            has_obs_c   = torch.from_numpy(hobs_fy_c).to(device)
+            observations_fy_c = prepare_observations(
+                fy_nb, cached_fy_c, model, device)
+            observations_csm_c = prepare_observations(
+                cosmic_nb, cached_csm_c, model, device)
 
             with torch.no_grad():
                 Ne_c, _, _, _, _ = model(
                     coords_c_t, sw_seq_c,
                     iri_peak=iri_peak_c,
-                    neighbors_feats=nb_feats_c,
-                    has_obs=has_obs_c,
-                    neighbors_feats_cosmic=nb_feats_csm_c,
-                    has_obs_cosmic=has_obs_csm_c,
+                    observations_fy=observations_fy_c,
+                    observations_cosmic=observations_csm_c,
                 )                                                  # [Ns*n_c, 1]
 
             Ne_c_np      = Ne_c.cpu().numpy().reshape(Ns, n_c)    # [Ns, 26]
@@ -289,17 +295,10 @@ def evaluate_giro_peak(config=None):
             alts_q_f = fine_alts.ravel()                           # [Ns*n_f]
 
             cached_fy_f = _expand_cache(cached_fy_sta, n_f)
-            feats_fy_f, hobs_fy_f = fy_nb.featurize_with_cached(cached_fy_f, alts_q_f)
-
             if cached_csm_sta is not None:
                 cached_csm_f = _expand_cache(cached_csm_sta, n_f)
-                feats_csm_f, hobs_csm_f = cosmic_nb.featurize_with_cached(
-                    cached_csm_f, alts_q_f)
-                nb_feats_csm_f  = torch.from_numpy(feats_csm_f).to(device)
-                has_obs_csm_f   = torch.from_numpy(hobs_csm_f).to(device)
             else:
-                nb_feats_csm_f = None
-                has_obs_csm_f  = None
+                cached_csm_f = None
 
             coords_f_np = np.stack([
                 np.repeat(lats,  n_f),
@@ -311,17 +310,17 @@ def evaluate_giro_peak(config=None):
             coords_f_t  = torch.from_numpy(coords_f_np).to(device)
             sw_seq_f    = sw_seq_sta.repeat_interleave(n_f, dim=0)
             iri_peak_f  = iri_peak_sta_t.repeat_interleave(n_f, dim=0)
-            nb_feats_f  = torch.from_numpy(feats_fy_f).to(device)
-            has_obs_f   = torch.from_numpy(hobs_fy_f).to(device)
+            observations_fy_f = prepare_observations(
+                fy_nb, cached_fy_f, model, device)
+            observations_csm_f = prepare_observations(
+                cosmic_nb, cached_csm_f, model, device)
 
             with torch.no_grad():
                 Ne_f, _, _, _, _ = model(
                     coords_f_t, sw_seq_f,
                     iri_peak=iri_peak_f,
-                    neighbors_feats=nb_feats_f,
-                    has_obs=has_obs_f,
-                    neighbors_feats_cosmic=nb_feats_csm_f,
-                    has_obs_cosmic=has_obs_csm_f,
+                    observations_fy=observations_fy_f,
+                    observations_cosmic=observations_csm_f,
                 )                                                  # [Ns*n_f, 1]
 
             Ne_f_np    = Ne_f.cpu().numpy().reshape(Ns, n_f)      # [Ns, 21]
@@ -374,9 +373,9 @@ def evaluate_giro_peak(config=None):
     cosmic_tag = f'COSMIC={os.path.basename(cosmic_path)}' if cosmic_nb is not None else 'COSMIC=off'
     lines = [
         '=' * W,
-        '   FSIA-INR × GIRO 峰参数评估报告（run65）',
+        '   FSIA-INR × GIRO 峰参数评估报告（run66）',
         '=' * W,
-        f'  Checkpoint  : {_CKPT_PATH}',
+        f'  Checkpoint  : {checkpoint_path}',
         f'  {cosmic_tag}',
         f'  hmF2 有效样本: {ok_h.sum():,} / {len(hmF2_true):,}',
         f'  NmF2 有效样本: {ok_n.sum():,} / {len(NmF2_true):,}',

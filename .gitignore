@@ -4,6 +4,7 @@ __pycache__/
 # Models and generated validation/training outputs
 checkpoints/
 checkpoints_fsia/
+isr_validation_outputs/
 *.pth
 *.pt
 *.npy

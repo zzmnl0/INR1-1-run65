@@ -2,9 +2,9 @@
 FSIA-INR 可视化模块
 
 功能：
-  1. plot_global_slice      — 全球纬经度切片图（多高度层，4 列：IRI | FSIA | 残差 ΔNe el/m³ | ΔNe log₁₀）
-  2. plot_altitude_profile  — 指定位置垂直 EDP 廓线（Ne_fused / ΔNe / IRI）
-  3. plot_hmf2_nmf2_map     — hmF2 + NmF2 全球分布图（按日分画布，左右两列，离散色条）
+  1. plot_global_slice      — Raw IRI / Background / M10 / M01 / M11 / increment
+  2. plot_altitude_profile  — 指定位置的五模式 EDP 廓线
+  3. plot_hmf2_nmf2_map     — 从最终 M11 廓线提取 hmF2 / NmF2
 """
 
 import os
@@ -13,6 +13,10 @@ import numpy as np
 import torch
 import matplotlib
 import matplotlib.pyplot as plt
+from .sliding_dataset import (
+    attach_observation_background,
+    query_observation_payload,
+)
 import matplotlib.colors as mcolors
 
 # 中文字体配置（Windows：微软雅黑/黑体；Linux/Mac：回退 DejaVu Sans）
@@ -62,8 +66,10 @@ def _extract_isr_profile(isr_record, rel_hour, tol_sec=1800):
 
 # ======================== 内部辅助 ========================
 
-def _infer_grid(model, coords_np, sw_seq_single, device, vis_batch=1024,
-                iri_peak_manager=None):
+def _infer_grid(model, coords_np, sw_seq_single, device, sw_manager,
+                vis_batch=1024,
+                iri_peak_manager=None, fy_nb_index=None,
+                cosmic_nb_index=None, include_single_source=True):
     """
     在大网格上分批推理，返回各分量 numpy 数组。
 
@@ -76,16 +82,19 @@ def _infer_grid(model, coords_np, sw_seq_single, device, vis_batch=1024,
 
     Returns:
         dict:
-            'ne_fused'   [N] — 最终预测
-            'ne_bkg'     [N] — IRI 背景
-            'ne_delta'   [N] — log₁₀ 空间残差 = ne_fused − ne_bkg
-            'hmf2_f2'    [N] — F2 峰高 (km)
+            'ne_iri'     [N] — Raw IRI
+            'background' [N] — FNDA Background (M00)
+            'm00/m10/m01/m11' [N] — 四模式输出
+            'ne_delta'   [N] — M11 − Background（log10 空间）
     """
     model.eval()
     N = len(coords_np)
-    ne_fused_buf  = np.empty(N, dtype=np.float32)
-    ne_bkg_buf    = np.empty(N, dtype=np.float32)
-    ne_delta_buf  = np.empty(N, dtype=np.float32)
+    buffers = {
+        key: np.empty(N, dtype=np.float32)
+        for key in ('ne_iri', 'background', 'm00', 'm10', 'm01', 'm11')
+    }
+    fy_coverage = np.zeros(N, dtype=np.float32)
+    cosmic_coverage = np.zeros(N, dtype=np.float32)
     hmf2_buf      = np.full(N, 300.0, dtype=np.float32)   # 默认 300 km
     nmf2_buf      = np.full(N, 11.5,  dtype=np.float32)   # 默认 11.5 log10
 
@@ -101,12 +110,39 @@ def _infer_grid(model, coords_np, sw_seq_single, device, vis_batch=1024,
             iri_peak = None
             if iri_peak_manager is not None:
                 iri_peak = iri_peak_manager.get_iri_peak(chunk)
-            Ne_fused, _, _, _, extras = model(
-                chunk, sw_chunk, iri_peak=iri_peak)
+            common = {'iri_peak': iri_peak}
+            m00, _, _, _, extras = model(chunk, sw_chunk, **common)
+            fy_kwargs = {}
+            cosmic_kwargs = {}
+            if fy_nb_index is not None:
+                observations = query_observation_payload(
+                    fy_nb_index, chunk, device)
+                fy_coverage[start:end] = observations[
+                    'valid_mask'].any(dim=1).float().cpu().numpy()
+                fy_kwargs = {'observations_fy': attach_observation_background(
+                    observations, model, sw_manager, iri_peak_manager)}
+            if cosmic_nb_index is not None:
+                observations = query_observation_payload(
+                    cosmic_nb_index, chunk, device)
+                cosmic_coverage[start:end] = observations[
+                    'valid_mask'].any(dim=1).float().cpu().numpy()
+                cosmic_kwargs = {
+                    'observations_cosmic': attach_observation_background(
+                        observations, model, sw_manager, iri_peak_manager)}
+            if include_single_source:
+                m10 = model(chunk, sw_chunk, **common, **fy_kwargs)[0]
+                m01 = model(chunk, sw_chunk, **common, **cosmic_kwargs)[0]
+            else:
+                m10 = m01 = m00
+            m11 = model(
+                chunk, sw_chunk, **common, **fy_kwargs, **cosmic_kwargs)[0]
 
-            ne_fused_buf[start:end] = Ne_fused.reshape(-1).cpu().numpy()
-            ne_bkg_buf[start:end]   = extras['ne_bkg'].reshape(-1).cpu().numpy()
-            ne_delta_buf[start:end] = (Ne_fused - extras['ne_bkg']).reshape(-1).cpu().numpy()
+            buffers['ne_iri'][start:end] = extras.get(
+                'ne_iri', extras['ne_bkg']).reshape(-1).cpu().numpy()
+            buffers['background'][start:end] = extras['ne_bkg'].reshape(-1).cpu().numpy()
+            for key, value in (
+                    ('m00', m00), ('m10', m10), ('m01', m01), ('m11', m11)):
+                buffers[key][start:end] = value.reshape(-1).cpu().numpy()
             _cp   = extras.get('peak_params', {})
             _hmf2 = _cp.get('hmF2')
             _nmf2 = _cp.get('NmF2')
@@ -116,12 +152,37 @@ def _infer_grid(model, coords_np, sw_seq_single, device, vis_batch=1024,
                 nmf2_buf[start:end] = _nmf2.cpu().numpy()
 
     return {
-        'ne_fused':   ne_fused_buf,
-        'ne_bkg':     ne_bkg_buf,
-        'ne_delta':   ne_delta_buf,
+        **buffers,
+        'ne_fused':   buffers['m11'],
+        'ne_bkg':     buffers['background'],
+        'ne_delta':   buffers['m11'] - buffers['background'],
+        'has_fy':     fy_coverage,
+        'has_cosmic': cosmic_coverage,
         'hmf2_f2':    hmf2_buf,
         'nmf2_f2':    nmf2_buf,   # log10 单位；plot 时用 10** 转换为 el/m³
     }
+
+
+def _infer_analysis_peaks(model, lat_flat, lon_flat, global_time,
+                          sw_seq_single, device, sw_manager, iri_peak_manager,
+                          fy_nb_index, cosmic_nb_index):
+    """Derive hmF2/NmF2 from the final M11 density columns."""
+    alts = np.arange(model.alt_min, model.alt_max + 0.1, 10.0, dtype=np.float32)
+    n_points = len(lat_flat)
+    coords = np.column_stack([
+        np.tile(lat_flat, len(alts)),
+        np.tile(lon_flat, len(alts)),
+        np.repeat(alts, n_points),
+        np.full(len(alts) * n_points, global_time, dtype=np.float32),
+    ]).astype(np.float32)
+    result = _infer_grid(
+        model, coords, sw_seq_single, device, sw_manager, vis_batch=4096,
+        iri_peak_manager=iri_peak_manager,
+        fy_nb_index=fy_nb_index, cosmic_nb_index=cosmic_nb_index,
+        include_single_source=False)
+    columns = result['m11'].reshape(len(alts), n_points)
+    peak_index = np.argmax(columns, axis=0)
+    return alts[peak_index], columns[peak_index, np.arange(n_points)]
 
 
 def _get_sw_seq(sw_manager, global_time, device):
@@ -258,15 +319,14 @@ def _fmt_log_ticks(cb, bounds):
 
 def plot_global_slice(model, sw_manager, device, target_day, target_hour,
                       save_dir, alt_levels=None, model_name='MDIA-INR',
-                      iri_peak_manager=None):
+                      iri_peak_manager=None, fy_nb_index=None,
+                      cosmic_nb_index=None):
     """
     绘制全球纬经度切片图（多高度层）。
 
-    每个高度层一行，四列布局：
-        Col 1: IRI Background
-        Col 2: {model_name} Ne_fused
-        Col 3: Residual = Ne_fused - IRI
-        Col 4: log₁₀-space residual
+    每个高度层一行，六列布局：
+        Raw IRI | Background(M00) | FY(M10) | COSMIC(M01) |
+        FY+COSMIC(M11) | M11-Background
 
     Args:
         model:        MDIA_INR_Model 或 FSIA_INR_Model
@@ -297,11 +357,13 @@ def plot_global_slice(model, sw_manager, device, target_day, target_hour,
     n_pts = LAT.size
 
     n_rows = len(alt_levels)
-    fig, axes = plt.subplots(n_rows, 4, figsize=(22, 4.5 * n_rows))
+    fig, axes = plt.subplots(n_rows, 6, figsize=(30, 4.5 * n_rows))
     axes = np.atleast_2d(axes)  # 保证二维索引 [row, col]
 
-    col_titles = ['IRI Background', f'{model_name} Ne_fused',
-                  'Residual (fused − IRI)', 'ΔNe log₁₀ (fused − bkg)']
+    col_titles = [
+        'Raw IRI', 'FNDA Background = M00', 'M10 FY only',
+        'M01 COSMIC only', 'M11 FY + COSMIC', 'M11 − Background',
+    ]
 
     # ---- 固定色标范围（统一所有高度层）----
     # Ne 面板：7×10⁹ ~ 4×10¹² el/m³（log10: 9.845 ~ 12.602）
@@ -309,12 +371,7 @@ def plot_global_slice(model, sw_manager, device, target_day, target_hour,
     _ne_hi = np.log10(4e12)
     ne_cmap, ne_norm, ne_bounds = _discrete_norm_log('jet', _ne_lo, _ne_hi, n=20)
 
-    # 残差面板（col3）：绝对密度差，对称线性，19 级，中心白色带
-    _res_max = 4e12 - 7e9
-    res_cmap, res_norm = _discrete_norm_sym_white('RdBu_r', _res_max, n=19, n_white=1)
-    exp_r = int(np.floor(np.log10(_res_max + 1e-30)))
-
-    # ΔNe log₁₀ 面板（col4）：log10 空间对称，±0.5 范围，20 级，中心白色带
+    # Analysis increment in log10 space.
     _dl_max = 0.5
     dl_cmap, dl_norm = _discrete_norm_sym_white('RdBu_r', _dl_max, n=19, n_white=1)
 
@@ -328,21 +385,31 @@ def plot_global_slice(model, sw_manager, device, target_day, target_hour,
         ])
 
         result    = _infer_grid(model, coords_np, sw_seq_single, device,
-                                iri_peak_manager=iri_peak_manager)
-        iri_map   = result['ne_bkg'].reshape(LAT.shape)
-        fuse_map  = result['ne_fused'].reshape(LAT.shape)
+                                sw_manager,
+                                iri_peak_manager=iri_peak_manager,
+                                fy_nb_index=fy_nb_index,
+                                cosmic_nb_index=cosmic_nb_index)
+        iri_map   = result['ne_iri'].reshape(LAT.shape)
+        bkg_map   = result['background'].reshape(LAT.shape)
+        m10_map   = result['m10'].reshape(LAT.shape)
+        m01_map   = result['m01'].reshape(LAT.shape)
+        fuse_map  = result['m11'].reshape(LAT.shape)
         delta_map = result['ne_delta'].reshape(LAT.shape)   # log10 残差
         iri_lin   = 10.0 ** iri_map
+        bkg_lin   = 10.0 ** bkg_map
+        m10_lin   = 10.0 ** m10_map
+        m01_lin   = 10.0 ** m01_map
         fuse_lin  = 10.0 ** fuse_map
-        res_lin   = fuse_lin - iri_lin   # 绝对密度差值 el/m³
 
         # (data, cmap_d, norm_d, bounds_or_None, col_title, cb_mode)
         # cb_mode: 'log' → log el/m³; 'sym_lin' → symmetric linear el/m³; 'log10' → log10 units
         maps_cfg = [
             (iri_lin,   ne_cmap,  ne_norm,  ne_bounds, col_titles[0], 'log'),
-            (fuse_lin,  ne_cmap,  ne_norm,  ne_bounds, col_titles[1], 'log'),
-            (res_lin,   res_cmap, res_norm, None,      col_titles[2], 'sym_lin'),
-            (delta_map, dl_cmap,  dl_norm,  None,      col_titles[3], 'log10'),
+            (bkg_lin,   ne_cmap,  ne_norm,  ne_bounds, col_titles[1], 'log'),
+            (m10_lin,   ne_cmap,  ne_norm,  ne_bounds, col_titles[2], 'log'),
+            (m01_lin,   ne_cmap,  ne_norm,  ne_bounds, col_titles[3], 'log'),
+            (fuse_lin,  ne_cmap,  ne_norm,  ne_bounds, col_titles[4], 'log'),
+            (delta_map, dl_cmap,  dl_norm,  None,      col_titles[5], 'log10'),
         ]
 
         for col_idx, (data, cmap_d, norm_d, bounds, col_title, cb_mode) in enumerate(maps_cfg):
@@ -352,7 +419,10 @@ def plot_global_slice(model, sw_manager, device, target_day, target_hour,
             if row_idx == 0:
                 ax.set_title(col_title, fontsize=11, fontweight='bold')
             if col_idx == 0:
-                ax.set_ylabel(f'{alt} km\nLat', fontweight='bold')
+                coverage = np.maximum(result['has_fy'], result['has_cosmic']).mean()
+                ax.set_ylabel(
+                    f'{alt} km\ncoverage={coverage:.1%}\nLat',
+                    fontweight='bold')
             if row_idx < n_rows - 1:
                 ax.set_xticks([])
             else:
@@ -361,9 +431,6 @@ def plot_global_slice(model, sw_manager, device, target_day, target_hour,
             if cb_mode == 'log':
                 cb.set_label('el/m³', fontsize=8)
                 _fmt_log_ticks(cb, bounds)
-            elif cb_mode == 'sym_lin':
-                _fmt_sym_ticks(cb, _res_max)
-                cb.set_label(f'ΔNe (×$10^{{{exp_r}}}$ el/m³)', fontsize=8)
             else:  # 'log10'
                 tick_vals = np.linspace(-_dl_max, _dl_max, 5)
                 cb.set_ticks(tick_vals)
@@ -389,13 +456,13 @@ def plot_global_slice(model, sw_manager, device, target_day, target_hour,
 def plot_altitude_profile(model, sw_manager, device, lat, lon, time_hour,
                           save_dir, config, model_name='MDIA-INR',
                           iri_peak_manager=None, isr_record=None,
-                          time_hours=None):
+                          time_hours=None, fy_nb_index=None,
+                          cosmic_nb_index=None):
     """
     绘制指定位置的垂直 EDP 廓线。
 
-    三条曲线（+ 可选 ISR 真值）：
-        Ne_fused  (蓝色实线)    — 模型最终预测
-        Ne_bkg    (灰色点线)    — IRI 代理背景
+    五条曲线（+ 可选 ISR 真值）：
+        Raw IRI、FNDA Background(M00)、M10、M01、M11
         ISR Ne    (红色散点)    — ISR 实测真值（isr_record 不为 None 时叠绘）
 
     Args:
@@ -439,7 +506,10 @@ def plot_altitude_profile(model, sw_manager, device, lat, lon, time_hour,
         ])
 
         result = _infer_grid(model, coords_np, sw_seq_single, device,
-                             iri_peak_manager=iri_peak_manager)
+                             sw_manager,
+                             iri_peak_manager=iri_peak_manager,
+                             fy_nb_index=fy_nb_index,
+                             cosmic_nb_index=cosmic_nb_index)
 
         day = int(t_hour // 24)
         hr  = int(t_hour % 24)
@@ -450,10 +520,16 @@ def plot_altitude_profile(model, sw_manager, device, lat, lon, time_hour,
             lt_h = (lt_h + 1) % 24
             lt_m = 0
 
-        ax.plot(result['ne_fused'], alts, color='blue', lw=2,
-                label=f'Ne_fused ({model_name})')
-        ax.plot(result['ne_bkg'],   alts, color='gray',  lw=2, ls=':',
-                label='Ne_bkg (IRI proxy)')
+        ax.plot(result['ne_iri'], alts, color='black', lw=1.5, ls='--',
+                label='Raw IRI')
+        ax.plot(result['background'], alts, color='gray', lw=1.5, ls=':',
+                label='FNDA Background = M00')
+        ax.plot(result['m10'], alts, color='tab:green', lw=1.3,
+                label='M10 FY')
+        ax.plot(result['m01'], alts, color='tab:orange', lw=1.3,
+                label='M01 COSMIC')
+        ax.plot(result['m11'], alts, color='blue', lw=2,
+                label=f'M11 {model_name}')
 
         # ISR 真值叠绘
         if isr_record is not None:
@@ -464,7 +540,7 @@ def plot_altitude_profile(model, sw_manager, device, lat, lon, time_hour,
             else:
                 print(f'  [EDP] {hr:02d}:00 UT (LT {lt_h:02d}:{lt_m:02d}) — 无近邻 ISR 数据（容差 30 min）')
 
-        ax.set_xlabel('log₁₀ Ne (m⁻³)', fontsize=11)
+        ax.set_xlabel(r'$\log_{10}$ Ne (m$^{-3}$)', fontsize=11)
         if col_idx == 0:
             ax.set_ylabel('Altitude (km)', fontsize=12)
         ax.set_title(f'{hr:02d}:00 UT  (LT {lt_h:02d}:{lt_m:02d})',
@@ -472,6 +548,12 @@ def plot_altitude_profile(model, sw_manager, device, lat, lon, time_hour,
         ax.legend(fontsize=9)
         ax.grid(True, alpha=0.3)
         ax.set_ylim(alt_min, alt_max)
+        covered = np.maximum(result['has_fy'], result['has_cosmic']) > 0.5
+        changed = np.abs(result['m11'] - result['background']) > 1e-6
+        print(
+            f'  [EDP] {hr:02d}:00 coverage={covered.mean():.1%}, '
+            f'M11 changed={changed.mean():.1%}, '
+            f'|M11-B| mean={np.abs(result["ne_delta"]).mean():.4f} dex')
 
     # 总标题
     day0      = int(t_list[0] // 24)
@@ -500,7 +582,8 @@ def plot_altitude_profile(model, sw_manager, device, lat, lon, time_hour,
 # ======================== hmF2 + NmF2 全时间步合并图 ========================
 
 def plot_hmf2_nmf2_map(model, sw_manager, device, time_steps, save_dir,
-                       label=None, model_name='MDIA-INR', iri_peak_manager=None):
+                       label=None, model_name='MDIA-INR', iri_peak_manager=None,
+                       fy_nb_index=None, cosmic_nb_index=None):
     """
     绘制 hmF2 + NmF2 全球分布合并图（所有时间步纵向排列，每行左右两列）。
 
@@ -530,7 +613,6 @@ def plot_hmf2_nmf2_map(model, sw_manager, device, time_steps, save_dir,
     lat_grid = np.linspace(-90, 90, 91)
     lon_grid = np.linspace(-180, 180, 180)
     LON, LAT = np.meshgrid(lon_grid, lat_grid)
-    n_pts  = LAT.size
     extent = [-180, 180, -90, 90]
 
     # 所有时间步共享统一色标
@@ -545,19 +627,13 @@ def plot_hmf2_nmf2_map(model, sw_manager, device, time_steps, save_dir,
         sw_seq_single = _get_sw_seq(sw_manager, global_time, device)
         kp_disp, f107_disp = _sw_display_values(sw_seq_single)
 
-        # hmF2/NmF2 与高度输入无关，以 300 km 为参考高度推理
-        coords_np = np.column_stack([
-            LAT.flatten().astype(np.float32),
-            LON.flatten().astype(np.float32),
-            np.full(n_pts, 300.0,       dtype=np.float32),
-            np.full(n_pts, global_time, dtype=np.float32),
-        ])
-
-        result   = _infer_grid(model, coords_np, sw_seq_single, device,
-                               iri_peak_manager=iri_peak_manager)
-        hmf2_map = result['hmf2_f2'].reshape(LAT.shape)
-        # log10 → 真实电子密度 el/m³
-        nmf2_map = (10.0 ** result['nmf2_f2']).reshape(LAT.shape)
+        hmf2, nmf2 = _infer_analysis_peaks(
+            model, LAT.flatten().astype(np.float32),
+            LON.flatten().astype(np.float32), global_time,
+            sw_seq_single, device, sw_manager, iri_peak_manager,
+            fy_nb_index, cosmic_nb_index)
+        hmf2_map = hmf2.reshape(LAT.shape)
+        nmf2_map = (10.0 ** nmf2).reshape(LAT.shape)
 
         row_label = (f'Day {target_day}  {target_hour:02d}:00 UT\n'
                      f'Kp={kp_disp:.1f}  F10.7={f107_disp:.1f}')
