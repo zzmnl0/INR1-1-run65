@@ -286,7 +286,10 @@ def _load_model_and_managers(config, device):
         for key in (
                 'fy_path', 'fy_profile_path', 'fy_profile_index_path',
                 'cosmic_path', 'cosmic_profile_index_path', 'iri_proxy_path',
-                'iri_hmf2_path', 'iri_nmf2_path', 'sw_path'):
+                'iri_hmf2_path', 'iri_nmf2_path', 'sw_path',
+                'basis_dim', 'enkf_n_members', 'enkf_pert_hidden',
+                'enkf_anomaly_parameterization', 'enkf_scale_init',
+                'enkf_scale_condition_max', 'density_basis_semantics'):
             if key in trained_config:
                 cfg[key] = trained_config[key]
 
@@ -313,8 +316,12 @@ def _load_model_and_managers(config, device):
     # N-adaptive：检查点 N_members 可能与当前 model 不同（如 run56=8, run57=4）
     if model_type == 'fsia':
         _ckpt_P_w1 = state.get('kalman_layer.P_w1')
-        if _ckpt_P_w1 is not None and _ckpt_P_w1.shape[0] != model.enkf_n_members:
-            _ckpt_n = int(_ckpt_P_w1.shape[0])
+        _ckpt_coefficients = state.get('kalman_layer.ensemble_coefficients')
+        _ckpt_n = (
+            int(_ckpt_P_w1.shape[0]) if _ckpt_P_w1 is not None
+            else int(_ckpt_coefficients.shape[1])
+            if _ckpt_coefficients is not None else model.enkf_n_members)
+        if _ckpt_n != model.enkf_n_members:
             print(f'[main] 检查点 N={_ckpt_n} ≠ 当前 N={model.enkf_n_members}，'
                   f'自适应重建 NeuralETKFLayer(n_members={_ckpt_n})')
             from inr_modules.mdia.fsia_model import NeuralETKFLayer
@@ -326,6 +333,9 @@ def _load_model_and_managers(config, device):
                 pert_hidden= _kl.pert_hidden,
                 r_fy       = _kl.r_fy.item(),
                 r_cosmic   = _kl.r_cosmic.item(),
+                anomaly_parameterization=_kl.anomaly_parameterization,
+                scale_init=_kl.scale_init,
+                scale_condition_max=_kl.scale_condition_max,
             ).to(device)
             model.enkf_n_members = _ckpt_n
 

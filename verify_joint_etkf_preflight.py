@@ -107,6 +107,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--steps', type=int, default=100)
     parser.add_argument('--batch-size', type=int, default=64)
+    parser.add_argument('--enkf-members', type=int, default=8)
+    parser.add_argument(
+        '--anomaly-parameterization',
+        choices=('legacy_independent', 'orthogonal_factor'),
+        default='orthogonal_factor')
     args = parser.parse_args()
     if args.steps < 1 or args.batch_size < 8:
         raise ValueError('steps must be positive and batch-size must be at least 8')
@@ -127,6 +132,8 @@ def main():
         'cosmic_profile_index_path': str(COSMIC_INDEX),
         'r_mode': 'global',
         'use_distance_localization': True,
+        'enkf_n_members': args.enkf_members,
+        'enkf_anomaly_parameterization': args.anomaly_parameterization,
     })
     for path in (FY_DATA, FY_INDEX, COSMIC_DATA, COSMIC_INDEX, BACKGROUND):
         if not path.is_file():
@@ -214,12 +221,22 @@ def main():
             model, batch, use_fy=flags[0], use_cosmic=flags[1])[0]
         profile_huber_loss(
             prediction, batch['target'], batch['profile_ids'], delta).backward()
+        perturbation_parameters = (
+            ('P_w1', 'P_b1', 'P_w2', 'P_b2')
+            if args.anomaly_parameterization == 'legacy_independent'
+            else (
+                'covariance_scale_net.0.weight',
+                'covariance_scale_net.0.bias',
+                'covariance_scale_net.2.weight',
+                'covariance_scale_net.2.bias',
+            ))
+        named_parameters = dict(model.kalman_layer.named_parameters())
         gradient_report[source] = {
             'density_basis': _gradient_sum(
                 model.density_basis_decoder[-1].weight),
             'perturbations': sum(
-                _gradient_sum(getattr(model.kalman_layer, name)) or 0.0
-                for name in ('P_w1', 'P_b1', 'P_w2', 'P_b2')),
+                _gradient_sum(named_parameters[name]) or 0.0
+                for name in perturbation_parameters),
         }
         if any(value is None or value <= 0
                for value in gradient_report[source].values()):

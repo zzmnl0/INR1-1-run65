@@ -42,13 +42,19 @@ def _record_arrays(record, start_unix):
     relative_hour = np.tile(
         ((record['ts_1d'] - start_unix) / 3600.0)[None, :],
         (len(record['alt_1d']), 1))
-    latitude = np.full_like(altitude, record['lat'], dtype=np.float32)
-    longitude = np.full_like(altitude, record['lon'], dtype=np.float32)
+    if (record.get('geo_lat_2d') is not None
+            and record.get('geo_lon_2d') is not None):
+        latitude = np.asarray(record['geo_lat_2d'], dtype=np.float32)
+        longitude = np.asarray(record['geo_lon_2d'], dtype=np.float32)
+    else:
+        latitude = np.full_like(altitude, record['lat'], dtype=np.float32)
+        longitude = np.full_like(altitude, record['lon'], dtype=np.float32)
     with np.errstate(divide='ignore', invalid='ignore'):
         observation = np.log10(record['ne_2d'].astype(np.float64))
     valid = (
         np.isfinite(observation) & np.isfinite(altitude)
-        & np.isfinite(relative_hour))
+        & np.isfinite(relative_hour) & np.isfinite(latitude)
+        & np.isfinite(longitude))
     coords = np.column_stack([
         latitude[valid], longitude[valid], altitude[valid], relative_hour[valid],
     ]).astype(np.float32)
@@ -130,6 +136,15 @@ def _source_arrays(payload, extras, suffix):
     np.divide(1.0, precision, out=r_eff, where=precision > 0)
     dominant = np.argmax(np.where(valid, np.abs(contribution), -1.0), axis=1)
     rows = np.arange(len(valid))
+    effective = valid & (precision > 0)
+    precision_sum = np.where(effective, precision, 0.0).sum(axis=1)
+    precision_square_sum = np.where(
+        effective, precision * precision, 0.0).sum(axis=1)
+    effective_sample_size = np.divide(
+        precision_sum * precision_sum,
+        precision_square_sum,
+        out=np.zeros_like(precision_sum),
+        where=precision_square_sum > 0)
     return {
         'physical_innovation_mean': _query_mean(innovation, valid),
         'kalman_gain_mean': _query_mean(gain, valid),
@@ -142,6 +157,9 @@ def _source_arrays(payload, extras, suffix):
         'dominant_rho': np.sqrt(payload['rho_squared'].cpu().numpy()[
             rows, dominant]),
         'valid_tokens': valid.sum(axis=1),
+        'effective_tokens': effective.sum(axis=1),
+        'precision_sum': precision_sum,
+        'effective_sample_size': effective_sample_size,
     }
 
 
@@ -169,11 +187,229 @@ def _observation_diagnostics(payload, extras, suffix, query_mask,
         'cross_covariance': extras[
             f'cross_covariance_{suffix}'].cpu().numpy()[query_row, token],
         'kalman_gain': gain,
+        'precision': precision,
         'r_eff': np.divide(
             1.0, precision, out=np.full_like(precision, np.inf),
             where=precision > 0),
         'kalman_contribution': gain * innovation,
     }
+
+
+def _latent_rank_metrics(latent_anomalies):
+    singular_values = torch.linalg.svdvals(latent_anomalies)
+    largest = singular_values[:, :1].clamp_min(torch.finfo(
+        singular_values.dtype).eps)
+    numeric_rank = (singular_values > largest * 1e-6).sum(dim=1)
+    energy = singular_values.square()
+    probability = energy / energy.sum(dim=1, keepdim=True).clamp_min(1e-12)
+    effective_rank = torch.exp(
+        -(probability * probability.clamp_min(1e-12).log()).sum(dim=1))
+    return (
+        singular_values.cpu().numpy(),
+        numeric_rank.cpu().numpy(),
+        effective_rank.cpu().numpy(),
+    )
+
+
+def _token_group_rows(tokens, selected, labels):
+    rows = []
+    desired_all = (
+        tokens['query_observation'] - tokens['query_background'])
+    for label in np.unique(labels[selected]):
+        mask = selected & (labels == label)
+        desired = desired_all[mask]
+        contribution = tokens['kalman_contribution'][mask]
+        comparable = (
+            np.abs(desired) > 1e-8) & (np.abs(contribution) > 1e-12)
+        rows.append({
+            'group': int(label),
+            'n': int(mask.sum()),
+            'innovation_mean': float(
+                tokens['physical_innovation'][mask].mean()),
+            'cross_covariance_mean': float(
+                tokens['cross_covariance'][mask].mean()),
+            'kalman_contribution_mean': float(contribution.mean()),
+            'conflict_fraction': float(np.mean(
+                (desired <= -0.05) & (contribution > 0))),
+            'toward_isr_fraction': (
+                float(np.mean(desired[comparable] * contribution[comparable] > 0))
+                if comparable.any() else None),
+        })
+    return rows
+
+
+def _stratified_token_summary(tokens, query_coords):
+    query = query_coords[tokens['query_index']]
+    day = np.floor(query[:, 3] / 24.0).astype(np.int16) + 1
+    altitude_bin = (
+        np.floor((query[:, 2] - 120.0) / 20.0) * 20.0 + 120.0
+    ).astype(np.int16)
+    local_time = np.remainder(query[:, 3] + query[:, 1] / 15.0, 24.0)
+    local_time_bin = np.floor(local_time).astype(np.int16)
+    result = {}
+    for source_code, source_name in ((0, 'FY'), (1, 'COSMIC')):
+        selected = (
+            (tokens['source'] == source_code)
+            & (tokens['precision'] > 0))
+        result[source_name] = {
+            'date': _token_group_rows(tokens, selected, day),
+            'altitude_20km': _token_group_rows(
+                tokens, selected, altitude_bin),
+            'local_time_1h': _token_group_rows(
+                tokens, selected, local_time_bin),
+        }
+    return result
+
+
+def _distance_quartile_summary(tokens):
+    result = {}
+    for source_code, source_name in ((0, 'FY'), (1, 'COSMIC')):
+        selected = (
+            (tokens['source'] == source_code)
+            & (tokens['precision'] > 0))
+        if not selected.any():
+            result[source_name] = {'n': 0}
+            continue
+        rho = np.sqrt(tokens['rho_squared'][selected])
+        edges = np.quantile(rho, [0.0, 0.25, 0.5, 0.75, 1.0])
+        query_index = tokens['query_index'][selected]
+        desired = (
+            tokens['query_observation'][selected]
+            - tokens['query_background'][selected])
+        contribution = tokens['kalman_contribution'][selected]
+        rows = []
+        for quartile in range(4):
+            upper = rho <= edges[quartile + 1] if quartile == 3 else (
+                rho < edges[quartile + 1])
+            mask = (rho >= edges[quartile]) & upper
+            conflict = (desired[mask] <= -0.05) & (contribution[mask] > 0)
+            comparable = (
+                np.abs(desired[mask]) > 1e-8
+            ) & (np.abs(contribution[mask]) > 1e-12)
+            rows.append({
+                'quartile': quartile + 1,
+                'n_tokens': int(mask.sum()),
+                'n_queries': int(np.unique(query_index[mask]).size),
+                'rho_min': float(edges[quartile]),
+                'rho_max': float(edges[quartile + 1]),
+                'conflict_fraction': float(conflict.mean()),
+                'toward_isr_fraction': (
+                    float(np.mean(
+                        desired[mask][comparable]
+                        * contribution[mask][comparable] > 0))
+                    if comparable.any() else None),
+            })
+        conflict_gap = (
+            rows[-1]['conflict_fraction'] - rows[0]['conflict_fraction'])
+        toward_gap = (
+            rows[0]['toward_isr_fraction'] - rows[-1]['toward_isr_fraction']
+            if rows[0]['toward_isr_fraction'] is not None
+            and rows[-1]['toward_isr_fraction'] is not None else None)
+        result[source_name] = {
+            'n': int(selected.sum()),
+            'quartiles': rows,
+            'farthest_minus_nearest_conflict': float(conflict_gap),
+            'nearest_minus_farthest_toward': (
+                float(toward_gap) if toward_gap is not None else None),
+            'distance_stop_triggered': bool(
+                conflict_gap >= 0.10
+                or (toward_gap is not None and toward_gap >= 0.10)),
+        }
+    return result
+
+
+def _top_positive_profiles(tokens, source_code, limit=20):
+    selected = (
+        (tokens['source'] == source_code)
+        & (tokens['precision'] > 0)
+        & (tokens['kalman_contribution'] > 0))
+    if not selected.any():
+        return []
+    profile_ids = tokens['profile_id'][selected]
+    contributions = tokens['kalman_contribution'][selected]
+    rows = []
+    for profile_id in np.unique(profile_ids):
+        mask = profile_ids == profile_id
+        rows.append({
+            'profile_id': int(profile_id),
+            'positive_contribution_sum': float(contributions[mask].sum()),
+            'positive_token_count': int(mask.sum()),
+            'innovation_mean': float(
+                tokens['physical_innovation'][selected][mask].mean()),
+            'rho_mean': float(np.sqrt(
+                tokens['rho_squared'][selected][mask]).mean()),
+        })
+    return sorted(
+        rows, key=lambda row: row['positive_contribution_sum'],
+        reverse=True)[:limit]
+
+
+def _qc_profile_audit(rows, data_path, index_path, output, source):
+    if not rows or not data_path or not index_path:
+        return rows, None
+    data = np.load(data_path, mmap_mode='r')
+    with np.load(index_path, allow_pickle=True) as index:
+        profile_ids = np.asarray(index['profile_id'], dtype=np.int64)
+        lookup = {int(profile_id): row for row, profile_id in enumerate(profile_ids)}
+        fields = [
+            field for field in (
+                'pass_profile', 'input_points', 'kept_points', 'h_cut_km',
+                'hmf2', 'nmf2', 'peak_count', 'md', 'delta',
+                'global_topside_gradient', 'local_topside_gradient',
+                'fold_error', 'reason_bits', 'representative_lat',
+                'representative_lon', 'representative_time', 'date_code',
+                'range_rejected_points', 'original_relative_path',
+                'original_profile_id', 'output_start', 'output_end')
+            if field in index.files
+        ]
+        audited = []
+        curves = []
+        for item in rows:
+            profile_id = item['profile_id']
+            if profile_id not in lookup:
+                audited.append({**item, 'qc_index_found': False})
+                curves.append(None)
+                continue
+            row_index = lookup[profile_id]
+            metadata = {}
+            for field in fields:
+                value = index[field][row_index]
+                if isinstance(value, np.generic):
+                    value = value.item()
+                if isinstance(value, bytes):
+                    value = value.decode('utf-8', errors='replace')
+                metadata[field] = value
+            start = int(metadata.get('output_start', -1))
+            end = int(metadata.get('output_end', -1))
+            curve = (
+                np.asarray(data[start:end, :5], dtype=np.float32)
+                if 0 <= start < end <= len(data) else None)
+            curves.append(curve)
+            audited.append({
+                **item,
+                'qc_index_found': True,
+                'qc_metadata': metadata,
+                'retained_curve_points': int(len(curve)) if curve is not None else 0,
+            })
+
+    import matplotlib
+    matplotlib.use('Agg', force=True)
+    import matplotlib.pyplot as plt
+    figure, axes = plt.subplots(4, 5, figsize=(15, 14), squeeze=False)
+    for axis, item, curve in zip(axes.flat, audited, curves):
+        if curve is not None and len(curve):
+            axis.plot(curve[:, 4], curve[:, 2], linewidth=1.0)
+        axis.set_title(f'{source} profile {item["profile_id"]}', fontsize=8)
+        axis.set_xlabel('log10Ne')
+        axis.set_ylabel('Altitude (km)')
+        axis.grid(alpha=0.25)
+    for axis in axes.flat[len(audited):]:
+        axis.axis('off')
+    figure.tight_layout()
+    figure_path = output / f'top_positive_{source.lower()}_profiles.png'
+    figure.savefig(figure_path, dpi=150)
+    plt.close(figure)
+    return audited, figure_path.name
 
 
 def _observation_summary(arrays, source_code):
@@ -252,7 +488,7 @@ def main():
     config = dict(ISR_CONFIG)
     config['checkpoint_path'] = str(args.checkpoint.resolve())
     config['run_poker_flat'] = False
-    (model, sw_manager, _, _, iri_peak_manager,
+    (model, sw_manager, cfg, _, iri_peak_manager,
      fy_index, cosmic_index) = _load_model_and_managers(config, device)
     start_unix = _parse_unix(config['start_date_str'])
     records = load_jicamarca(
@@ -275,8 +511,16 @@ def main():
                 'physical_innovation_mean', 'kalman_gain_mean',
                 'cross_covariance_mean', 'r_eff_mean',
                 'kalman_contribution_sum', 'dominant_profile_id',
-                'dominant_rho', 'valid_tokens', 'counterfactual_slope'):
+                'dominant_rho', 'valid_tokens', 'effective_tokens',
+                'precision_sum', 'effective_sample_size',
+                'counterfactual_slope'):
             saved[f'{source}_{field}'] = []
+    for field in (
+            'latent_singular_values', 'latent_numeric_rank',
+            'latent_effective_rank', 'anomaly_condition',
+            'scale_boundary_saturation'):
+        saved[field] = []
+    factor_scales = []
     token_saved = {}
     query_offset = 0
 
@@ -331,6 +575,19 @@ def main():
                 saved['M11_COSMIC_contribution'].append(
                     extras_by_mode['M11']['update_COSMIC'].squeeze(
                         -1).cpu().numpy())
+                singular, numeric_rank, effective_rank = _latent_rank_metrics(
+                    extras_by_mode['M11']['latent_anomalies'])
+                saved['latent_singular_values'].append(singular)
+                saved['latent_numeric_rank'].append(numeric_rank)
+                saved['latent_effective_rank'].append(effective_rank)
+                saved['anomaly_condition'].append(
+                    extras_by_mode['M11']['anomaly_condition'].cpu().numpy())
+                saved['scale_boundary_saturation'].append(
+                    extras_by_mode['M11'][
+                        'scale_boundary_saturation'].cpu().numpy())
+                if extras_by_mode['M11']['factor_scales'] is not None:
+                    factor_scales.append(
+                        extras_by_mode['M11']['factor_scales'].cpu().numpy())
                 saved['fy_counterfactual_slope'].append(_counterfactual(
                     model, coords, sw_seq, iri_peak, fy, 'observations_fy'))
                 saved['cosmic_counterfactual_slope'].append(_counterfactual(
@@ -373,6 +630,8 @@ def main():
         & ((local_time < 6.0) | (local_time >= 18.0)))
     fy_coverage = arrays['fy_coverage'].astype(bool)
     cosmic_coverage = arrays['cosmic_coverage'].astype(bool)
+    fy_effective = arrays['fy_effective_tokens'] > 0
+    cosmic_effective = arrays['cosmic_effective_tokens'] > 0
     both = fy_coverage & cosmic_coverage
     interaction = (
         arrays['M11_increment'] - arrays['M10_increment']
@@ -383,6 +642,20 @@ def main():
             arrays['observation'])
         for mode in ('M10', 'M01', 'M11')
     }
+    output = args.output.resolve()
+    output.mkdir(parents=True, exist_ok=True)
+    top_profiles = {
+        'FY': _top_positive_profiles(token_arrays, 0),
+        'COSMIC': _top_positive_profiles(token_arrays, 1),
+    }
+    top_figures = {}
+    for source, data_key, index_key in (
+            ('FY', 'fy_path', 'fy_profile_index_path'),
+            ('COSMIC', 'cosmic_path', 'cosmic_profile_index_path')):
+        top_profiles[source], top_figures[source] = _qc_profile_audit(
+            top_profiles[source], cfg.get(data_key), cfg.get(index_key),
+            output, source)
+
     report = {
         'schema_version': 7,
         'checkpoint': str(args.checkpoint.resolve()),
@@ -390,6 +663,8 @@ def main():
         'coverage': {
             'FY': float(np.mean(fy_coverage)),
             'COSMIC': float(np.mean(cosmic_coverage)),
+            'FY_positive_precision': float(np.mean(fy_effective)),
+            'COSMIC_positive_precision': float(np.mean(cosmic_effective)),
             'both': float(np.mean(both)),
             'neither': float(np.mean(~fy_coverage & ~cosmic_coverage)),
             'fy_index_matches_direct': bool(np.array_equal(
@@ -402,6 +677,29 @@ def main():
             'FY': _observation_summary(token_arrays, 0),
             'COSMIC': _observation_summary(token_arrays, 1),
             'file': 'jicamarca_low_night_observation_diagnostics.npz',
+        },
+        'stratified_observation_audit': _stratified_token_summary(
+            token_arrays, coords),
+        'localization_distance_audit': _distance_quartile_summary(
+            token_arrays),
+        'top_positive_profiles': top_profiles,
+        'top_positive_profile_figures': top_figures,
+        'latent_rank': {
+            'numeric_rank_q05_q50_q95': np.quantile(
+                arrays['latent_numeric_rank'], [0.05, 0.5, 0.95]).tolist(),
+            'effective_rank_q05_q50_q95': np.quantile(
+                arrays['latent_effective_rank'], [0.05, 0.5, 0.95]).tolist(),
+            'collapse_stop_triggered': bool(
+                np.median(arrays['latent_effective_rank']) < 4.0),
+            'condition_q05_q50_q95': np.quantile(
+                arrays['anomaly_condition'], [0.05, 0.5, 0.95]).tolist(),
+            'scale_boundary_saturation_mean': float(np.mean(
+                arrays['scale_boundary_saturation'])),
+            'scale_q05_q50_q95': (
+                np.quantile(
+                    np.concatenate(factor_scales),
+                    [0.05, 0.5, 0.95]).tolist()
+                if factor_scales else None),
         },
         'modes': {
             mode: {
@@ -475,13 +773,13 @@ def main():
                     'physical_innovation_mean', 'kalman_gain_mean',
                     'cross_covariance_mean', 'r_eff_mean',
                     'kalman_contribution_sum', 'dominant_profile_id',
-                    'dominant_rho', 'valid_tokens', 'counterfactual_slope'):
+                    'dominant_rho', 'valid_tokens', 'effective_tokens',
+                    'precision_sum', 'effective_sample_size',
+                    'counterfactual_slope'):
                 row[f'{source}_{field}'] = float(
                     arrays[f'{source}_{field}'][index])
         rows.append(row)
 
-    output = args.output.resolve()
-    output.mkdir(parents=True, exist_ok=True)
     with (output / 'jicamarca_mode_diagnostics.json').open(
             'w', encoding='utf-8') as stream:
         json.dump(report, stream, ensure_ascii=False, indent=2)

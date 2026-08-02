@@ -7,6 +7,43 @@ import os
 from typing import List, Iterator
 
 
+def _allowed_profile_mask(profile_ids, allowed_profile_ids):
+    """Return membership in a sorted train-only profile ID array."""
+    if allowed_profile_ids is None:
+        return np.ones(profile_ids.shape, dtype=bool)
+    allowed = np.asarray(allowed_profile_ids, dtype=np.int64)
+    if allowed.ndim != 1 or (len(allowed) > 1 and np.any(allowed[1:] <= allowed[:-1])):
+        raise ValueError('allowed_profile_ids must be a sorted unique 1-D array')
+    positions = np.searchsorted(allowed, profile_ids)
+    in_bounds = positions < len(allowed)
+    result = np.zeros(profile_ids.shape, dtype=bool)
+    result[in_bounds] = allowed[positions[in_bounds]] == profile_ids[in_bounds]
+    return result
+
+
+def _normalized_profile_distance(dlat, dlon, dt, dlat_limit, dlon_limit,
+                                 dt_limit):
+    """Shared FY/COSMIC normalized space-time L1 profile distance."""
+    return (np.abs(dlat) / dlat_limit
+            + np.abs(dlon) / dlon_limit
+            + np.abs(dt) / dt_limit)
+
+
+def _profile_representative_days(relative_hours, profile_ids):
+    """Assign every row in a profile to its median UTC-relative day."""
+    relative_hours = np.asarray(relative_hours, dtype=np.float64)
+    profile_ids = np.asarray(profile_ids, dtype=np.int64)
+    if relative_hours.shape != profile_ids.shape:
+        raise ValueError('relative_hours and profile_ids must have equal shape')
+    order = np.argsort(profile_ids, kind='stable')
+    boundaries = np.flatnonzero(np.diff(profile_ids[order])) + 1
+    row_days = np.empty(len(profile_ids), dtype=np.int64)
+    for indices in np.split(order, boundaries):
+        row_days[indices] = int(
+            np.floor(np.median(relative_hours[indices]) / 24.0))
+    return row_days
+
+
 def _observation_payload_from_cached(cached, dlat, dlon, dt, source_code):
     """Flatten selected profiles into physical log10Ne observations."""
     values = cached['sel_abs']
@@ -86,7 +123,8 @@ class FY3D_Dataset(Dataset):
     def __init__(self, npy_path: str, mode: str = 'train', val_days: List[int] = None,
                  bin_size_hours: float = 3.0, use_memmap: bool = False,
                  profile_path: str = None, val_ratio: float = None,
-                 split_seed: int = 42, profile_index_path: str = None):
+                 split_seed: int = 42, profile_index_path: str = None,
+                 split_days=None):
         super().__init__()
 
         if val_days is None:
@@ -177,25 +215,38 @@ class FY3D_Dataset(Dataset):
         if max_hour <= 48:
             raise ValueError(f"Input data appears to use Daily Hours (0-24). Max hour: {max_hour:.2f}. Expected Continuous Hours (0-720).")
 
-        # --- 划分 Train/Val ---
-        print(f"  划分训练/验证集 (mode={mode})...")
+        # --- 划分 Train/Development ---
+        print(f"  划分数据集 (mode={mode})...")
         relative_hours = working_data[:, 3]
         working_profile_ids = self.raw_profile_ids[working_indices]
-        if val_ratio is not None:
+        if split_days is not None:
+            if val_ratio is not None:
+                raise ValueError(
+                    'val_ratio must be None when explicit split_days are used')
+            if mode not in split_days:
+                raise ValueError(f'split_days does not define mode={mode}')
+            representative_days = _profile_representative_days(
+                relative_hours, working_profile_ids)
+            selected = np.isin(
+                representative_days,
+                np.asarray(split_days[mode], dtype=np.int64))
+            self.selected_indices = working_indices[selected]
+        elif val_ratio is not None:
             unique_profiles = self.split_profile_ids
             rng = np.random.default_rng(split_seed)
             shuffled = rng.permutation(unique_profiles)
             n_val_profiles = max(1, int(round(len(shuffled) * val_ratio)))
             val_profile_ids = shuffled[:n_val_profiles]
             is_val = np.isin(working_profile_ids, val_profile_ids)
+            self.selected_indices = (
+                working_indices[is_val] if mode == 'val'
+                else working_indices[~is_val])
         else:
             days = np.floor(relative_hours / 24.0).astype(int)
             is_val = np.isin(days, val_days)
-
-        if mode == 'val':
-            self.selected_indices = working_indices[is_val]
-        else:
-            self.selected_indices = working_indices[~is_val]
+            self.selected_indices = (
+                working_indices[is_val] if mode == 'val'
+                else working_indices[~is_val])
 
         self.profile_ids = self.raw_profile_ids[self.selected_indices]
         print(f"Mode '{mode}': {len(self.selected_indices)} samples selected.")
@@ -381,6 +432,7 @@ def get_dataloaders(
     val_ratio: float = 0.1,
     split_seed: int = 42,
     points_per_profile: int = 8,
+    split_days=None,
 ):
     """
     工厂函数: 组装 Dataset 和 Time-Aware Sampler
@@ -400,12 +452,13 @@ def get_dataloaders(
         npy_path, mode='train', val_days=val_days, bin_size_hours=bin_size_hours,
         use_memmap=use_memmap, profile_path=profile_path,
         val_ratio=val_ratio, split_seed=split_seed,
-        profile_index_path=profile_index_path)
+        profile_index_path=profile_index_path, split_days=split_days)
     val_dataset = FY3D_Dataset(
-        npy_path, mode='val', val_days=val_days, bin_size_hours=bin_size_hours,
+        npy_path, mode=('development' if split_days is not None else 'val'),
+        val_days=val_days, bin_size_hours=bin_size_hours,
         use_memmap=use_memmap, profile_path=profile_path,
         val_ratio=val_ratio, split_seed=split_seed,
-        profile_index_path=profile_index_path)
+        profile_index_path=profile_index_path, split_days=split_days)
     
     # 训练集开启 Shuffle (Time-Aware Shuffle)
     train_sampler = ProfileTimeBinSampler(
@@ -547,7 +600,8 @@ class FYNeighborhoodIndex:
         return int(self.bin_starts[b0]), int(self.bin_starts[b1])
 
     # ------------------------------------------------------------------
-    def query_profiles_only(self, coords_np, exclude_profile_ids=None):
+    def query_profiles_only(self, coords_np, exclude_profile_ids=None,
+                            allowed_profile_ids=None):
         """
         Phase 1：查找每个查询点最近的 K 个掩星剖面（仅依赖 lat/lon/time，忽略高度）。
 
@@ -607,6 +661,8 @@ class FYNeighborhoodIndex:
             local_abs   = self.prof_sorted_abs[lo:hi]
             local_vmask = self.prof_sorted_vmask[lo:hi]
             local_ids   = self.prof_sorted_ids[lo:hi]
+            local_allowed = _allowed_profile_mask(
+                local_ids, allowed_profile_ids)
 
             for g_start in range(0, G, self._CHUNK_G):
                 chunk_idx = grp_idx[g_start:g_start + self._CHUNK_G]
@@ -625,6 +681,7 @@ class FYNeighborhoodIndex:
                 valid_pm = ((np.abs(dlat_pm) <= self.dlat) &
                             (dlon_abs         <= self.dlon) &
                             (np.abs(dt_pm)    <= self.dt))
+                valid_pm &= local_allowed[None, :]
                 if exclude_profile_ids is not None:
                     valid_pm &= (
                         local_ids[None, :]
@@ -632,9 +689,9 @@ class FYNeighborhoodIndex:
                 if not valid_pm.any():
                     continue
 
-                dist_pm = (np.abs(dlat_pm) / self.dlat
-                           + dlon_abs       / self.dlon
-                           + np.abs(dt_pm)  / self.dt)
+                dist_pm = _normalized_profile_distance(
+                    dlat_pm, dlon_abs, dt_pm,
+                    self.dlat, self.dlon, self.dt)
                 dist_pm[~valid_pm] = np.inf
 
                 if M_prof <= K_p_g:
@@ -675,9 +732,11 @@ class FYNeighborhoodIndex:
             'K_p':        K_p,
         }
 
-    def query_observation_batch(self, coords_np, exclude_profile_ids=None):
+    def query_observation_batch(self, coords_np, exclude_profile_ids=None,
+                                allowed_profile_ids=None):
         """Return actual sampled FY profile points for the density observation operator."""
-        cached = self.query_profiles_only(coords_np, exclude_profile_ids)
+        cached = self.query_profiles_only(
+            coords_np, exclude_profile_ids, allowed_profile_ids)
         return self.observation_payload_from_cached(cached)
 
     def observation_payload_from_cached(self, cached):
@@ -794,7 +853,8 @@ class COSMICNeighborhoodIndex:
         return lo, hi
 
     # ------------------------------------------------------------------
-    def query_profiles_only(self, coords_np, exclude_profile_ids=None):
+    def query_profiles_only(self, coords_np, exclude_profile_ids=None,
+                            allowed_profile_ids=None):
         """
         [B,4] → cached dict（与 FYNeighborhoodIndex 接口兼容）
         """
@@ -821,19 +881,24 @@ class COSMICNeighborhoodIndex:
             seg_abs   = self.prof_sorted_abs[lo:hi]
             seg_vmask = self.prof_sorted_vmask[lo:hi]
             seg_ids   = self.prof_sorted_ids[lo:hi]
+            seg_allowed = _allowed_profile_mask(
+                seg_ids, allowed_profile_ids)
 
             dt_m  = np.abs(seg_meta[:, 2] - t_q[i])
             dlat_m = np.abs(seg_meta[:, 0] - lat_q[i])
             dlon_m = np.abs((seg_meta[:, 1] - lon_q[i] + 180.0) % 360.0 - 180.0)
             in_win = (dt_m <= self.dt) & (dlat_m <= self.dlat) & (dlon_m <= self.dlon)
+            in_win &= seg_allowed
             if exclude_profile_ids is not None:
                 in_win &= seg_ids != np.asarray(exclude_profile_ids)[i]
             idx_in = np.where(in_win)[0]
             if len(idx_in) == 0:
                 continue
 
-            dist2 = (dlat_m[idx_in] / self.dlat) ** 2 + (dlon_m[idx_in] / self.dlon) ** 2
-            distance_order = np.argsort(dist2)[:K_p]
+            distance = _normalized_profile_distance(
+                dlat_m[idx_in], dlon_m[idx_in], dt_m[idx_in],
+                self.dlat, self.dlon, self.dt)
+            distance_order = np.argsort(distance)[:K_p]
             top_k = idx_in[distance_order]
             n_found = len(top_k)
             sel_meta[i, :n_found]  = seg_meta[top_k]
@@ -841,7 +906,7 @@ class COSMICNeighborhoodIndex:
             sel_vmask[i, :n_found] = seg_vmask[top_k]
             valid_prof[i, :n_found] = True
             sel_ids[i, :n_found] = seg_ids[top_k]
-            sel_distance[i, :n_found] = np.sqrt(dist2[distance_order])
+            sel_distance[i, :n_found] = distance[distance_order]
             has_obs[i] = 1.0
 
         return dict(lat_q=lat_q, lon_q=lon_q, t_q=t_q,
@@ -850,9 +915,11 @@ class COSMICNeighborhoodIndex:
                     sel_ids=sel_ids, sel_distance=sel_distance,
                     has_obs=has_obs)
 
-    def query_observation_batch(self, coords_np, exclude_profile_ids=None):
+    def query_observation_batch(self, coords_np, exclude_profile_ids=None,
+                                allowed_profile_ids=None):
         """Return actual sampled COSMIC profile points for the density operator."""
-        cached = self.query_profiles_only(coords_np, exclude_profile_ids)
+        cached = self.query_profiles_only(
+            coords_np, exclude_profile_ids, allowed_profile_ids)
         return self.observation_payload_from_cached(cached)
 
     def observation_payload_from_cached(self, cached):
@@ -862,16 +929,17 @@ class COSMICNeighborhoodIndex:
 def get_cosmic_dataloader(cosmic_path, batch_size, bin_size_hours=0.5,
                            num_workers=0, use_memmap=True, val_ratio=0.1,
                            split_seed=42, points_per_profile=8,
-                           profile_index_path=None):
+                           profile_index_path=None, split_days=None):
     """COSMIC-2 DataLoader 工厂函数（接口与 get_dataloaders 对称）。"""
     train_dataset = COSMICDataset(
         cosmic_path, mode='train', val_days=[], bin_size_hours=bin_size_hours,
         use_memmap=use_memmap, val_ratio=val_ratio, split_seed=split_seed,
-        profile_index_path=profile_index_path)
+        profile_index_path=profile_index_path, split_days=split_days)
     val_dataset = COSMICDataset(
-        cosmic_path, mode='val', val_days=[], bin_size_hours=bin_size_hours,
+        cosmic_path, mode=('development' if split_days is not None else 'val'),
+        val_days=[], bin_size_hours=bin_size_hours,
         use_memmap=use_memmap, val_ratio=val_ratio, split_seed=split_seed,
-        profile_index_path=profile_index_path)
+        profile_index_path=profile_index_path, split_days=split_days)
     train_sampler = ProfileTimeBinSampler(
         train_dataset, batch_size=batch_size,
         points_per_profile=points_per_profile, shuffle=True)

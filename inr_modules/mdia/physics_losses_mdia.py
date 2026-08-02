@@ -4,10 +4,19 @@ import torch
 import torch.nn.functional as F
 
 
-def profile_huber_loss(pred, target, profile_ids, delta=0.2):
+def profile_huber_loss(pred, target, profile_ids, delta=0.2, valid_mask=None):
     """Average Huber loss within each profile, then equally across profiles."""
     point_loss = F.huber_loss(pred, target, reduction='none', delta=delta).flatten()
-    _, inverse = torch.unique(profile_ids.flatten(), sorted=False, return_inverse=True)
+    flat_ids = profile_ids.flatten()
+    if valid_mask is not None:
+        valid = valid_mask.flatten().to(device=pred.device, dtype=torch.bool)
+        if valid.shape != point_loss.shape:
+            raise ValueError('valid_mask must have one value per prediction')
+        if not valid.any():
+            return pred.sum() * 0.0
+        point_loss = point_loss[valid]
+        flat_ids = flat_ids[valid]
+    _, inverse = torch.unique(flat_ids, sorted=False, return_inverse=True)
     sums = torch.zeros(inverse.max().item() + 1, device=pred.device, dtype=pred.dtype)
     counts = torch.zeros_like(sums)
     sums.scatter_add_(0, inverse, point_loss)

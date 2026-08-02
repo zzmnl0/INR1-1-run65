@@ -68,6 +68,12 @@ CONFIG_MDIA = {
 
     # ==================== SIREN 架构参数 ====================
     'basis_dim': 64,      # 空间基函数 / 残差网络输出维度
+    'enkf_n_members': 8,  # ETKF集合成员数；分析异常秩至多为N-1
+    'enkf_pert_hidden': 64,
+    'enkf_anomaly_parameterization': 'legacy_independent',
+    'enkf_scale_init': 1.1,
+    'enkf_scale_condition_max': 3.0,
+    'density_basis_semantics': 'query_conditioned',
     'siren_hidden': 128,  # SIREN 隐层维度
     'siren_layers': 3,    # SIREN 隐层数量
     'omega_0': 30.0,      # SIREN 频率因子
@@ -96,11 +102,17 @@ CONFIG_MDIA = {
 
     # ==================== 数据划分 ====================
     'val_ratio': 0.1,
+    'use_date_blocked_split': False,
+    'date_split_manifest': None,
+    'development_days': 5,
+    'locked_test_days': 5,
 
     # ==================== run66 两阶段损失 ====================
     'background_epochs': 5,
     'analysis_epochs': 5,
     'profile_points_per_epoch': 8,
+    'train_profile_fraction': 1.0,
+    'profile_subset_manifest': None,
     'huber_delta': 0.2,
     'w_iri': 0.02,
     'w_increment': 0.01,
@@ -108,6 +120,15 @@ CONFIG_MDIA = {
     'w_time_background': 0.01,
     'w_vertical_analysis': 0.05,
     'w_time_analysis': 0.02,
+    'analysis_loss_active_only': False,
+    'analysis_exact_mode_loss': False,
+    'use_covariance_moment_loss': False,
+    'use_empirical_covariance_loss': False,
+    'covariance_gradient_target': 0.20,
+    'covariance_calibration_batches': 20,
+    'use_direction_loss': False,
+    'direction_gradient_target': 0.04,
+    'direction_calibration_batches': 20,
     'structure_batch_size': 32,
     'structure_alt_step_km': 20.0,
     'structure_time_step_hours': 1.0,
@@ -118,6 +139,8 @@ CONFIG_MDIA = {
     'r_cosmic_init': 0.04,
     'r_mode': 'global',
     'use_distance_localization': True,
+    'representativeness_kernel_path': None,
+    'representativeness_floor': 0.25,
     'r_calibration_batches': None,
     'r_sigma_min': 0.05,
     'r_sigma_max': 0.40,
@@ -126,6 +149,7 @@ CONFIG_MDIA = {
     'background_seed_ckpt': (
         './checkpoints_fsia/run66-etkf-loss/best_background_model.pth'),
     'source_dropout': (0.25, 0.25, 0.50),  # M10, M01, M11
+    'source_mode_schedule': 'random_profile',
 
     # ==================== 梯度裁剪 ====================
     'grad_clip': 1.0,
@@ -196,21 +220,37 @@ def print_config_mdia():
         '数据规格': ['total_hours', 'start_date_str', 'bin_size_hours'],
         '物理参数': ['alt_range'],
         '时序参数': ['seq_len', 'tau_kp_init', 'tau_solar_init'],
-        'SIREN 架构': ['basis_dim', 'siren_hidden', 'siren_layers', 'omega_0',
+        'SIREN 架构': ['basis_dim', 'enkf_n_members', 'enkf_pert_hidden',
+                       'enkf_anomaly_parameterization', 'enkf_scale_init',
+                       'enkf_scale_condition_max', 'density_basis_semantics',
+                       'siren_hidden', 'siren_layers', 'omega_0',
                        'omega_low', 'omega_high'],
         'SW 编码器': ['sw_hidden_dim', 'sw_lstm_layers', 'sw_out_dim'],
         '训练超参数': ['batch_size', 'lr', 'weight_decay', 'background_epochs',
                        'analysis_epochs', 'seed', 'analysis_seed', 'device',
-                       'num_workers', 'use_memmap'],
+                       'num_workers', 'use_memmap', 'train_profile_fraction',
+                       'profile_subset_manifest'],
         '损失权重': ['huber_delta', 'w_iri', 'w_increment',
                     'w_vertical_background', 'w_time_background',
-                    'w_vertical_analysis', 'w_time_analysis'],
+                    'w_vertical_analysis', 'w_time_analysis',
+                    'analysis_loss_active_only',
+                    'analysis_exact_mode_loss',
+                    'use_covariance_moment_loss',
+                    'use_empirical_covariance_loss',
+                    'covariance_gradient_target',
+                    'covariance_calibration_batches',
+                    'use_direction_loss',
+                    'direction_gradient_target',
+                    'direction_calibration_batches'],
         '同化控制': ['background_residual_cap',
                     'r_fy_init', 'r_cosmic_init', 'r_mode',
                     'use_distance_localization',
+                    'representativeness_kernel_path',
+                    'representativeness_floor',
                     'r_calibration_batches', 'r_sigma_min', 'r_sigma_max',
                     'r_min_profiles', 'r_shrinkage_profiles',
-                    'background_seed_ckpt', 'source_dropout'],
+                    'background_seed_ckpt', 'source_dropout',
+                    'source_mode_schedule'],
         '其他': ['grad_clip', 'use_amp'],
     }
 

@@ -1,0 +1,51 @@
+{
+  "retrieved_utc": "2026-08-02",
+  "backend": "Crossref REST API",
+  "purpose": "Verify foundational metadata for local ensemble filtering, latent-space data assimilation, and representation error.",
+  "records": [
+    {
+      "authors": "Hunt, B. R.; Kostelich, E. J.; Szunyogh, I.",
+      "year": 2007,
+      "title": "Efficient data assimilation for spatiotemporal chaos: A local ensemble transform Kalman filter",
+      "container_title": "Physica D: Nonlinear Phenomena",
+      "volume": "230",
+      "issue": "1-2",
+      "pages": "112-126",
+      "doi": "10.1016/j.physd.2006.11.008",
+      "url": "https://doi.org/10.1016/j.physd.2006.11.008"
+    },
+    {
+      "authors": "Janjic, T.; Bormann, N.; Bocquet, M.; Carton, J. A.; Cohn, S. E.; Dance, S. L.; Losa, S. N.; Nichols, N. K.; Potthast, R.; Waller, J. A.; Weston, P.",
+      "year": 2018,
+      "title": "On the representation error in data assimilation",
+      "container_title": "Quarterly Journal of the Royal Meteorological Society",
+      "volume": "144",
+      "issue": "713",
+      "pages": "1257-1278",
+      "doi": "10.1002/qj.3130",
+      "url": "https://doi.org/10.1002/qj.3130"
+    },
+    {
+      "authors": "Fan, H.; Liu, Y.; Huo, Z.; Liu, Y.; Shi, Y.; Li, Y.",
+      "year": 2025,
+      "title": "A Novel Latent Space Data Assimilation Framework with Autoencoder-Observation to Latent Space (AE-O2L) Network. Part I: The Observation-Only Analysis Method",
+      "container_title": "Monthly Weather Review",
+      "volume": "153",
+      "issue": "8",
+      "pages": "1335-1348",
+      "doi": "10.1175/MWR-D-24-0057.1",
+      "url": "https://doi.org/10.1175/MWR-D-24-0057.1"
+    },
+    {
+      "authors": "Fan, H.; Liu, Y.; Liu, Y.; Huo, Z.; Chen, B.; Qin, Y.",
+      "year": 2025,
+      "title": "A Novel Latent Space Data Assimilation Framework with Autoencoder-Observation to Latent Space (AE-O2L) Network. Part II: Observation and Background Assimilation with Interpretability",
+      "container_title": "Monthly Weather Review",
+      "volume": "153",
+      "issue": "8",
+      "pages": "1349-1363",
+      "doi": "10.1175/MWR-D-24-0058.1",
+      "url": "https://doi.org/10.1175/MWR-D-24-0058.1"
+    }
+  ]
+}
