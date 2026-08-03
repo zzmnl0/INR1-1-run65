@@ -27,7 +27,9 @@ from inr_modules.data_managers.irinc_neural_proxy import IRINeuralProxy
 from inr_modules.data_managers.space_weather_manager import SpaceWeatherManager
 from inr_modules.mdia.fsia_model import FSIA_INR_Model, solve_density_modes
 from inr_modules.mdia.sliding_dataset import (
+    attach_representativeness_weight,
     attach_observation_background,
+    load_representativeness_kernel,
     query_observation_payload,
 )
 
@@ -83,6 +85,7 @@ def _geometry(matrix, precision):
         "numeric_rank": int(len(positive)),
         "effective_rank": float(effective),
         "condition": float(positive[0] / positive[-1]),
+        "first_mode_energy": float(energy[0] / energy.sum().clamp_min(1e-12)),
     }, gram
 
 
@@ -90,7 +93,9 @@ def _summary(rows):
     if not rows:
         return {"queries": 0}
     result = {"queries": len(rows)}
-    for key in ("tokens", "numeric_rank", "effective_rank", "condition"):
+    for key in (
+            "tokens", "numeric_rank", "effective_rank", "condition",
+            "first_mode_energy"):
         values = np.asarray([row[key] for row in rows], dtype=np.float64)
         result[f"{key}_q05_q50_q95"] = np.quantile(
             values, [0.05, 0.5, 0.95]
@@ -149,7 +154,8 @@ def _load(run_dir, checkpoint):
 
 
 def _audit_source(
-        source, loader, model, sw_manager, iri_peak_manager, indices, allowed):
+        source, loader, model, sw_manager, iri_peak_manager, indices, allowed,
+        representativeness_grid=None, representativeness_floor=0.25):
     rows = {name: [] for name in ("FY", "COSMIC", "joint")}
     cells = {
         name: defaultdict(list) for name in ("FY", "COSMIC", "joint")
@@ -181,6 +187,9 @@ def _audit_source(
                     exclude_profile_ids=exclude,
                     allowed_profile_ids=allowed[observation_source],
                 )
+                payload = attach_representativeness_weight(
+                    payload, coords, source, observation_source,
+                    representativeness_grid, representativeness_floor)
                 payloads[observation_source] = attach_observation_background(
                     payload, model, sw_manager, iri_peak_manager
                 )
@@ -337,6 +346,15 @@ def main():
     coefficients = layer.ensemble_coefficients.double()
     basis = layer.state_basis.double()
     rank = layer.n_members - 1
+    representativeness_path = config.get('representativeness_kernel_path')
+    if representativeness_path:
+        representativeness_path = Path(representativeness_path)
+        if not representativeness_path.is_absolute():
+            representativeness_path = ROOT / representativeness_path
+    representativeness_grid = load_representativeness_kernel(
+        representativeness_path)
+    representativeness_floor = float(
+        config.get('representativeness_floor', 0.25))
     report = {
         "schema_version": 1,
         "purpose": "ISR-blind N8 and observation-space anomaly audit",
@@ -374,6 +392,8 @@ def main():
                 iri_peak_manager,
                 indices,
                 allowed,
+                representativeness_grid,
+                representativeness_floor,
             )
             for source in ("FY", "COSMIC")
         },

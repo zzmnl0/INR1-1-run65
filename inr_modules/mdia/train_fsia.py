@@ -215,6 +215,14 @@ def _record_resolved_training_config(config, covariance_strata):
             config.get('direction_gradient_target', 0.20)),
         'resolved_direction_weight': config.get(
             'resolved_direction_weight'),
+        'use_observation_gram_loss': bool(
+            config.get('use_observation_gram_loss', False)),
+        'gram_gradient_target': float(
+            config.get('gram_gradient_target', 0.02)),
+        'gram_calibration_batches': int(
+            config.get('gram_calibration_batches', 20)),
+        'resolved_gram_weight': config.get('resolved_gram_weight'),
+        'gram_gradient_calibration': config.get('gram_gradient_calibration'),
         'representativeness_kernel': config.get(
             'resolved_representativeness_kernel'),
         'covariance_strata': covariance_strata,
@@ -511,6 +519,70 @@ _EXACT_MODE_SOURCES = {
 _EXACT_MODE_WEIGHTS = {'M10': 0.25, 'M01': 0.25, 'M11': 0.50}
 
 
+def observation_gram_whitening_loss(extras, profile_ids, kalman_layer,
+                                    return_details=False):
+    """Whiten the production-precision weighted observation factor Gram.
+
+    The loss is computed in the seven independent factor coordinates and is
+    therefore exactly tied to the ``HX = F @ C`` geometry used by the ETKF.
+    Queries with fewer than seven positive-precision tokens are excluded; this
+    keeps padding and genuinely unsupported local windows from manufacturing a
+    rank target.
+    """
+    if kalman_layer.anomaly_parameterization != 'orthogonal_factor':
+        raise ValueError('observation Gram loss requires orthogonal_factor')
+    rank = kalman_layer.n_members - 1
+    profile_ids = profile_ids.reshape(-1)
+    expected = extras['ne_bkg'].shape[0]
+    if profile_ids.numel() != expected:
+        raise ValueError('profile_ids must contain one ID per query')
+    identity = torch.eye(
+        rank, device=extras['ne_bkg'].device, dtype=torch.float32)
+    losses, coverage = {}, {}
+    total = extras['ne_bkg'].sum() * 0.0
+
+    for mode, sources in _EXACT_MODE_SOURCES.items():
+        grams = []
+        token_counts = torch.zeros(
+            expected, device=extras['ne_bkg'].device, dtype=torch.long)
+        for source in sources:
+            factors = extras.get(f'observation_factors_{source}')
+            if factors is None:
+                basis = extras.get(f'basis_{source}')
+                if basis is None:
+                    raise ValueError(
+                        f'observation basis is missing for source {source}')
+                factors = kalman_layer.observation_factor_coordinates(
+                    basis, extras.get('factor_scales'))
+            precision = extras[f'precision_{source}']
+            factors = factors.float()
+            precision = precision.float()
+            grams.append(torch.einsum(
+                'bmr,bm,bmk->brk', factors, precision, factors))
+            token_counts = token_counts + (precision > 0.0).sum(dim=-1)
+        gram = sum(grams)
+        trace = torch.diagonal(gram, dim1=-2, dim2=-1).sum(dim=-1)
+        eligible = (
+            (token_counts >= rank)
+            & torch.isfinite(trace)
+            & (trace > 1e-12)
+            & torch.isfinite(gram).all(dim=-1).all(dim=-1)
+        )
+        normalized = gram / trace.clamp_min(1e-12).unsqueeze(-1).unsqueeze(-1)
+        query_loss = (normalized - identity / rank).square().sum(dim=(-2, -1))
+        query_loss = torch.where(
+            eligible, query_loss, torch.zeros_like(query_loss))
+        losses[mode] = _profile_weighted_mean(
+            query_loss, eligible, profile_ids,
+            torch.ones_like(query_loss))
+        coverage[mode] = eligible.float().mean()
+        total = total + _EXACT_MODE_WEIGHTS[mode] * losses[mode]
+
+    if return_details:
+        return total, losses, coverage
+    return total
+
+
 def exact_mode_profile_losses(extras, target, profile_ids, delta):
     """Profile-balanced M10/M01/M11 losses from one joint forward."""
     losses = {}
@@ -724,7 +796,14 @@ def _paired_analysis_losses(
             fy_extras, target, profile_ids, 'FY')[0]
         + exact_mode_direction_losses(
             cosmic_extras, cosmic_target, cosmic_ids, 'COSMIC')[0])
-    return observation_loss, covariance_loss, direction_loss
+    gram_loss = observation_loss.new_zeros(())
+    if config.get('use_observation_gram_loss', False):
+        gram_loss = 0.5 * (
+            observation_gram_whitening_loss(
+                fy_extras, profile_ids, model.kalman_layer)
+            + observation_gram_whitening_loss(
+                cosmic_extras, cosmic_ids, model.kalman_layer))
+    return observation_loss, covariance_loss, direction_loss, gram_loss
 
 
 def _resolve_covariance_weight(
@@ -751,7 +830,7 @@ def _resolve_covariance_weight(
             except StopIteration:
                 cosmic_iter = iter(cosmic_train_loader)
                 cosmic_batch = next(cosmic_iter)
-            observation, covariance, _ = _paired_analysis_losses(
+            observation, covariance, _, _ = _paired_analysis_losses(
                 model, batch_processor, fy_batch, cosmic_batch, device,
                 config, sw_manager, iri_peak_manager, allowed_profile_ids,
                 _source_mode_for_batch(
@@ -808,7 +887,7 @@ def _resolve_direction_weight(
             except StopIteration:
                 cosmic_iter = iter(cosmic_train_loader)
                 cosmic_batch = next(cosmic_iter)
-            observation, _, direction = _paired_analysis_losses(
+            observation, _, direction, _ = _paired_analysis_losses(
                 model, batch_processor, fy_batch, cosmic_batch, device,
                 config, sw_manager, iri_peak_manager, allowed_profile_ids,
                 'exact_M10_M01_M11')
@@ -839,6 +918,63 @@ def _resolve_direction_weight(
     return resolved
 
 
+def _resolve_gram_weight(
+        model, train_loader, cosmic_train_loader, batch_processor, device,
+        config, sw_manager, iri_peak_manager, allowed_profile_ids=None):
+    batches = int(config.get('gram_calibration_batches', 20))
+    target_ratio = float(config.get('gram_gradient_target', 0.02))
+    if batches < 1 or not 0.0 < target_ratio <= 1.0:
+        raise ValueError(
+            'Gram calibration batches must be positive and target in (0, 1]')
+    numpy_state = np.random.get_state()
+    torch_state = torch.get_rng_state()
+    cuda_state = (
+        torch.cuda.get_rng_state_all() if device.type == 'cuda' else None)
+    ratios = []
+    try:
+        _set_stage_mode(model, 'analysis')
+        cosmic_iter = iter(cosmic_train_loader)
+        for batch_index, fy_batch in enumerate(train_loader):
+            if batch_index >= batches:
+                break
+            try:
+                cosmic_batch = next(cosmic_iter)
+            except StopIteration:
+                cosmic_iter = iter(cosmic_train_loader)
+                cosmic_batch = next(cosmic_iter)
+            observation, _, _, gram = _paired_analysis_losses(
+                model, batch_processor, fy_batch, cosmic_batch, device,
+                config, sw_manager, iri_peak_manager, allowed_profile_ids,
+                'exact_M10_M01_M11')
+            parameters = [
+                parameter for parameter in model.parameters()
+                if parameter.requires_grad]
+            _, _, gram_to_observation, _ = _gradient_norms(
+                observation, gram, parameters)
+            value = float(gram_to_observation)
+            if np.isfinite(value) and value > 0:
+                ratios.append(value)
+            model.zero_grad(set_to_none=True)
+    finally:
+        np.random.set_state(numpy_state)
+        torch.set_rng_state(torch_state)
+        if cuda_state is not None:
+            torch.cuda.set_rng_state_all(cuda_state)
+    if not ratios:
+        raise RuntimeError('observation Gram calibration produced no finite gradients')
+    median_ratio = float(np.median(ratios))
+    resolved = float(np.clip(target_ratio / median_ratio, 1e-4, 1.0))
+    config['gram_gradient_calibration'] = {
+        'batches': len(ratios),
+        'median_ratio': median_ratio,
+        'target_ratio': target_ratio,
+    }
+    print(
+        f'[HX Gram] 梯度比中位数={median_ratio:.6f}, '
+        f'resolved lambda={resolved:.6f}')
+    return resolved
+
+
 def train_one_epoch(model, train_loader, batch_processor, optimizer, device,
                     config, epoch, stage, scaler, sw_manager, iri_peak_manager,
                     cosmic_train_loader, allowed_profile_ids=None):
@@ -847,7 +983,7 @@ def train_one_epoch(model, train_loader, batch_processor, optimizer, device,
     delta = config.get('huber_delta', 0.2)
     cosmic_iter = iter(cosmic_train_loader)
     stats = {key: 0.0 for key in (
-        'total', 'observation', 'covariance', 'direction',
+        'total', 'observation', 'covariance', 'direction', 'gram',
         'fy_obs', 'cosmic_obs',
         'fy_m10', 'fy_m01', 'fy_m11',
         'cosmic_m10', 'cosmic_m01', 'cosmic_m11',
@@ -856,16 +992,19 @@ def train_one_epoch(model, train_loader, batch_processor, optimizer, device,
         'cosmic_direction_m11',
         'iri', 'increment',
         'vertical', 'time', 'weighted_iri', 'weighted_increment',
-        'weighted_covariance', 'weighted_direction',
+        'weighted_covariance', 'weighted_direction', 'weighted_gram',
         'weighted_vertical', 'weighted_time',
         'gradient_ratio', 'gradient_ratio_covariance',
         'gradient_ratio_direction', 'gradient_ratio_iri',
         'gradient_ratio_increment', 'gradient_ratio_vertical',
-        'gradient_ratio_time',
+        'gradient_ratio_time', 'gradient_ratio_gram',
         'gradient_ratio_fy_m10', 'gradient_ratio_fy_m01',
         'gradient_ratio_fy_m11', 'gradient_ratio_cosmic_m10',
         'gradient_ratio_cosmic_m01', 'gradient_ratio_cosmic_m11',
         'fy_active_fraction', 'cosmic_active_fraction',
+        'fy_gram_m10_coverage', 'fy_gram_m01_coverage',
+        'fy_gram_m11_coverage', 'cosmic_gram_m10_coverage',
+        'cosmic_gram_m01_coverage', 'cosmic_gram_m11_coverage',
         'K_FY_mean', 'K_COSMIC_mean', 'innov_FY_norm',
         'innov_COSMIC_norm', 'inflation', 'ne_delta_abs',
     )}
@@ -984,6 +1123,31 @@ def train_one_epoch(model, train_loader, batch_processor, optimizer, device,
             weighted_covariance = (
                 float(config.get('resolved_covariance_weight', 0.0))
                 * covariance_loss)
+            fy_gram_losses = {
+                mode: zero for mode in _EXACT_MODE_SOURCES}
+            cosmic_gram_losses = {
+                mode: zero for mode in _EXACT_MODE_SOURCES}
+            fy_gram_coverage = {
+                mode: zero for mode in _EXACT_MODE_SOURCES}
+            cosmic_gram_coverage = {
+                mode: zero for mode in _EXACT_MODE_SOURCES}
+            gram_loss = observation_loss.new_zeros(())
+            if stage == 'analysis' and config.get(
+                    'use_observation_gram_loss', False):
+                if not exact_mode_loss:
+                    raise ValueError(
+                        'observation Gram loss requires analysis_exact_mode_loss')
+                fy_gram_loss, fy_gram_losses, fy_gram_coverage = (
+                    observation_gram_whitening_loss(
+                        fy_extras, profile_ids, model.kalman_layer,
+                        return_details=True))
+                cosmic_gram_loss, cosmic_gram_losses, cosmic_gram_coverage = (
+                    observation_gram_whitening_loss(
+                        cosmic_extras, cosmic_ids, model.kalman_layer,
+                        return_details=True))
+                gram_loss = 0.5 * (fy_gram_loss + cosmic_gram_loss)
+            weighted_gram = (
+                float(config.get('resolved_gram_weight', 0.0)) * gram_loss)
             fy_direction_modes = {
                 mode: zero for mode in _EXACT_MODE_SOURCES}
             cosmic_direction_modes = {
@@ -1006,7 +1170,8 @@ def train_one_epoch(model, train_loader, batch_processor, optimizer, device,
                 float(config.get('resolved_direction_weight', 0.0))
                 * direction_loss)
             data_loss = (
-                observation_loss + weighted_covariance + weighted_direction)
+                observation_loss + weighted_covariance + weighted_direction
+                + weighted_gram)
 
             vertical_loss, time_loss = _structure_losses(
                 model, batch_processor, sw_manager, iri_peak_manager,
@@ -1053,6 +1218,7 @@ def train_one_epoch(model, train_loader, batch_processor, optimizer, device,
             auxiliary_components = {
                 'covariance': weighted_covariance,
                 'direction': weighted_direction,
+                'gram': weighted_gram,
                 'iri': weighted_iri,
                 'increment': weighted_increment,
                 'vertical': weighted_vertical,
@@ -1078,7 +1244,8 @@ def train_one_epoch(model, train_loader, batch_processor, optimizer, device,
         if audit_batch:
             observation_grad, auxiliary_grad, ratio, component_grads = _gradient_norms(
                 observation_loss,
-                auxiliary_loss + weighted_covariance + weighted_direction,
+                auxiliary_loss + weighted_covariance + weighted_direction
+                + weighted_gram,
                 [p for p in decoder.parameters() if p.requires_grad],
                 gradient_components if max_train_batches is not None else None)
             audited_batches += 1
@@ -1124,6 +1291,28 @@ def train_one_epoch(model, train_loader, batch_processor, optimizer, device,
                 'cosmic_active_fraction': cosmic_active.float().mean().item(),
                 'covariance_raw': covariance_loss.item(),
                 'covariance_weighted': weighted_covariance.item(),
+                'gram_raw': gram_loss.item(),
+                'gram_weighted': weighted_gram.item(),
+                **{
+                    f'fy_gram_{mode.lower()}_raw':
+                    fy_gram_losses[mode].item()
+                    for mode in _EXACT_MODE_SOURCES
+                },
+                **{
+                    f'cosmic_gram_{mode.lower()}_raw':
+                    cosmic_gram_losses[mode].item()
+                    for mode in _EXACT_MODE_SOURCES
+                },
+                **{
+                    f'fy_gram_{mode.lower()}_coverage':
+                    fy_gram_coverage[mode].item()
+                    for mode in _EXACT_MODE_SOURCES
+                },
+                **{
+                    f'cosmic_gram_{mode.lower()}_coverage':
+                    cosmic_gram_coverage[mode].item()
+                    for mode in _EXACT_MODE_SOURCES
+                },
                 'direction_raw': direction_loss.item(),
                 'direction_weighted': weighted_direction.item(),
                 'iri_raw': iri_loss.item(),
@@ -1201,6 +1390,7 @@ def train_one_epoch(model, train_loader, batch_processor, optimizer, device,
         stats['observation'] += observation_loss.item()
         stats['covariance'] += covariance_loss.item()
         stats['direction'] += direction_loss.item()
+        stats['gram'] += gram_loss.item()
         stats['fy_obs'] += fy_loss.item()
         stats['cosmic_obs'] += cosmic_loss.item()
         for mode in _EXACT_MODE_SOURCES:
@@ -1220,12 +1410,18 @@ def train_one_epoch(model, train_loader, batch_processor, optimizer, device,
         stats['weighted_increment'] += weighted_increment.item()
         stats['weighted_covariance'] += weighted_covariance.item()
         stats['weighted_direction'] += weighted_direction.item()
+        stats['weighted_gram'] += weighted_gram.item()
         stats['weighted_vertical'] += weighted_vertical.item()
         stats['weighted_time'] += weighted_time.item()
         stats['gradient_ratio'] += ratio.item()
         for name, value in component_grads.items():
             stats[f'gradient_ratio_{name}'] += (
                 value / observation_grad.clamp_min(1e-12)).item()
+        for mode in _EXACT_MODE_SOURCES:
+            stats[f'fy_gram_{mode.lower()}_coverage'] += (
+                fy_gram_coverage[mode].item())
+            stats[f'cosmic_gram_{mode.lower()}_coverage'] += (
+                cosmic_gram_coverage[mode].item())
         stats['K_FY_mean'] += fy_extras['K_FY'].mean().item()
         stats['K_COSMIC_mean'] += fy_extras['K_COSMIC'].mean().item()
         stats['innov_FY_norm'] += fy_extras['innov_FY'].norm(dim=-1).mean().item()
@@ -1705,6 +1901,29 @@ def train_fsia(config=None):
             and not config.get('representativeness_kernel_path')):
         raise ValueError(
             'empirical covariance loss requires train-only covariance cells')
+    if config.get('use_observation_gram_loss', False):
+        required_gram = {
+            'analysis_exact_mode_loss': True,
+            'basis_dim': 64,
+            'enkf_n_members': 8,
+            'enkf_anomaly_parameterization': 'orthogonal_factor',
+            'density_basis_semantics': 'endpoint_context_symmetric',
+        }
+        mismatched = {
+            key: (config.get(key), expected)
+            for key, expected in required_gram.items()
+            if config.get(key) != expected
+        }
+        if mismatched:
+            raise ValueError(
+                f'observation Gram loss is restricted to M2-O: {mismatched}')
+        if config.get('analysis_state_semantics', 'legacy_feature_increment') != (
+                'legacy_feature_increment'):
+            raise ValueError('observation Gram loss cannot train M2-R states')
+        if not 0.0 < float(config.get('gram_gradient_target', 0.02)) <= 1.0:
+            raise ValueError('gram_gradient_target must be in (0, 1]')
+        if int(config.get('gram_calibration_batches', 20)) < 1:
+            raise ValueError('gram_calibration_batches must be positive')
     device = torch.device(config['device'])
     _reset_random_seeds(config['seed'], device)
 
@@ -1892,6 +2111,10 @@ def train_fsia(config=None):
                     config.get('use_direction_loss', False)):
                 raise ValueError(
                     'checkpoint direction loss differs from config')
+            if bool(loaded.get('use_observation_gram_loss', False)) != bool(
+                    config.get('use_observation_gram_loss', False)):
+                raise ValueError(
+                    'checkpoint observation Gram loss differs from config')
             if loaded.get('representativeness_kernel') != (
                     representativeness_identity):
                 raise ValueError(
@@ -1919,6 +2142,12 @@ def train_fsia(config=None):
             if loaded.get('resolved_direction_weight') is not None:
                 config['resolved_direction_weight'] = float(
                     loaded['resolved_direction_weight'])
+            if loaded.get('resolved_gram_weight') is not None:
+                config['resolved_gram_weight'] = float(
+                    loaded['resolved_gram_weight'])
+            if loaded.get('gram_gradient_calibration') is not None:
+                config['gram_gradient_calibration'] = loaded[
+                    'gram_gradient_calibration']
             resume_state = loaded
             if loaded.get('torch_rng_state') is not None:
                 torch.set_rng_state(loaded['torch_rng_state'].cpu())
@@ -1982,6 +2211,13 @@ def train_fsia(config=None):
             model, train_loader, cosmic_train_loader, batch_processor, device,
             config, sw_manager, iri_peak_manager,
             query_profile_partitions['train'])
+    if (current_stage == 'analysis'
+            and config.get('use_observation_gram_loss', False)
+            and 'resolved_gram_weight' not in config):
+        config['resolved_gram_weight'] = _resolve_gram_weight(
+            model, train_loader, cosmic_train_loader, batch_processor, device,
+            config, sw_manager, iri_peak_manager,
+            query_profile_partitions['train'])
     _record_resolved_training_config(config, covariance_strata)
     stage_epochs = background_epochs if current_stage == 'background' else analysis_epochs
     optimizer, scheduler = _make_optimizer(model, config, stage_epochs)
@@ -2024,6 +2260,13 @@ def train_fsia(config=None):
                     device, config, sw_manager, iri_peak_manager,
                     query_profile_partitions['train'])
                 _record_resolved_training_config(config, covariance_strata)
+            if (config.get('use_observation_gram_loss', False)
+                    and 'resolved_gram_weight' not in config):
+                config['resolved_gram_weight'] = _resolve_gram_weight(
+                    model, train_loader, cosmic_train_loader, batch_processor,
+                    device, config, sw_manager, iri_peak_manager,
+                    query_profile_partitions['train'])
+                _record_resolved_training_config(config, covariance_strata)
             optimizer, scheduler = _make_optimizer(model, config, analysis_epochs)
             scaler = (torch.cuda.amp.GradScaler()
                       if config.get('use_amp', False) and device.type == 'cuda' else None)
@@ -2051,6 +2294,34 @@ def train_fsia(config=None):
             print(
                 f"  警告: 辅助/观测梯度比={train_metrics['gradient_ratio']:.3f}>0.30；"
                 '全量训练前应下调对应辅助权重')
+        if (stage == 'analysis'
+                and config.get('use_observation_gram_loss', False)
+                and config.get('max_train_batches') is not None
+                and train_metrics['gradient_audit_batches']):
+            gram_ratio = train_metrics.get('gradient_ratio_gram', 0.0)
+            coverages = [
+                train_metrics[f'{target}_gram_{mode}_coverage']
+                for target in ('fy', 'cosmic')
+                for mode in ('m10', 'm01', 'm11')
+            ]
+            if not 0.016 <= gram_ratio <= 0.024:
+                raise RuntimeError(
+                    f'Gram preflight gradient ratio {gram_ratio:.6f} is outside '
+                    '[0.016, 0.024]')
+            if min(coverages) < 0.50:
+                raise RuntimeError(
+                    f'Gram preflight eligible coverage is below 0.50: {coverages}')
+            if train_metrics['gradient_ratio'] > 0.30:
+                raise RuntimeError(
+                    'Gram preflight auxiliary/observation gradient ratio exceeds 0.30')
+            if len(batch_diagnostics) >= 40:
+                first_gram = np.median([
+                    row['gram_raw'] for row in batch_diagnostics[:20]])
+                last_gram = np.median([
+                    row['gram_raw'] for row in batch_diagnostics[-20:]])
+                if not last_gram < first_gram:
+                    raise RuntimeError(
+                        'Gram preflight loss did not decrease over the audited batches')
 
         history_row = {
             'epoch': epoch + 1,
@@ -2097,6 +2368,8 @@ def train_fsia(config=None):
                 config.get('use_empirical_covariance_loss', False)),
             'use_direction_loss': bool(
                 config.get('use_direction_loss', False)),
+            'use_observation_gram_loss': bool(
+                config.get('use_observation_gram_loss', False)),
             'representativeness_kernel': representativeness_identity,
             'architecture': architecture,
             'profile_subset': profile_subset,
@@ -2107,6 +2380,9 @@ def train_fsia(config=None):
                 'resolved_covariance_weight'),
             'resolved_direction_weight': config.get(
                 'resolved_direction_weight'),
+            'resolved_gram_weight': config.get('resolved_gram_weight'),
+            'gram_gradient_calibration': config.get(
+                'gram_gradient_calibration'),
             'stage': stage,
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
@@ -2145,6 +2421,8 @@ def train_fsia(config=None):
             config.get('use_empirical_covariance_loss', False)),
         'use_direction_loss': bool(
             config.get('use_direction_loss', False)),
+        'use_observation_gram_loss': bool(
+            config.get('use_observation_gram_loss', False)),
         'representativeness_kernel': representativeness_identity,
         'r_fy': model.kalman_layer.r_fy.item(),
         'r_cosmic': model.kalman_layer.r_cosmic.item(),
@@ -2168,6 +2446,15 @@ def train_fsia(config=None):
             'gradient_target': float(
                 config.get('direction_gradient_target', 0.20)),
             'resolved_weight': config.get('resolved_direction_weight'),
+        },
+        'observation_gram_loss': {
+            'enabled': bool(config.get('use_observation_gram_loss', False)),
+            'gradient_target': float(
+                config.get('gram_gradient_target', 0.02)),
+            'calibration_batches': int(
+                config.get('gram_calibration_batches', 20)),
+            'resolved_weight': config.get('resolved_gram_weight'),
+            'gradient_calibration': config.get('gram_gradient_calibration'),
         },
     }
     with open(os.path.join(config['save_dir'], 'training_summary.json'),

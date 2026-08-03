@@ -19,6 +19,7 @@ from inr_modules.mdia.train_fsia import (
     empirical_covariance_loss,
     exact_mode_direction_losses,
     exact_mode_profile_losses,
+    observation_gram_whitening_loss,
 )
 
 
@@ -421,6 +422,97 @@ def test_factorized_anomaly_geometry_and_gradients():
     assert torch.equal(
         model(coords, sw, iri_peak=peak)[0],
         clone(coords, sw, iri_peak=peak)[0])
+
+
+def test_observation_factor_projection_and_gram_whitening():
+    torch.manual_seed(7)
+    layer = NeuralETKFLayer(
+        d_model=8, b_net_in=6, n_members=8, pert_hidden=4,
+        anomaly_parameterization='orthogonal_factor')
+    phi = torch.randn(2, 5, 8)
+    anomalies, scales = layer._eval_perturbations(torch.randn(2, 6))
+    projected = torch.einsum('bmd,bnd->bmn', phi, anomalies)
+    factors = layer.observation_factor_coordinates(phi, scales)
+    reconstructed = torch.einsum(
+        'bmr,rn->bmn', factors, layer.ensemble_coefficients.to(phi.dtype))
+    assert torch.allclose(projected, reconstructed, atol=1e-6)
+
+    rank = layer.n_members - 1
+    identity_factors = torch.eye(rank).unsqueeze(0)
+    identity_extras = {
+        'ne_bkg': torch.zeros(1, 1),
+        'observation_factors_FY': identity_factors,
+        'observation_factors_COSMIC': identity_factors.clone(),
+        'precision_FY': torch.ones(1, rank),
+        'precision_COSMIC': torch.ones(1, rank),
+    }
+    identity_loss, identity_modes, identity_coverage = (
+        observation_gram_whitening_loss(
+            identity_extras, torch.tensor([0]), layer, return_details=True))
+    assert identity_loss == 0
+    assert all(value == 0 for value in identity_modes.values())
+    assert all(value == 1 for value in identity_coverage.values())
+
+    rank_one = torch.ones(1, rank, rank)
+    rank_one_extras = {
+        **identity_extras,
+        'observation_factors_FY': rank_one,
+        'observation_factors_COSMIC': rank_one.clone(),
+    }
+    rank_one_loss = observation_gram_whitening_loss(
+        rank_one_extras, torch.tensor([0]), layer)
+    assert torch.allclose(rank_one_loss, torch.tensor(6.0 / 7.0), atol=1e-6)
+
+    scaled = {
+        **identity_extras,
+        'observation_factors_FY': identity_factors * 9.0,
+        'observation_factors_COSMIC': identity_factors * 0.25,
+        'precision_FY': identity_extras['precision_FY'] * 3.0,
+        'precision_COSMIC': identity_extras['precision_COSMIC'] * 0.5,
+    }
+    assert torch.allclose(
+        observation_gram_whitening_loss(scaled, torch.tensor([0]), layer),
+        identity_loss, atol=1e-6)
+
+    padded = {
+        **identity_extras,
+        'observation_factors_FY': torch.cat([
+            identity_factors, torch.full((1, 2, rank), 1e20)], dim=1),
+        'observation_factors_COSMIC': torch.cat([
+            identity_factors, torch.full((1, 2, rank), 1e20)], dim=1),
+        'precision_FY': torch.cat([
+            identity_extras['precision_FY'], torch.zeros(1, 2)], dim=1),
+        'precision_COSMIC': torch.cat([
+            identity_extras['precision_COSMIC'], torch.zeros(1, 2)], dim=1),
+    }
+    assert torch.allclose(
+        observation_gram_whitening_loss(padded, torch.tensor([0]), layer),
+        identity_loss, atol=1e-6)
+
+    skipped = {
+        **identity_extras,
+        'precision_FY': torch.ones(1, rank - 1),
+        'precision_COSMIC': torch.zeros(1, 0),
+        'observation_factors_FY': identity_factors[:, :rank - 1],
+        'observation_factors_COSMIC': identity_factors[:, :0],
+    }
+    skipped_loss, _, skipped_coverage = observation_gram_whitening_loss(
+        skipped, torch.tensor([0]), layer, return_details=True)
+    assert skipped_loss == 0
+    assert all(value == 0 for value in skipped_coverage.values())
+
+    trainable = identity_factors.clone()
+    trainable[0, 0, 0] = 2.0
+    trainable.requires_grad_()
+    gradient_extras = {
+        **identity_extras,
+        'observation_factors_FY': trainable,
+    }
+    gradient_loss = observation_gram_whitening_loss(
+        gradient_extras, torch.tensor([0]), layer)
+    gradient_loss.backward()
+    assert torch.isfinite(trainable.grad).all()
+    assert trainable.grad.abs().sum() > 0
 
 
 def test_coordinate_local_symmetric_covariance_and_compatibility():

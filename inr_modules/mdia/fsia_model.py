@@ -330,6 +330,31 @@ class NeuralETKFLayer(nn.Module):
         delta = torch.einsum('bni,nio->bno', h, self.P_w2) + self.P_b2.unsqueeze(0)
         return delta, None                                                       # [B, N, d]
 
+    def observation_factor_coordinates(self, phi_obs, factor_scales=None):
+        """Project density-basis rows into the independent ETKF factors.
+
+        For the orthogonal-factor parameterization this returns ``F`` such that
+        ``phi_obs @ X == F @ ensemble_coefficients``.  Keeping this relation in
+        one method prevents the training-only Gram diagnostic from silently
+        using a different state geometry than the production ETKF.
+        """
+        if self.anomaly_parameterization != 'orthogonal_factor':
+            raise ValueError(
+                'observation factor coordinates require orthogonal_factor')
+        if phi_obs.ndim != 3 or phi_obs.shape[-1] != self.d_model:
+            raise ValueError(
+                f'phi_obs must have shape [B, M, {self.d_model}]')
+        rank = self.n_members - 1
+        basis = self.state_basis.to(device=phi_obs.device, dtype=phi_obs.dtype)
+        factors = torch.einsum('bmd,dr->bmr', phi_obs, basis)
+        if factor_scales is None:
+            scales = phi_obs.new_full((phi_obs.shape[0], rank), self.scale_init)
+        else:
+            if factor_scales.shape != (phi_obs.shape[0], rank):
+                raise ValueError('factor_scales shape does not match phi_obs')
+            scales = factor_scales.to(device=phi_obs.device, dtype=phi_obs.dtype)
+        return factors * scales.unsqueeze(1)
+
     def set_observation_variances(
             self, r_fy, r_cosmic, r_fy_table=None, r_cosmic_table=None):
         del r_fy_table, r_cosmic_table

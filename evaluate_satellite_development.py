@@ -198,6 +198,71 @@ def _summarize_records(records, minimum_profiles=200, minimum_dates=5):
     return result
 
 
+def _development_gate(sources, hard_invariants, minimum_direction=0.55):
+    """Return the ISR-blind candidate gate used before model freezing."""
+    def at_least(value, threshold):
+        return value is not None and math.isfinite(value) and value >= threshold
+
+    def at_most(value, threshold):
+        return value is not None and math.isfinite(value) and value <= threshold
+
+    self_modes = {'FY': 'M10', 'COSMIC': 'M01'}
+    cross_modes = {'FY': 'M01', 'COSMIC': 'M10'}
+    self_negative = {
+        target: sources[target]['modes'][mode]['negative_correct_fraction']
+        for target, mode in self_modes.items()
+    }
+    cross_direction = {
+        target: sources[target]['modes'][mode]['direction_fraction']
+        for target, mode in cross_modes.items()
+    }
+    self_non_degraded = {
+        target: at_least(
+            sources[target]['modes'][mode][
+                'relative_rmse_improvement_vs_M00'], -0.01)
+        for target, mode in self_modes.items()
+    }
+    joint_best_single = {
+        target: at_most(
+            sources[target]['modes']['M11'][
+                'relative_rmse_change_vs_best_single'], 0.01)
+        for target in ('FY', 'COSMIC')
+    }
+    cell_checks = {}
+    for target in ('FY', 'COSMIC'):
+        cell_checks[target] = {}
+        for cell, summary in sources[target]['strata']['M11'].items():
+            if summary.get('direction_estimable', False):
+                cell_checks[target][cell] = (
+                    at_least(
+                        summary.get('direction_fraction'), minimum_direction))
+    all_estimable_cells = all(
+        passed for checks in cell_checks.values() for passed in checks.values())
+    result = {
+        'self_negative_response_ge_70': {
+            target: at_least(value, 0.70)
+            for target, value in self_negative.items()
+        },
+        'cross_source_direction_ge_60': {
+            target: at_least(value, 0.60)
+            for target, value in cross_direction.items()
+        },
+        'estimable_m11_cells_direction_ge_55': cell_checks,
+        'self_profile_rmse_not_degraded_over_1pct': self_non_degraded,
+        'm11_not_worse_than_best_single_over_1pct': joint_best_single,
+        'hard_invariants': bool(hard_invariants),
+    }
+    result['passed'] = all((
+        result['hard_invariants'],
+        all(result['self_negative_response_ge_70'].values()),
+        all(result['cross_source_direction_ge_60'].values()),
+        all(result['self_profile_rmse_not_degraded_over_1pct'].values()),
+        all(result['m11_not_worse_than_best_single_over_1pct'].values()),
+        all_estimable_cells,
+    ))
+    return result
+
+
 def _summarize_attribution(records, minimum_profiles=200, minimum_dates=5):
     dates = {record["date"] for record in records}
     result = {
@@ -975,6 +1040,9 @@ def main():
         and result["invariants"]["repeat_inference_deterministic"]
         for result in report["sources"].values()
     )
+    report["development_gates"] = _development_gate(
+        report["sources"], report["passed_hard_invariants"])
+    report["passed_development_gates"] = report["development_gates"]["passed"]
     args.output.parent.mkdir(parents=True, exist_ok=True)
     temporary = args.output.with_suffix(args.output.suffix + ".tmp")
     with temporary.open("w", encoding="utf-8") as stream:

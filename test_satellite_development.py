@@ -7,6 +7,7 @@ from evaluate_satellite_development import (
     N_EMPIRICAL_CELLS,
     _apply_stable_cell_mask,
     _attribution_record,
+    _development_gate,
     _single_source_gain,
     _solve_mode,
     _summarize_records,
@@ -43,6 +44,40 @@ def test_development_summary_is_profile_balanced_and_marks_sparse_cells():
     assert result["direction_profiles"] == 2
     assert result["direction_dates"] == 2
     assert not result["direction_estimable"]
+
+
+def test_development_gate_rejects_negative_response_or_joint_degradation():
+    def source():
+        modes = {
+            mode: {
+                "negative_correct_fraction": 0.75,
+                "direction_fraction": 0.65,
+                "relative_rmse_improvement_vs_M00": 0.0,
+                "relative_rmse_change_vs_best_single": 0.0,
+            }
+            for mode in ("M10", "M01", "M11")
+        }
+        return {
+            "modes": modes,
+            "strata": {
+                "M11": {
+                    "h120-200_day_lat+00_+10": {
+                        "direction_estimable": True,
+                        "direction_fraction": 0.60,
+                    }
+                }
+            },
+        }
+
+    sources = {"FY": source(), "COSMIC": source()}
+    passed = _development_gate(sources, True)
+    assert passed["passed"]
+    sources["FY"]["modes"]["M10"]["negative_correct_fraction"] = 0.69
+    assert not _development_gate(sources, True)["passed"]
+    sources["FY"]["modes"]["M10"]["negative_correct_fraction"] = 0.75
+    sources["FY"]["modes"]["M11"][
+        "relative_rmse_change_vs_best_single"] = 0.011
+    assert not _development_gate(sources, True)["passed"]
 
 
 def test_mode_solver_recovers_closed_form_etkf_mean_and_variance():

@@ -131,6 +131,7 @@ def main(eval_only=False, resume_ckpt=None, run_name=_DEFAULT_RUN_NAME,
          profile_subset_manifest=None, covariance_moment=None,
          empirical_covariance_loss=None,
          covariance_gradient_target=None,
+         observation_gram_loss=None, gram_gradient_target=None,
          direction_loss=None,
          post_train_evaluation=True, date_blocked_split=None,
          date_split_manifest=None, source_mode_schedule=None,
@@ -189,6 +190,17 @@ def main(eval_only=False, resume_ckpt=None, run_name=_DEFAULT_RUN_NAME,
         if covariance_gradient_target is None else covariance_gradient_target)
     if not 0.0 < covariance_gradient_target <= 1.0:
         raise ValueError('covariance_gradient_target must be in (0, 1]')
+    observation_gram_loss = bool(
+        prior_config.get(
+            'use_observation_gram_loss',
+            config.get('use_observation_gram_loss', False))
+        if observation_gram_loss is None else observation_gram_loss)
+    gram_gradient_target = float(
+        prior_config.get(
+            'gram_gradient_target', config.get('gram_gradient_target', 0.02))
+        if gram_gradient_target is None else gram_gradient_target)
+    if not 0.0 < gram_gradient_target <= 1.0:
+        raise ValueError('gram_gradient_target must be in (0, 1]')
     direction_loss = bool(
         prior_config.get('use_direction_loss', False)
         if direction_loss is None else direction_loss)
@@ -253,6 +265,8 @@ def main(eval_only=False, resume_ckpt=None, run_name=_DEFAULT_RUN_NAME,
         use_covariance_moment_loss=bool(covariance_moment),
         use_empirical_covariance_loss=bool(empirical_covariance_loss),
         covariance_gradient_target=covariance_gradient_target,
+        use_observation_gram_loss=bool(observation_gram_loss),
+        gram_gradient_target=gram_gradient_target,
         use_direction_loss=bool(direction_loss),
         use_date_blocked_split=date_blocked_split,
         date_split_manifest=date_split_manifest,
@@ -525,6 +539,12 @@ if __name__ == '__main__':
         '--covariance-gradient-target', type=float, default=None,
         help='target empirical-covariance/observation gradient ratio')
     parser.add_argument(
+        '--observation-gram-loss', action='store_true', default=None,
+        help='train Analysis with production-precision HX Gram whitening')
+    parser.add_argument(
+        '--gram-gradient-target', type=float, default=None,
+        help='target HX Gram/observation gradient ratio')
+    parser.add_argument(
         '--direction-loss', action='store_true', default=None,
         help='penalize exact M10/M01/M11 increments opposite to target residuals')
     parser.add_argument(
@@ -585,6 +605,8 @@ if __name__ == '__main__':
                 covariance_moment=args.covariance_moment,
                 empirical_covariance_loss=args.empirical_covariance_loss,
                 covariance_gradient_target=args.covariance_gradient_target,
+                observation_gram_loss=args.observation_gram_loss,
+                gram_gradient_target=args.gram_gradient_target,
                 post_train_evaluation=not args.train_only,
                 date_blocked_split=args.date_blocked_split,
                 date_split_manifest=args.date_split_manifest,
