@@ -18,6 +18,7 @@ FSIA-INR × ISR 独立验证主程序
               'mdia' → 加载 MDIA_INR_Model + best_mdia_model.pth（备用）
 """
 
+import argparse
 import os
 import sys
 import csv
@@ -43,7 +44,7 @@ CONFIG = {
     # ---- 模型类型：'fsia'（默认）或 'mdia' ----
     'model_type': 'fsia',
 
-    # ---- 检查点路径（None = 根据 model_type 自动推断）----
+    # ---- 必须显式指定通过development门禁并冻结的epoch ----
     'checkpoint_path': None,
 
     # ---- ISR 数据目录 ----
@@ -64,7 +65,8 @@ CONFIG = {
     'batch_size':      2048,    # 单次推理点数
 
     # ---- 输出目录 ----
-    'save_dir': os.path.join(_FSIA_DIR, r'isr_validation_outputs\run66-etkf-loss'),
+    'save_dir': os.path.join(
+        _FSIA_DIR, r'isr_validation_outputs\run66-m2o-full-15epoch-isr'),
 
     # ---- 是否处理各站点（可单独关闭）----
     'run_jicamarca':  True,
@@ -214,13 +216,31 @@ def _parse_unix(date_str):
 
 
 def _resolve_checkpoint(config, mdia_cfg):
-    """若 checkpoint_path 为 None，根据 model_type 自动推断。"""
+    """Resolve an explicitly frozen FSIA epoch; RMSE-best is not an ISR gate."""
     if config['checkpoint_path'] is not None:
         return config['checkpoint_path']
     model_type = config.get('model_type', 'fsia')
     if model_type == 'fsia':
-        return os.path.join(mdia_cfg['save_dir'], 'best_fsia_model.pth')
+        raise ValueError(
+            'M2-O ISR验证必须用--checkpoint显式指定通过development门禁的epoch；'
+            '不得自动使用RMSE-best best_fsia_model.pth')
     return os.path.join(mdia_cfg['save_dir'], 'best_mdia_model.pth')
+
+
+def _require_m2o_config(config):
+    expected = {
+        'basis_dim': 64,
+        'enkf_n_members': 8,
+        'enkf_anomaly_parameterization': 'orthogonal_factor',
+        'density_basis_semantics': 'endpoint_context_symmetric',
+        'r_mode': 'global',
+        'use_distance_localization': True,
+    }
+    mismatches = {
+        key: (config.get(key), value)
+        for key, value in expected.items() if config.get(key) != value}
+    if mismatches:
+        raise ValueError(f'checkpoint不是M2-O推理语义: {mismatches}')
 
 
 def _load_state_compat(model, state_dict):
@@ -280,7 +300,9 @@ def _load_model_and_managers(config, device):
     model_type = config.get('model_type', 'mdia')
     ckpt = _resolve_checkpoint(config, cfg)
     manifest_path = os.path.join(os.path.dirname(ckpt), 'run_manifest.json')
-    if model_type == 'fsia' and os.path.isfile(manifest_path):
+    if model_type == 'fsia':
+        if not os.path.isfile(manifest_path):
+            raise FileNotFoundError(f'M2-O checkpoint缺少run manifest: {manifest_path}')
         with open(manifest_path, encoding='utf-8') as stream:
             trained_config = json.load(stream).get('config', {})
         for key in (
@@ -289,9 +311,11 @@ def _load_model_and_managers(config, device):
                 'iri_hmf2_path', 'iri_nmf2_path', 'sw_path',
                 'basis_dim', 'enkf_n_members', 'enkf_pert_hidden',
                 'enkf_anomaly_parameterization', 'enkf_scale_init',
-                'enkf_scale_condition_max', 'density_basis_semantics'):
+                'enkf_scale_condition_max', 'density_basis_semantics',
+                'r_mode', 'use_distance_localization'):
             if key in trained_config:
                 cfg[key] = trained_config[key]
+        _require_m2o_config(cfg)
 
     # IRI 代理
     iri_proxy = IRINeuralProxy(layers=[4, 128, 128, 128, 128, 1]).to(device)
@@ -312,32 +336,6 @@ def _load_model_and_managers(config, device):
         model_name = 'MDIA-INR'
 
     state = torch.load(ckpt, map_location=device, weights_only=True)
-
-    # N-adaptive：检查点 N_members 可能与当前 model 不同（如 run56=8, run57=4）
-    if model_type == 'fsia':
-        _ckpt_P_w1 = state.get('kalman_layer.P_w1')
-        _ckpt_coefficients = state.get('kalman_layer.ensemble_coefficients')
-        _ckpt_n = (
-            int(_ckpt_P_w1.shape[0]) if _ckpt_P_w1 is not None
-            else int(_ckpt_coefficients.shape[1])
-            if _ckpt_coefficients is not None else model.enkf_n_members)
-        if _ckpt_n != model.enkf_n_members:
-            print(f'[main] 检查点 N={_ckpt_n} ≠ 当前 N={model.enkf_n_members}，'
-                  f'自适应重建 NeuralETKFLayer(n_members={_ckpt_n})')
-            from inr_modules.mdia.fsia_model import NeuralETKFLayer
-            _kl = model.kalman_layer
-            model.kalman_layer = NeuralETKFLayer(
-                d_model    = _kl.d_model,
-                b_net_in   = _kl.b_net_in,
-                n_members  = _ckpt_n,
-                pert_hidden= _kl.pert_hidden,
-                r_fy       = _kl.r_fy.item(),
-                r_cosmic   = _kl.r_cosmic.item(),
-                anomaly_parameterization=_kl.anomaly_parameterization,
-                scale_init=_kl.scale_init,
-                scale_condition_max=_kl.scale_condition_max,
-            ).to(device)
-            model.enkf_n_members = _ckpt_n
 
     if model_type == 'fsia':
         model.load_state_dict(state, strict=True)
@@ -625,7 +623,11 @@ def _process_station(station_name, day_records, model, sw_manager,
     return report
 
 
-def main():
+def main(checkpoint=None, save_dir=None):
+    if checkpoint is not None:
+        CONFIG['checkpoint_path'] = checkpoint
+    if save_dir is not None:
+        CONFIG['save_dir'] = save_dir
     # ==================== 设备 ====================
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f'[main] 使用设备: {device}')
@@ -742,4 +744,10 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        '--checkpoint', required=True,
+        help='development门禁通过后冻结的M2-O epoch checkpoint')
+    parser.add_argument('--save-dir', default=None)
+    args = parser.parse_args()
+    main(checkpoint=args.checkpoint, save_dir=args.save_dir)

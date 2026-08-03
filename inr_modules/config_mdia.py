@@ -33,13 +33,13 @@ else:
 
 CONFIG_MDIA = {
     # ==================== 数据路径 ====================
-    'fy_path': r'D:\FYsatellite\EDP_data\fy_202409_clean1.npy',
-    # clean1 supplies physical columns; clean3's seventh column supplies profile_id only.
-    'fy_profile_path': r'D:\FYsatellite\EDP_data\fy_202409_clean3.npy',
-    'fy_profile_index_path': None,
+    'fy_path': r'D:\FYsatellite\EDP_data\fy_202409_qc_v2.npy',
+    'fy_profile_path': None,
+    'fy_profile_index_path': r'D:\FYsatellite\EDP_data\fy_202409_qc_v2_index.npz',
+    'fy_qc_report_path': r'D:\FYsatellite\EDP_data\fy_202409_qc_v2_report.json',
     'iri_proxy_path': r'D:\code11\IRI01\output_results\iri_september_full_proxy.pth',
     'sw_path': r'D:\FYsatellite\EDP_data\kp\OMNI_Kp_F107_20240901_20241001.txt',
-    'save_dir': './checkpoints_fsia/run66-qc2-latent-etkf-density-H-global-localized',
+    'save_dir': './checkpoints_fsia/run66-m2o-full-15epoch',
 
     # ==================== GIRO 独立评估数据（训练不读取）====================
     # 由 preprocess_giro.py 生成，供 evaluate_giro_peak.py 使用
@@ -70,10 +70,10 @@ CONFIG_MDIA = {
     'basis_dim': 64,      # 空间基函数 / 残差网络输出维度
     'enkf_n_members': 8,  # ETKF集合成员数；分析异常秩至多为N-1
     'enkf_pert_hidden': 64,
-    'enkf_anomaly_parameterization': 'legacy_independent',
+    'enkf_anomaly_parameterization': 'orthogonal_factor',
     'enkf_scale_init': 1.1,
     'enkf_scale_condition_max': 3.0,
-    'density_basis_semantics': 'query_conditioned',
+    'density_basis_semantics': 'endpoint_context_symmetric',
     'analysis_state_semantics': 'legacy_feature_increment',
     'context_semantics': 'query_conditioning',
     'mode_basis_semantics': 'learned_density_basis',
@@ -105,14 +105,16 @@ CONFIG_MDIA = {
 
     # ==================== 数据划分 ====================
     'val_ratio': 0.1,
-    'use_date_blocked_split': False,
-    'date_split_manifest': None,
+    'use_date_blocked_split': True,
+    'date_split_manifest': (
+        r'isr_validation_outputs\run66-modelonly-m0\date_split_manifest.json'),
     'development_days': 5,
     'locked_test_days': 5,
 
     # ==================== run66 两阶段损失 ====================
     'background_epochs': 5,
-    'analysis_epochs': 5,
+    # 15个编号epoch = 5个冻结Background编号 + 10个正式Analysis epoch。
+    'analysis_epochs': 10,
     'profile_points_per_epoch': 8,
     'train_profile_fraction': 1.0,
     'profile_subset_manifest': None,
@@ -122,12 +124,12 @@ CONFIG_MDIA = {
     'w_vertical_background': 0.02,
     'w_time_background': 0.01,
     'w_vertical_analysis': 0.05,
-    'w_time_analysis': 0.02,
+    'w_time_analysis': 0.0033,
     'analysis_loss_active_only': False,
-    'analysis_exact_mode_loss': False,
+    'analysis_exact_mode_loss': True,
     'use_covariance_moment_loss': False,
-    'use_empirical_covariance_loss': False,
-    'covariance_gradient_target': 0.20,
+    'use_empirical_covariance_loss': True,
+    'covariance_gradient_target': 0.008139966,
     'covariance_calibration_batches': 20,
     'use_direction_loss': False,
     'direction_gradient_target': 0.04,
@@ -142,7 +144,9 @@ CONFIG_MDIA = {
     'r_cosmic_init': 0.04,
     'r_mode': 'global',
     'use_distance_localization': True,
-    'representativeness_kernel_path': None,
+    'representativeness_kernel_path': (
+        r'isr_validation_outputs\run66-empirical-covariance-date-blocked-train-only'
+        r'\empirical_covariance_cells.npz'),
     'representativeness_floor': 0.25,
     'r_calibration_batches': None,
     'r_sigma_min': 0.05,
@@ -186,8 +190,14 @@ CONFIG_MDIA = {
     'fy_nb_k_prof':    8,    # 最近剖面数
     'fy_nb_n_alt':     8,    # 每剖面高度采样数
     # ==================== run64: COSMIC-2 第三数据源 ====================
-    'cosmic_path':    r'D:\cosmic2\cosmic245-274-September\cosmic_september_2024.npy',
-    'cosmic_profile_index_path': None,
+    'cosmic_path':    (r'D:\cosmic2\cosmic245-274-September'
+                       r'\cosmic_september_2024_qc.npy'),
+    'cosmic_profile_index_path': (
+        r'D:\cosmic2\cosmic245-274-September'
+        r'\cosmic_september_2024_qc_index.npz'),
+    'cosmic_qc_report_path': (
+        r'D:\cosmic2\cosmic245-274-September'
+        r'\cosmic_september_2024_qc_report.json'),
     'cosmic_nb_dt':       1.5,   # 邻域时间半径（小时）
     'cosmic_nb_dlat':     5.0,   # 邻域纬度半径（度）
     'cosmic_nb_dlon':    15.0,   # 邻域经度半径（度）

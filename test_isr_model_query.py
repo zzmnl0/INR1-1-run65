@@ -4,7 +4,11 @@ import numpy as np
 import torch
 
 from isr_evaluation.model_query import query_model_grid
-from isr_evaluation.main_isr_eval import _compute_stratified_metrics
+from isr_evaluation.main_isr_eval import (
+    _compute_stratified_metrics,
+    _require_m2o_config,
+    _resolve_checkpoint,
+)
 from inr_modules.mdia.visualization_mdia import _infer_grid
 
 
@@ -148,7 +152,26 @@ def test_stratified_metrics_keep_three_model_stages():
     assert 'iri_all_alt_all' in metrics
 
 
+def test_isr_requires_explicit_frozen_m2o_epoch():
+    try:
+        _resolve_checkpoint({'checkpoint_path': None, 'model_type': 'fsia'}, {})
+    except ValueError as error:
+        assert 'development' in str(error)
+    else:
+        raise AssertionError('ambiguous RMSE-best checkpoint was accepted')
+
+    _require_m2o_config({
+        'basis_dim': 64,
+        'enkf_n_members': 8,
+        'enkf_anomaly_parameterization': 'orthogonal_factor',
+        'density_basis_semantics': 'endpoint_context_symmetric',
+        'r_mode': 'global',
+        'use_distance_localization': True,
+    })
+
+
 if __name__ == '__main__':
     test_query_model_grid_passes_both_sources()
     test_infer_grid_reports_raw_background_and_four_modes()
     test_stratified_metrics_keep_three_model_stages()
+    test_isr_requires_explicit_frozen_m2o_epoch()

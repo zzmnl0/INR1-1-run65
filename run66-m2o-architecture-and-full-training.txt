@@ -1,0 +1,256 @@
+Run66 M2-O架构、执行逻辑与完整训练说明
+========================================
+
+一、当前唯一有效模型
+--------------------
+
+唯一有效模型：run66-modelonly-m2o-endpoint-context-symmetric / epoch 9。
+checkpoint：checkpoints_fsia/run66-modelonly-m2o-endpoint-context-symmetric/epoch_09_model.pth
+SHA256：533a1009c42a8867da230939884076d96041e58c313e8793145e80b6457612b6
+
+V0/V1/V2 query-local七系数物理字典均是失败shadow，不是训练或development候选。代码要求显式
+allow_failed_query_local_shadow=True才允许审计脚本构造它们；标准训练和development入口会拒绝
+query-local physical state。保留它们仅用于复核失败证据。
+
+二、必须准确理解的M2-O状态语义
+------------------------------
+
+M2-O不是“全域统一latent状态”，也不是“统一七维物理系数状态”。它的Analysis状态是每个输出query
+自己的D64背景特征增量：
+
+    z_b(q) in R^64
+    X(q)   in R^(8 x 64), rank(X)<=7
+    z_a(q) = z_b(q) + X(q) w(q)
+
+每个query独立查询FY/COSMIC邻域、构造观测算子并运行一次联合ETKF。不同query不共享z_a，也不融合
+latent状态。完整密度场通过对大量连续坐标逐点查询得到；连续性来自冻结IRI Background和共享连续
+density-basis decoder，而不是来自统一全域分析状态。
+
+因此：D64是特征状态维度，N8只提供最多7个集合异常方向。D64绝不等于7维；N8也不意味着观测空间
+一定有7个可区分方向。
+
+三、输入数据和固定分区
+----------------------
+
+1. FY：fy_202409_qc_v2.npy及对应profile index。
+2. COSMIC：cosmic_september_2024_qc.npy及对应profile index。
+3. 数据均使用现有QC成品；训练不重新QC，但启动前核对QC报告passed和NPY/NPZ SHA256。
+4. IRI neural proxy完全冻结；IRI hmF2/NmF2网格用于背景峰值上下文。
+5. 空间天气输入为36步Kp/F10.7序列。
+6. 2024年9月按UTC日期阻断：
+   development日索引 = [3, 8, 17, 22, 29]
+   locked-test日索引 = [2, 10, 16, 18, 24]
+   train日索引       = [0,1,4,5,6,7,9,11,12,13,14,15,19,20,21,23,25,26,27,28]
+   索引0对应2024-09-01。
+7. 模型选择阶段不得读取locked-test。ISR只允许在development门禁通过、模型冻结后独立验证。
+
+四、Background路径
+------------------
+
+对坐标q=(lat,lon,alt,time)：
+
+1. 冻结IRI proxy输出log10Ne背景ne_iri(q)和128维隐藏特征h_iri(q)。
+2. IRI峰值管理器输出hmF2(q)、NmF2(q)，计算：
+       delta_alt = (alt-hmF2)/190
+3. iri_align_net接收[h_iri, delta_alt, normalized NmF2]，输出D64背景特征z_b(q)。
+4. DualScaleSWEncoder编码36步Kp/F10.7；SpectralSWBranch编码rFFT幅度，两者由连续空间/太阳
+   上下文门控融合为h_sw(q) in R^64。
+5. background_decoder接收[z_b,h_sw,absolute-altitude,delta_alt]，输出有界背景残差：
+       B(q) = ne_iri(q) + 0.5*tanh(decoder(...))
+
+Background训练阶段只训练iri_align_net、background_decoder、SW encoder、频域分支和门控；IRI proxy
+始终冻结。M2-O正式run复用了已冻结Background seed，因此直接进入Analysis epoch 6，不重新训练epoch 1-5。
+
+五、FY/COSMIC邻域和endpoint-context basis
+----------------------------------------
+
+每个query分别在FY和COSMIC的QC profile index中查询统一时空L1 top-8 profile。窗口保持：
+
+    |dt| <= 1.5 h
+    |dlat| <= 5 deg
+    periodic |dlon| <= 15 deg
+    每profile最多8个高度token
+
+目标profile本身从同源邻域中排除，防止自泄漏。每个有效观测端点x独立运行同一Background编码，得到：
+
+    B(x), z_b(x) in R^64, h_sw(x) in R^64
+
+M2-O的density_basis_semantics=endpoint_context_symmetric。共享density-basis decoder对FY、COSMIC和
+输出query使用同一路径；它不读取source/profile ID：
+
+    phi(x) = decoder([z_b(x), h_sw(x), local descriptors(x)]) / sqrt(64)
+
+local descriptors包括目标Background、纬度、周期经度、绝对高度、SZA、DOY；endpoint symmetric模式
+不加入query相对坐标。因此相同物理端点及上下文的FY/COSMIC basis逐元素相同。
+
+这里的“symmetric”是端点特征构造对来源对称，不等价于全域统一状态，也不保证任意两点协方差核满足
+严格交换对称。
+
+六、D64/N8背景异常表示
+----------------------
+
+M2-O参数：D64、N8、orthogonal_factor、scale_init=1.1、scale_condition_max=3.0。
+
+1. 固定DCT矩阵提供D64中的7个正交方向。
+2. 固定Helmert矩阵把7个方向映射为8个零均值集合成员。
+3. covariance_scale_net根据[h_sw,lat,SZA,DOY,dip]输出7个有界尺度。
+4. 尺度范围由condition_max=3约束，形成：
+       X(q) = DCT_64x7 * diag(scale(q)) * Helmert_7x8
+
+所以状态位于D64，但集合异常有效秩上限是7；方向基固定，分析单元之间主要通过7个尺度变化。
+
+七、观测误差、局地化与innovation
+-------------------------------
+
+观测innovation在basis和ETKF之前确定：
+
+    d_j = y_j - B(x_j)
+
+因此修改basis不能改变raw innovation。每个token精度为：
+
+    precision_j = valid_j * L(rho_j) * representativeness_j / R_source
+
+    L(r) = max(1 - 3r^2 + 2r^3, 0)
+
+representativeness来自129/432个train-only稳定经验协方差单元形成的连续核，floor=0.25。R为Global R，
+不使用高度/昼夜分层R。epoch 9 checkpoint中的实际固定方差为：
+
+    R_FY     = 0.0422675274
+    R_COSMIC = 0.0251265578
+
+它们由冻结Background的train-only残差稳健标定后写入checkpoint，不是简单沿用初始0.04。
+
+八、联合ETKF计算
+----------------
+
+观测端集合异常：
+
+    Y_FY     = phi_FY X
+    Y_COSMIC = phi_COSMIC X
+
+对每个source s：
+
+    C_s = Y_s^T Precision_s Y_s
+    b_s = Y_s^T Precision_s d_s
+
+联合系统只求解一次：
+
+    A = (N-1)I + C_FY + C_COSMIC
+    A w_FY     = b_FY
+    A w_COSMIC = b_COSMIC
+    w = w_FY + w_COSMIC
+
+query端异常响应为：
+
+    y_q = phi(q) X
+
+最终贡献和输出：
+
+    delta_FY(q)     = y_q w_FY
+    delta_COSMIC(q) = y_q w_COSMIC
+    M11(q) = B(q) + delta_FY(q) + delta_COSMIC(q)
+
+Cholesky用于正定系统求解。K与协方差通常高度一致；历史失败主要发生在求逆前的innovation代表性和
+Y=HX表示，而不是Cholesky把正确符号翻转。
+
+九、M00/M10/M01/M11的精确语义
+-----------------------------
+
+M00：无观测，严格返回Background。
+M10：只用FY的C_FY和b_FY重新求解单源系统。
+M01：只用COSMIC的C_COSMIC和b_COSMIC重新求解单源系统。
+M11：使用FY+COSMIC联合系统。
+
+M10/M01不是从M11中简单删除一项；solve_density_modes会分别构造单源正定系统。零观测、全padding或
+零innovation必须严格回退Background。
+
+十、M2-O Analysis训练目标
+-------------------------
+
+M2-O正式Analysis只训练density_basis_decoder和kalman_layer；Background、IRI proxy和SW编码器冻结。
+
+主loss对FY目标profile与COSMIC目标profile等权：
+
+    L_obs = 0.5 * (L_FY + L_COSMIC)
+
+每个来源内部使用profile-balanced Huber(delta=0.2)，并精确计算三种模式：
+
+    M10 : M01 : M11 = 0.25 : 0.25 : 0.50
+
+附加项：
+
+1. train-only经验协方差loss：启用；目标梯度比0.008139966，正式解析权重0.00034564942921603414。
+2. increment收缩：w_increment=0.01。
+3. Analysis垂直二阶差分：w_vertical_analysis=0.05。
+4. Analysis时间二阶差分：w_time_analysis=0.0033。
+5. direction loss：关闭。
+
+优化器AdamW，lr=3e-4，weight_decay=1e-4，cosine scheduler，min_lr=1e-6，gradient clip=1.0，CPU、
+seed=42、analysis_seed=42、batch_size=2048、完整train profile fraction=1.0。
+
+十一、epoch与checkpoint
+----------------------
+
+配置逻辑是5个Background epoch + 5个Analysis epoch。复现M2-O时使用共享Background seed，因此代码把
+start_epoch设为5，正式训练只执行：
+
+    epoch_06_model.pth ... epoch_10_model.pth
+
+每个Analysis epoch都保存。best_fsia_model.pth只表示development上FY/COSMIC profile RMSE等权最佳：
+
+    score = 0.5 * (FY profile RMSE + COSMIC profile RMSE)
+
+它不代表方向门禁最佳。正式candidate必须在全部epoch完成后另做方向、分层、RMSE及硬不变量门禁。
+现有唯一有效选择是epoch 9，而不是根据文件名直接使用best_fsia_model.pth。
+
+十二、复现完整M2-O训练的推荐命令
+--------------------------------
+
+从仓库根目录、pytorch_cpu环境执行；run-name必须是新的空目录名：
+
+rtk C:\Users\12238\.conda\envs\pytorch_cpu\python.exe main_fsia.py --run-name run66-m2o-full-reproduction --qc-data --train-only --r-mode global --distance-localization --basis-dim 64 --enkf-members 8 --anomaly-parameterization orthogonal_factor --density-basis-semantics endpoint_context_symmetric --date-blocked-split --date-split-manifest isr_validation_outputs\run66-modelonly-m0\date_split_manifest.json --train-profile-fraction 1.0 --source-mode-schedule random_profile --analysis-epochs 5 --analysis-exact-mode-loss --empirical-covariance-loss --covariance-gradient-target 0.008139966 --w-time-analysis 0.0033 --representativeness-kernel isr_validation_outputs\run66-empirical-covariance-date-blocked-train-only\empirical_covariance_cells.npz
+
+说明：
+
+1. 默认background seed正是checkpoints_fsia/run66-etkf-loss/best_background_model.pth；这才是M2-O的
+   可比复现方式。不要为了“完整”而重新训练Background，否则会成为不同实验。
+2. --train-only表示训练完成后不自动绘图/评估，不代表只使用train partition；每epoch仍使用固定
+   development partition计算验证分数。
+3. 不加--direction-loss，不改R、N8、top-8、窗口、floor或loss。
+4. 新run目录必须为空，代码拒绝覆盖已有best checkpoint。
+5. CPU长训练可用--resume自动从last_training_state.pth恢复：
+
+   rtk C:\Users\12238\.conda\envs\pytorch_cpu\python.exe main_fsia.py --run-name run66-m2o-full-reproduction --resume --qc-data --train-only
+
+   resume时其余结构配置从run_manifest读取，并严格核对架构、epoch数、loss语义和数据身份。
+
+十三、训练后必须执行的顺序
+--------------------------
+
+1. 对epoch 6-10逐个strict=True加载，记录SHA256，检查全部张量/输出有限和重复推理逐元素确定。
+2. 逐epoch仅评估2024年9月development卫星profile的M00/M10/M01/M11。
+3. 先做方向门禁：FY/COSMIC自源负响应、两个跨源方向、所有可估计高度×昼夜×纬度单元。
+4. 再检查FY/COSMIC各来源RMSE、M11相对最佳单源及硬不变量。
+5. 只在全部门禁合格epoch中按FY/COSMIC profile RMSE等权选择。
+6. 冻结最终epoch后才允许ISR独立验证；locked-test只允许最终一次确认。
+
+十四、M2-O已知局限
+------------------
+
+1. raw innovation代表性一致率有限，basis或ETKF调参不能直接修复。
+2. D64集合状态只有7个异常方向，且观测空间有效秩曾退化到约1-2。
+3. endpoint-context decoder不是严格对称协方差核。
+4. 每query独立分析不等于统一低维全场同化；本项目已明确不升级全域latent。
+5. Global R忽略profile内高度相关性，但当前不作为符号错误首因。
+6. best_fsia_model.pth按RMSE保存，必须与后处理方向门禁区分。
+
+关键实现文件
+------------
+
+模型与ETKF：inr_modules/mdia/fsia_model.py
+邻域payload：inr_modules/mdia/sliding_dataset.py
+训练、loss、checkpoint：inr_modules/mdia/train_fsia.py
+配置：inr_modules/config_mdia.py
+入口：main_fsia.py
+正式M2-O manifest：checkpoints_fsia/run66-modelonly-m2o-endpoint-context-symmetric/run_manifest.json
+失败shadow审计：audit_m2r_representation.py、summarize_query_local_shadows.py

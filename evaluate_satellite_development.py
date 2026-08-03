@@ -426,6 +426,10 @@ def _evaluate_source(
     representativeness_grid=None,
     representativeness_floor=0.25,
 ):
+    if getattr(model, 'uses_physical_modes', False):
+        raise ValueError(
+            'query-local physical states are failed audit shadows; '
+            'development evaluation is restricted to M2-O')
     global_records = {mode: [] for mode in MODES}
     cell_records = {mode: defaultdict(list) for mode in MODES}
     attribution_records = {

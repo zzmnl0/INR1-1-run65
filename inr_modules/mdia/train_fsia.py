@@ -420,7 +420,6 @@ def _source_forward(model, batch_processor, coords, sw_seq, iri_peak,
             fy_obs, model, batch_processor.sw_manager, iri_peak_manager)
         cosmic_obs = attach_observation_background(
             cosmic_obs, model, batch_processor.sw_manager, iri_peak_manager)
-
     return model(
         coords,
         sw_seq,
@@ -1685,6 +1684,11 @@ def _load_background_seed(model, checkpoint, device):
 def train_fsia(config=None):
     """Train Background first, freeze it, then train ETKF Analysis."""
     config = get_config_mdia() if config is None else config
+    if config.get('analysis_state_semantics', 'legacy_feature_increment') != (
+            'legacy_feature_increment'):
+        raise ValueError(
+            'query-local physical states are failed audit shadows; '
+            'M2-O legacy_feature_increment is the only trainable model')
     if config.get('r_mode') != 'global':
         raise ValueError('density-observation ETKF requires r_mode=global')
     if not config.get('use_distance_localization', False):

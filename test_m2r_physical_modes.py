@@ -3,12 +3,17 @@
 import torch
 
 from inr_modules.data_managers.irinc_neural_proxy import IRINeuralProxy
-from inr_modules.mdia.fsia_model import FSIA_INR_Model, solve_density_modes
+from inr_modules.mdia.fsia_model import (
+    FSIA_INR_Model, _compute_local_time_features, solve_density_modes,
+)
+from inr_modules.mdia.sliding_dataset import (
+    attach_observation_background, build_failed_shadow_reference_context,
+)
 
 
-def _model(physical):
+def _model(physical, dictionary='m2r_residual_legendre', basis_dim=8):
     config = {
-        'alt_range': (120.0, 500.0), 'seq_len': 4, 'basis_dim': 8,
+        'alt_range': (120.0, 500.0), 'seq_len': 4, 'basis_dim': basis_dim,
         'sw_hidden_dim': 4, 'sw_lstm_layers': 1, 'sw_out_dim': 8,
         'tau_kp_init': 8.0, 'tau_solar_init': 72.0,
         'enkf_n_members': 8, 'enkf_pert_hidden': 8, 'use_sw_freq': False,
@@ -20,9 +25,22 @@ def _model(physical):
             'analysis_state_semantics': 'query_local_increment_coefficients',
             'context_semantics': 'endpoint_conditioning_only',
             'mode_basis_semantics': 'reference_whitened_physical_modes',
+            'physical_mode_dictionary': dictionary,
+            'allow_failed_query_local_shadow': dictionary != 'm2r_residual_legendre',
         })
     return FSIA_INR_Model(
         IRINeuralProxy(layers=[4, 128, 128, 128, 128, 1]), config)
+
+
+class _SW:
+    def get_drivers_sequence(self, time):
+        return torch.zeros(len(time), 4, 2, device=time.device)
+
+
+class _Peak:
+    def get_iri_peak(self, coords):
+        hmf2 = 300.0 + 0.2 * coords[:, 0] + 0.1 * coords[:, 3]
+        return torch.stack([hmf2, torch.full_like(hmf2, 11.5)], dim=-1)
 
 
 def _observations(model, coords, background):
@@ -98,6 +116,12 @@ def test_m2r_reference_modes_and_query_local_state():
     reordered = model(
         coords, sw, iri_peak=peak, observations_fy=token_reordered)
     assert torch.allclose(result[0], reordered[0], atol=1e-7)
+    relabeled = {key: value.clone() for key, value in fy.items()}
+    relabeled['source'].fill_(1)
+    assert torch.equal(
+        result[0], model(
+            coords, sw, iri_peak=peak,
+            observations_fy=relabeled)[0])
 
     row_order = torch.tensor([3, 2, 1, 0])
     row_reordered = model(
@@ -153,3 +177,112 @@ def test_m2r_does_not_change_legacy_state_dict_or_output():
         explicit(coords, sw, iri_peak=peak)[0])
     rho = torch.linspace(0.0, 1.0, 10001).square()
     assert implicit.kalman_layer._localization_precision(rho).min() >= 0
+
+
+def test_d64_endpoint_payload_enters_query_local_etkf():
+    torch.manual_seed(3)
+    coords = torch.tensor([
+        [-12.0, -76.8, 180.0, 48.0],
+        [65.0, 147.0, 380.0, 240.0],
+    ])
+    sw_manager, peak_manager = _SW(), _Peak()
+    sw = sw_manager.get_drivers_sequence(coords[:, 3])
+    peak = peak_manager.get_iri_peak(coords)
+    raw = {
+        'coords': coords[:, None, :].clone(),
+        'value': torch.tensor([[10.6], [11.1]]),
+        'valid_mask': torch.ones(2, 1, dtype=torch.bool),
+        'rho_squared': torch.zeros(2, 1),
+    }
+    for dictionary in ('endpoint_hmf2_legendre', 'background_adaptive_fixed'):
+        model = _model(True, dictionary, basis_dim=64)
+        payload = attach_observation_background(
+            raw, model, sw_manager, peak_manager)
+        assert payload['basis_z_background'].shape == (2, 1, 64)
+        reference = build_failed_shadow_reference_context(
+            coords, model, sw_manager, peak_manager)
+        result = model(
+            coords, sw, iri_peak=peak, observations_fy=payload,
+            physical_reference_context=reference)
+        assert result[4]['coefficient_analysis_query'].shape == (2, 7)
+        assert torch.isfinite(result[0]).all()
+        background = model.encode_endpoint_context(coords, sw, peak)
+        _, chol, _ = model._physical_mode_transform(
+            coords, peak[:, 0], background['z_background'], background['h_sw'],
+            background['ne_bkg'].flatten(),
+            reference_z=reference['basis_z_background'],
+            reference_h_sw=reference['basis_h_sw'],
+            reference_background=reference['background'],
+            reference_endpoint=reference)
+        manual = model._apply_mode_transform(
+            model._physical_mode_raw(
+                coords, peak[:, 0], payload['coords'],
+                background['z_background'], background['h_sw'],
+                payload['basis_z_background'], payload['basis_h_sw'],
+                payload['background'], payload), chol)
+        assert torch.equal(result[4]['basis_FY'], manual)
+
+
+def test_endpoint_height_absolute_height_and_lst_semantics():
+    model = _model(True, 'background_adaptive_fixed')
+    center = torch.tensor([[0.0, 0.0, 300.0, 24.0]])
+    target = torch.tensor([[[0.0, 0.0, 180.0, 24.0],
+                            [0.0, 0.0, 180.0, 24.0]]])
+    endpoint = {
+        'basis_delta_alt': torch.tensor([[0.0, -0.5]]),
+        'basis_background_dh': torch.tensor([[0.01, 0.01]]),
+        'basis_cos_sza': torch.zeros(1, 2),
+        'basis_sin_lst': torch.zeros(1, 2),
+        'basis_cos_lst': torch.ones(1, 2),
+    }
+    modes = model._physical_mode_raw(
+        center, torch.tensor([300.0]), target, target_endpoint=endpoint)
+    assert not torch.equal(modes[0, 0, 2], modes[0, 1, 2])
+
+    target_alt = target.clone()
+    target_alt[0, 1, 2] = 360.0
+    endpoint['basis_delta_alt'] = torch.zeros(1, 2)
+    modes = model._physical_mode_raw(
+        center, torch.tensor([300.0]), target_alt, target_endpoint=endpoint)
+    assert not torch.equal(modes[0, 0, 3], modes[0, 1, 3])
+
+    lon = torch.tensor([0.0, 30.0, 179.999, -180.001])
+    time = torch.full((4,), 24.0)
+    sin_lst, cos_lst = _compute_local_time_features(lon, time)
+    assert not torch.equal(sin_lst[0], sin_lst[1])
+    assert torch.allclose(sin_lst[2], sin_lst[3], atol=1e-6)
+    assert torch.allclose(cos_lst[2], cos_lst[3], atol=1e-6)
+
+
+def test_reference_endpoint_context_is_required_not_query_fallback():
+    model = _model(True, 'endpoint_hmf2_legendre')
+    coords = torch.tensor([[0.0, 0.0, 250.0, 24.0]])
+    sw = torch.zeros(1, 4, 2)
+    peak = torch.tensor([[300.0, 11.5]])
+    try:
+        model(coords, sw, iri_peak=peak)
+    except ValueError as error:
+        assert 'reference endpoint context' in str(error)
+    else:
+        raise AssertionError('reference query-context fallback was accepted')
+
+
+def test_failed_query_local_dictionaries_require_explicit_audit_flag():
+    config = {
+        'alt_range': (120.0, 500.0), 'seq_len': 4, 'basis_dim': 8,
+        'sw_hidden_dim': 4, 'sw_lstm_layers': 1, 'sw_out_dim': 8,
+        'enkf_n_members': 8, 'enkf_pert_hidden': 8, 'use_sw_freq': False,
+        'enkf_anomaly_parameterization': 'orthogonal_factor',
+        'density_basis_semantics': 'endpoint_context_symmetric',
+        'analysis_state_semantics': 'query_local_increment_coefficients',
+        'context_semantics': 'endpoint_conditioning_only',
+        'mode_basis_semantics': 'reference_whitened_physical_modes',
+        'physical_mode_dictionary': 'endpoint_hmf2_legendre',
+    }
+    try:
+        FSIA_INR_Model(
+            IRINeuralProxy(layers=[4, 128, 128, 128, 128, 1]), config)
+    except ValueError as error:
+        assert 'failed RSR-3' in str(error)
+    else:
+        raise AssertionError('failed query-local dictionary was enabled')

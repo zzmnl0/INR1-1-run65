@@ -172,6 +172,12 @@ def _compute_solar_features(lat_deg, lon_deg, rel_hour):
     return cos_SZA, sin_doy, cos_doy
 
 
+def _compute_local_time_features(lon_deg, rel_hour):
+    """Continuous local-solar-time phase shared by every endpoint type."""
+    phase = (rel_hour + lon_deg / 15.0) * (math.pi / 12.0)
+    return torch.sin(phase), torch.cos(phase)
+
+
 # ======================== NeuralETKFLayer 辅助函数 ========================
 
 def _build_kalman_b_input(h_sw, lat_n, cos_SZA, sin_doy, cos_doy, sin_I):
@@ -587,6 +593,10 @@ class FSIA_INR_Model(nn.Module):
             'context_semantics', 'query_conditioning')
         self.mode_basis_semantics = config.get(
             'mode_basis_semantics', 'learned_density_basis')
+        self.physical_mode_dictionary = config.get(
+            'physical_mode_dictionary', 'm2r_residual_legendre')
+        self.allow_failed_query_local_shadow = bool(
+            config.get('allow_failed_query_local_shadow', False))
         self.uses_physical_modes = (
             self.analysis_state_semantics == 'query_local_increment_coefficients')
         if self.uses_physical_modes:
@@ -598,6 +608,15 @@ class FSIA_INR_Model(nn.Module):
             if self.mode_basis_semantics != 'reference_whitened_physical_modes':
                 raise ValueError(
                     'M2-R requires reference_whitened_physical_modes')
+            if self.physical_mode_dictionary not in (
+                    'm2r_residual_legendre', 'query_hmf2_legendre',
+                    'endpoint_hmf2_legendre', 'background_adaptive_fixed'):
+                raise ValueError('unknown physical_mode_dictionary')
+            if (self.physical_mode_dictionary != 'm2r_residual_legendre'
+                    and not self.allow_failed_query_local_shadow):
+                raise ValueError(
+                    'V0/V1/V2 query-local dictionaries failed RSR-3 and are '
+                    'available only to the independent audit shadow')
         self.density_basis_semantics = config.get(
             'density_basis_semantics', 'query_conditioned')
         if self.density_basis_semantics not in (
@@ -790,9 +809,49 @@ class FSIA_INR_Model(nn.Module):
             'delta_alt': delta_alt,
         }
 
+    def encode_endpoint_context(self, coords, sw_seq, iri_peak=None):
+        """Build one source-neutral physical context for query/obs/reference."""
+        center = self.encode_background(coords, sw_seq, iri_peak=iri_peak)
+        step = 10.0
+
+        def at_offset(offset):
+            shifted = coords.clone()
+            shifted[:, 2] = (coords[:, 2] + offset).clamp(
+                self.alt_min, self.alt_max)
+            return self.encode_background(
+                shifted, sw_seq, iri_peak=iri_peak)['ne_bkg'].flatten()
+
+        minus, plus = at_offset(-step), at_offset(step)
+        minus2, plus2 = at_offset(-2 * step), at_offset(2 * step)
+        value = center['ne_bkg'].flatten()
+        lower = coords[:, 2] < self.alt_min + step
+        upper = coords[:, 2] > self.alt_max - step
+        derivative = (plus - minus) / (2 * step)
+        derivative = torch.where(lower, (plus - value) / step, derivative)
+        derivative = torch.where(upper, (value - minus) / step, derivative)
+        second = (plus - 2 * value + minus) / step ** 2
+        second = torch.where(
+            lower, (value - 2 * plus + plus2) / step ** 2, second)
+        second = torch.where(
+            upper, (value - 2 * minus + minus2) / step ** 2, second)
+        sin_lst, cos_lst = _compute_local_time_features(
+            coords[:, 1], coords[:, 3])
+        return {
+            **center,
+            'basis_hmf2': center['iri_peak'][:, 0],
+            'basis_nmf2': center['iri_peak'][:, 1],
+            'basis_delta_alt': center['delta_alt'],
+            'basis_cos_sza': center['cos_sza'],
+            'basis_sin_lst': sin_lst,
+            'basis_cos_lst': cos_lst,
+            'basis_background_dh': derivative.detach(),
+            'basis_background_d2h': second.detach(),
+        }
+
     def _physical_mode_raw(self, unit_center, unit_hmf2, target_coords,
                            query_z=None, query_h_sw=None, target_z=None,
-                           target_h_sw=None, target_background=None):
+                           target_h_sw=None, target_background=None,
+                           target_endpoint=None):
         """Seven fixed continuous log-density increment modes for M2-R R1."""
         lat, lon, alt, time = (target_coords[..., index] for index in range(4))
         dlat = (lat - unit_center[:, None, 0]) / self.fy_dlat_window
@@ -801,22 +860,48 @@ class FSIA_INR_Model(nn.Module):
         dlon = dlon / self.fy_dlon_window
         dt = (time - unit_center[:, None, 3]) / self.fy_dt_window
         height = (alt - unit_hmf2[:, None]) / 190.0
+        if self.physical_mode_dictionary in (
+                'endpoint_hmf2_legendre', 'background_adaptive_fixed'):
+            if target_endpoint is None:
+                raise ValueError(
+                    'endpoint physical modes require explicit endpoint context')
+            height = target_endpoint['basis_delta_alt']
         cos_sza, _, _ = _compute_solar_features(
             lat.reshape(-1), lon.reshape(-1), time.reshape(-1))
         cos_sza = cos_sza.reshape_as(lat)
         center_sza, _, _ = _compute_solar_features(
             unit_center[:, 0], unit_center[:, 1], unit_center[:, 3])
-        fixed = torch.stack([
-            torch.ones_like(height),
-            height,
-            0.5 * (3.0 * height.square() - 1.0),
-            0.5 * (5.0 * height.pow(3) - 3.0 * height),
-            torch.sin(0.5 * math.pi * dlat),
-            torch.sin(0.5 * math.pi * dlon),
-            (torch.sin(0.5 * math.pi * dt)
-             + 0.25 * (cos_sza - center_sza[:, None])),
-        ], dim=-1)
-        if query_z is None:
+        center_sin_lst, center_cos_lst = _compute_local_time_features(
+            unit_center[:, 1], unit_center[:, 3])
+        time_mode = (torch.sin(0.5 * math.pi * dt)
+                     + 0.25 * (cos_sza - center_sza[:, None]))
+        if target_endpoint is not None:
+            lst_delta = (
+                target_endpoint['basis_sin_lst'] * center_cos_lst[:, None]
+                - target_endpoint['basis_cos_lst'] * center_sin_lst[:, None])
+            time_mode = time_mode + 0.25 * lst_delta
+        if self.physical_mode_dictionary == 'background_adaptive_fixed':
+            derivative = 190.0 * target_endpoint['basis_background_dh']
+            u = ((alt - 180.0) / 120.0).clamp(0.0, 1.0)
+            low = 1.0 - 3.0 * u.square() + 2.0 * u.pow(3)
+            fixed = torch.stack([
+                torch.ones_like(height), -derivative, height * derivative,
+                low, torch.sin(0.5 * math.pi * dlat),
+                torch.sin(0.5 * math.pi * dlon),
+                time_mode,
+            ], dim=-1)
+        else:
+            fixed = torch.stack([
+                torch.ones_like(height),
+                height,
+                0.5 * (3.0 * height.square() - 1.0),
+                0.5 * (5.0 * height.pow(3) - 3.0 * height),
+                torch.sin(0.5 * math.pi * dlat),
+                torch.sin(0.5 * math.pi * dlon),
+                time_mode,
+            ], dim=-1)
+        if (query_z is None or
+                self.physical_mode_dictionary != 'm2r_residual_legendre'):
             return fixed
         count = target_coords.shape[1]
         if target_z is None:
@@ -862,7 +947,8 @@ class FSIA_INR_Model(nn.Module):
                                  query_z=None, query_h_sw=None,
                                  query_background=None, reference_z=None,
                                  reference_h_sw=None,
-                                 reference_background=None):
+                                 reference_background=None,
+                                 reference_endpoint=None):
         """Reference-grid Cholesky gauge; independent of observations."""
         dtype, device = unit_center.dtype, unit_center.device
         reference = self._physical_reference_coords(unit_center)
@@ -871,7 +957,8 @@ class FSIA_INR_Model(nn.Module):
             reference_z, reference_h_sw,
             (reference_background if reference_background is not None else
              (query_background[:, None].expand(-1, reference.shape[1])
-              if query_background is not None else None)))
+              if query_background is not None else None)),
+            reference_endpoint)
         gram = torch.einsum('uri,urj->uij', raw, raw) / raw.shape[1]
         eigenvalues = torch.linalg.eigvalsh(gram)
         chol = torch.linalg.cholesky(gram)
@@ -913,20 +1000,35 @@ class FSIA_INR_Model(nn.Module):
         return singular, effective_rank, first_energy
 
     def _physical_mode_forward(self, coords, background, observations_fy,
-                               observations_cosmic):
+                               observations_cosmic, reference_context=None):
         """M2-R query-local coefficient ETKF over the existing M2-O neighbors."""
         batch = len(coords)
         center = coords[:, :4]
         hmf2 = background['iri_peak'][:, 0]
+        endpoint_modes = self.physical_mode_dictionary in (
+            'endpoint_hmf2_legendre', 'background_adaptive_fixed')
+        if endpoint_modes and reference_context is None:
+            raise ValueError('physical reference endpoint context is required')
+        query_endpoint = {
+            key: value[:, None] for key, value in background.items()
+            if key.startswith('basis_') and value.ndim == 1}
         reference_modes, chol, mode_diagnostics = self._physical_mode_transform(
             center, hmf2, background['z_background'], background['h_sw'],
-            background['ne_bkg'].flatten())
+            background['ne_bkg'].flatten(),
+            reference_z=(None if reference_context is None else
+                         reference_context['basis_z_background']),
+            reference_h_sw=(None if reference_context is None else
+                            reference_context['basis_h_sw']),
+            reference_background=(None if reference_context is None else
+                                  reference_context['background']),
+            reference_endpoint=reference_context)
         query_modes = self._apply_mode_transform(
             self._physical_mode_raw(
                 center, hmf2, coords[:, None, :4],
                 background['z_background'], background['h_sw'],
                 background['z_background'][:, None, :],
-                background['h_sw'][:, None, :], background['ne_bkg']),
+                background['h_sw'][:, None, :], background['ne_bkg'],
+                query_endpoint if endpoint_modes else None),
             chol).squeeze(1)
 
         def prepare(observations):
@@ -942,6 +1044,11 @@ class FSIA_INR_Model(nn.Module):
             required = {
                 'coords', 'value', 'background', 'valid_mask', 'rho_squared',
                 'basis_z_background', 'basis_h_sw'}
+            if endpoint_modes:
+                required.update((
+                    'basis_hmf2', 'basis_nmf2', 'basis_delta_alt',
+                    'basis_cos_sza', 'basis_sin_lst', 'basis_cos_lst',
+                    'basis_background_dh', 'basis_background_d2h'))
             missing = required.difference(observations)
             if missing:
                 raise ValueError(
@@ -969,7 +1076,8 @@ class FSIA_INR_Model(nn.Module):
                     center, hmf2, prepared['coords'],
                     background['z_background'], background['h_sw'],
                     prepared['basis_z_background'], prepared['basis_h_sw'],
-                    prepared['background']), chol)
+                    prepared['background'],
+                    prepared if endpoint_modes else None), chol)
             return prepared, modes.masked_fill(~valid.unsqueeze(-1), 0.0)
 
         fy_obs, fy_modes = prepare(observations_fy)
@@ -1066,11 +1174,15 @@ class FSIA_INR_Model(nn.Module):
     def forward(self, coords, sw_seq, precomputed_h_sw=None,
                 iri_peak=None, observations_fy=None,
                 observations_cosmic=None, analysis_unit_ids=None,
-                analysis_unit_context=None):
+                analysis_unit_context=None, physical_reference_context=None):
         """Decode a joint low-dimensional ETKF analysis into physical log10Ne."""
         B = coords.shape[0]
-        background = self.encode_background(
-            coords, sw_seq, precomputed_h_sw, iri_peak)
+        endpoint_modes = self.uses_physical_modes and self.physical_mode_dictionary in (
+            'endpoint_hmf2_legendre', 'background_adaptive_fixed')
+        background = (self.encode_endpoint_context(coords, sw_seq, iri_peak)
+                      if endpoint_modes else
+                      self.encode_background(
+                          coords, sw_seq, precomputed_h_sw, iri_peak))
         ne_bkg = background['ne_bkg']
         ne_iri = background['ne_iri']
         background_residual = background['background_residual']
@@ -1090,7 +1202,8 @@ class FSIA_INR_Model(nn.Module):
                 raise ValueError(
                     'M2-R query-local semantics do not accept analysis-unit inputs')
             return self._physical_mode_forward(
-                coords, background, observations_fy, observations_cosmic)
+                coords, background, observations_fy, observations_cosmic,
+                physical_reference_context)
 
         def prepare(observations):
             if observations is None:

@@ -21,7 +21,7 @@ from inr_modules.mdia.evaluation_mdia import evaluate_and_save_report, evaluate_
 from inr_modules.mdia.visualization_mdia import (plot_global_slice, plot_altitude_profile,
                                                   plot_hmf2_nmf2_map)
 
-_DEFAULT_RUN_NAME = 'run66-qc2-latent-etkf-density-H-global-localized'
+_DEFAULT_RUN_NAME = 'run66-m2o-full-15epoch'
 _DEFAULT_BACKGROUND_SEED = (
     Path(current_dir) / 'checkpoints_fsia' / 'run66-etkf-loss'
     / 'best_background_model.pth')
@@ -172,7 +172,8 @@ def main(eval_only=False, resume_ckpt=None, run_name=_DEFAULT_RUN_NAME,
         prior_config.get('use_date_blocked_split', False)
         if date_blocked_split is None else date_blocked_split)
     if date_split_manifest is None:
-        date_split_manifest = prior_config.get('date_split_manifest')
+        date_split_manifest = prior_config.get(
+            'date_split_manifest', config.get('date_split_manifest'))
     if date_blocked_split and not date_split_manifest:
         date_split_manifest = str(run_dir / 'date_split_manifest.json')
     covariance_moment = bool(
@@ -223,7 +224,8 @@ def main(eval_only=False, resume_ckpt=None, run_name=_DEFAULT_RUN_NAME,
         if analysis_exact_mode_loss is None else analysis_exact_mode_loss)
     if representativeness_kernel is None:
         representativeness_kernel = prior_config.get(
-            'representativeness_kernel_path')
+            'representativeness_kernel_path',
+            config.get('representativeness_kernel_path'))
     representativeness_floor = float(
         prior_config.get(
             'representativeness_floor',
@@ -477,7 +479,8 @@ if __name__ == '__main__':
                         help='output directory name under checkpoints_fsia')
     parser.add_argument('--r-mode', choices=('global', 'stratified'),
                         default='global')
-    parser.add_argument('--distance-localization', action='store_true',
+    parser.add_argument('--distance-localization',
+                        action=argparse.BooleanOptionalAction, default=True,
                         help='inflate fixed R using deterministic local distance')
     parser.add_argument('--background-seed', default=None,
                         help='shared Background checkpoint for Analysis-only runs')
@@ -507,7 +510,7 @@ if __name__ == '__main__':
         '--date-split-manifest', default=None,
         help='path to the deterministic UTC-date split manifest')
     parser.add_argument(
-        '--qc-data', action='store_true',
+        '--qc-data', action=argparse.BooleanOptionalAction, default=True,
         help='use audited FY/COSMIC NPY+NPZ QC products')
     parser.add_argument(
         '--train-only', action='store_true',

@@ -192,6 +192,8 @@ def attach_observation_background(
     background = payload['value'].new_zeros(payload['value'].shape)
     endpoint_context = getattr(
         model, 'density_basis_semantics', None) == 'endpoint_context_symmetric'
+    physical_context = bool(
+        getattr(model, 'allow_failed_query_local_shadow', False))
     if endpoint_context:
         background_state_dim = getattr(
             model, 'background_state_dim', model.kalman_layer.d_model)
@@ -199,6 +201,13 @@ def attach_observation_background(
             *payload['value'].shape, background_state_dim)
         basis_h_sw = payload['value'].new_zeros(
             *payload['value'].shape, model.sw_out_dim)
+        if physical_context:
+            scalar_context = {
+                key: payload['value'].new_zeros(payload['value'].shape)
+                for key in (
+                    'basis_hmf2', 'basis_nmf2', 'basis_delta_alt',
+                    'basis_cos_sza', 'basis_sin_lst', 'basis_cos_lst',
+                    'basis_background_dh', 'basis_background_d2h')}
     flat_coords = payload['coords'][valid]
     valid_indices = valid.flatten().nonzero(as_tuple=True)[0]
     flat_background = background.flatten()
@@ -214,31 +223,83 @@ def attach_observation_background(
             len(unique_coords), background_state_dim)
         unique_h_sw = basis_h_sw.new_empty(
             len(unique_coords), model.sw_out_dim)
+        if physical_context:
+            unique_scalar_context = {
+                key: value.new_empty(len(unique_coords))
+                for key, value in scalar_context.items()}
     with torch.no_grad():
         for start in range(0, len(unique_coords), chunk_size):
             coords = unique_coords[start:start + chunk_size]
             sw_seq = sw_manager.get_drivers_sequence(coords[:, 3])
             peak = (iri_peak_manager.get_iri_peak(coords)
                     if iri_peak_manager is not None else None)
-            encoded = model.encode_background(coords, sw_seq, iri_peak=peak)
+            encoded = (model.encode_endpoint_context(coords, sw_seq, peak)
+                       if physical_context else
+                       model.encode_background(coords, sw_seq, iri_peak=peak))
             unique_background[start:start + len(coords)] = (
                 encoded['ne_bkg'].flatten())
             if endpoint_context:
                 unique_z_background[start:start + len(coords)] = (
                     encoded['z_background'])
                 unique_h_sw[start:start + len(coords)] = encoded['h_sw']
+                if physical_context:
+                    for key in scalar_context:
+                        unique_scalar_context[key][start:start + len(coords)] = (
+                            encoded[key])
     flat_background[valid_indices] = unique_background[inverse]
     result = dict(payload)
     result['background'] = background
     if endpoint_context:
         basis_z_background.reshape(
-            -1, model.kalman_layer.d_model)[valid_indices] = (
+            -1, background_state_dim)[valid_indices] = (
                 unique_z_background[inverse])
         basis_h_sw.reshape(-1, model.sw_out_dim)[valid_indices] = (
             unique_h_sw[inverse])
         result['basis_z_background'] = basis_z_background
         result['basis_h_sw'] = basis_h_sw
+        if physical_context:
+            # Scalar fields were evaluated on unique coordinates; expand them
+            # through the same inverse map as Background.
+            for key in scalar_context:
+                scalar_context[key].flatten()[valid_indices] = (
+                    unique_scalar_context[key][inverse])
+                result[key] = scalar_context[key]
     return result
+
+
+def build_failed_shadow_reference_context(
+        coords, model, sw_manager, iri_peak_manager, chunk_size=4096):
+    """Audit-only endpoint context for failed V1/V2 query-local shadows."""
+    if not getattr(model, 'allow_failed_query_local_shadow', False):
+        raise ValueError('reference context is restricted to failed audit shadows')
+    reference = model._physical_reference_coords(coords[:, :4])
+    batch, count, _ = reference.shape
+    flat = reference.reshape(-1, 4)
+    chunks = []
+    with torch.no_grad():
+        for start in range(0, len(flat), chunk_size):
+            endpoint = flat[start:start + chunk_size]
+            sw_seq = sw_manager.get_drivers_sequence(endpoint[:, 3])
+            peak = (iri_peak_manager.get_iri_peak(endpoint)
+                    if iri_peak_manager is not None else None)
+            chunks.append(model.encode_endpoint_context(endpoint, sw_seq, peak))
+    keys = (
+        'ne_bkg', 'z_background', 'h_sw', 'basis_hmf2', 'basis_nmf2',
+        'basis_delta_alt', 'basis_cos_sza', 'basis_sin_lst', 'basis_cos_lst',
+        'basis_background_dh', 'basis_background_d2h')
+    merged = {
+        key: torch.cat([chunk[key] for chunk in chunks], dim=0)
+        for key in keys}
+    return {
+        'coords': reference,
+        'background': merged['ne_bkg'].reshape(batch, count),
+        'basis_z_background': merged['z_background'].reshape(batch, count, -1),
+        'basis_h_sw': merged['h_sw'].reshape(batch, count, -1),
+        **{
+            key: merged[key].reshape(batch, count)
+            for key in keys if key.startswith('basis_') and key not in (
+                'basis_z_background', 'basis_h_sw')},
+    }
 
 
 class SlidingWindowBatchProcessor:
