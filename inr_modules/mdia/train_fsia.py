@@ -333,10 +333,9 @@ def _set_training_stage(model, stage):
         if model.use_sw_freq:
             modules.extend([model.sw_freq_branch, model.sw_gate])
     elif stage == 'analysis':
-        modules = [
-            model.kalman_layer,
-            model.density_basis_decoder,
-        ]
+        modules = [model.kalman_layer]
+        if hasattr(model, 'density_basis_decoder'):
+            modules.append(model.density_basis_decoder)
     else:
         raise ValueError(f'unknown training stage: {stage}')
     for module in modules:
@@ -814,9 +813,11 @@ def _resolve_direction_weight(
                 model, batch_processor, fy_batch, cosmic_batch, device,
                 config, sw_manager, iri_peak_manager, allowed_profile_ids,
                 'exact_M10_M01_M11')
+            decoder = (model.density_basis_decoder
+                       if hasattr(model, 'density_basis_decoder')
+                       else model.kalman_layer)
             parameters = [
-                parameter
-                for parameter in model.density_basis_decoder.parameters()
+                parameter for parameter in decoder.parameters()
                 if parameter.requires_grad]
             _, _, direction_to_observation, _ = _gradient_norms(
                 observation, direction, parameters)
@@ -1068,7 +1069,9 @@ def train_one_epoch(model, train_loader, batch_processor, optimizer, device,
                 f'non-finite {stage} loss at epoch={epoch + 1}, batch={batch_idx}')
 
         decoder = (model.background_decoder if stage == 'background'
-                   else model.density_basis_decoder)
+                   else (model.density_basis_decoder
+                         if hasattr(model, 'density_basis_decoder')
+                         else model.kalman_layer))
         first_stage_epoch = (
             epoch == 0 if stage == 'background'
             else epoch == int(config['background_epochs']))
@@ -1552,6 +1555,12 @@ def _architecture_signature(config):
             config.get('enkf_scale_condition_max', 3.0)),
         'density_basis_semantics': config.get(
             'density_basis_semantics', 'query_conditioned'),
+        'analysis_state_semantics': config.get(
+            'analysis_state_semantics', 'legacy_feature_increment'),
+        'context_semantics': config.get(
+            'context_semantics', 'query_conditioning'),
+        'mode_basis_semantics': config.get(
+            'mode_basis_semantics', 'learned_density_basis'),
     }
 
 

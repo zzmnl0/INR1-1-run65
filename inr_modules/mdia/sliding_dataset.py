@@ -193,8 +193,10 @@ def attach_observation_background(
     endpoint_context = getattr(
         model, 'density_basis_semantics', None) == 'endpoint_context_symmetric'
     if endpoint_context:
+        background_state_dim = getattr(
+            model, 'background_state_dim', model.kalman_layer.d_model)
         basis_z_background = payload['value'].new_zeros(
-            *payload['value'].shape, model.kalman_layer.d_model)
+            *payload['value'].shape, background_state_dim)
         basis_h_sw = payload['value'].new_zeros(
             *payload['value'].shape, model.sw_out_dim)
     flat_coords = payload['coords'][valid]
@@ -209,7 +211,7 @@ def attach_observation_background(
     unique_background = background.new_empty(len(unique_coords))
     if endpoint_context:
         unique_z_background = basis_z_background.new_empty(
-            len(unique_coords), model.kalman_layer.d_model)
+            len(unique_coords), background_state_dim)
         unique_h_sw = basis_h_sw.new_empty(
             len(unique_coords), model.sw_out_dim)
     with torch.no_grad():

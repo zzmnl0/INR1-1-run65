@@ -74,6 +74,9 @@ CONFIG_MDIA = {
     'enkf_scale_init': 1.1,
     'enkf_scale_condition_max': 3.0,
     'density_basis_semantics': 'query_conditioned',
+    'analysis_state_semantics': 'legacy_feature_increment',
+    'context_semantics': 'query_conditioning',
+    'mode_basis_semantics': 'learned_density_basis',
     'siren_hidden': 128,  # SIREN 隐层维度
     'siren_layers': 3,    # SIREN 隐层数量
     'omega_0': 30.0,      # SIREN 频率因子
@@ -223,6 +226,8 @@ def print_config_mdia():
         'SIREN 架构': ['basis_dim', 'enkf_n_members', 'enkf_pert_hidden',
                        'enkf_anomaly_parameterization', 'enkf_scale_init',
                        'enkf_scale_condition_max', 'density_basis_semantics',
+                       'analysis_state_semantics', 'context_semantics',
+                       'mode_basis_semantics',
                        'siren_hidden', 'siren_layers', 'omega_0',
                        'omega_low', 'omega_high'],
         'SW 编码器': ['sw_hidden_dim', 'sw_lstm_layers', 'sw_out_dim'],

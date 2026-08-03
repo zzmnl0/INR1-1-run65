@@ -197,7 +197,8 @@ class NeuralETKFLayer(nn.Module):
                  anomaly_parameterization: str = 'legacy_independent',
                  scale_init: float = 1.1,
                  scale_condition_max: float = 3.0,
-                 coordinate_local_symmetric: bool = False):
+                 coordinate_local_symmetric: bool = False,
+                 coefficient_space: bool = False):
         super().__init__()
         if d_model < 1 or n_members < 2 or pert_hidden < 1:
             raise ValueError(
@@ -214,6 +215,9 @@ class NeuralETKFLayer(nn.Module):
                 and anomaly_parameterization != 'orthogonal_factor'):
             raise ValueError(
                 'coordinate-local symmetric basis requires orthogonal_factor')
+        if coefficient_space and d_model != n_members - 1:
+            raise ValueError(
+                'coefficient-space anomalies require d_model == n_members - 1')
         if scale_init <= 0 or scale_condition_max <= 1:
             raise ValueError(
                 'scale_init must be positive and scale_condition_max must exceed 1')
@@ -225,6 +229,7 @@ class NeuralETKFLayer(nn.Module):
         self.scale_init = float(scale_init)
         self.scale_condition_max = float(scale_condition_max)
         self.coordinate_local_symmetric = bool(coordinate_local_symmetric)
+        self.coefficient_space = bool(coefficient_space)
 
         if anomaly_parameterization == 'legacy_independent':
             # Preserve v7 state-dict keys for strict read-only compatibility.
@@ -240,7 +245,9 @@ class NeuralETKFLayer(nn.Module):
             self.register_buffer(
                 'ensemble_coefficients', self._helmert_coefficients(n_members))
             self.register_buffer(
-                'state_basis', self._dct_basis(d_model, rank))
+                'state_basis',
+                (torch.eye(rank, dtype=torch.float64)
+                 if coefficient_space else self._dct_basis(d_model, rank)))
             self.covariance_scale_net = nn.Sequential(
                 nn.Linear(b_net_in, pert_hidden),
                 nn.SiLU(),
@@ -329,7 +336,7 @@ class NeuralETKFLayer(nn.Module):
     @staticmethod
     def _localization_precision(rho_squared):
         radius = rho_squared.clamp(0.0, 1.0).sqrt()
-        return 1.0 - 3.0 * radius.square() + 2.0 * radius.pow(3)
+        return (1.0 - 3.0 * radius.square() + 2.0 * radius.pow(3)).clamp_min(0.0)
 
     @staticmethod
     def _empty_observations(reference, batch):
@@ -569,6 +576,28 @@ class FSIA_INR_Model(nn.Module):
 
         enkf_n_members   = int(config.get('enkf_n_members', 8))
         enkf_pert_hidden = int(config.get('enkf_pert_hidden', 64))
+        self.analysis_state_semantics = config.get(
+            'analysis_state_semantics', 'legacy_feature_increment')
+        if self.analysis_state_semantics not in (
+                'legacy_feature_increment', 'query_local_increment_coefficients'):
+            raise ValueError(
+                'analysis_state_semantics must be legacy_feature_increment or '
+                'query_local_increment_coefficients')
+        self.context_semantics = config.get(
+            'context_semantics', 'query_conditioning')
+        self.mode_basis_semantics = config.get(
+            'mode_basis_semantics', 'learned_density_basis')
+        self.uses_physical_modes = (
+            self.analysis_state_semantics == 'query_local_increment_coefficients')
+        if self.uses_physical_modes:
+            if enkf_n_members != 8:
+                raise ValueError('M2-R physical coefficient state requires N8')
+            if self.context_semantics != 'endpoint_conditioning_only':
+                raise ValueError(
+                    'M2-R context must use endpoint_conditioning_only semantics')
+            if self.mode_basis_semantics != 'reference_whitened_physical_modes':
+                raise ValueError(
+                    'M2-R requires reference_whitened_physical_modes')
         self.density_basis_semantics = config.get(
             'density_basis_semantics', 'query_conditioned')
         if self.density_basis_semantics not in (
@@ -578,8 +607,9 @@ class FSIA_INR_Model(nn.Module):
                 'density_basis_semantics must be query_conditioned, '
                 'coordinate_local_symmetric, or endpoint_context_symmetric')
         self.kalman_layer = NeuralETKFLayer(
-            d_model=basis_dim,
-            b_net_in=sw_out_dim + 5,
+            d_model=(enkf_n_members - 1 if self.uses_physical_modes else basis_dim),
+            b_net_in=(basis_dim + sw_out_dim + 5
+                      if self.uses_physical_modes else sw_out_dim + 5),
             n_members=enkf_n_members,
             pert_hidden=enkf_pert_hidden,
             r_fy=config.get('r_fy_init', 0.04),
@@ -591,15 +621,21 @@ class FSIA_INR_Model(nn.Module):
                 'enkf_scale_condition_max', 3.0),
             coordinate_local_symmetric=(self.density_basis_semantics in (
                 'coordinate_local_symmetric',
-                'endpoint_context_symmetric')),
+                'endpoint_context_symmetric')) and not self.uses_physical_modes,
+            coefficient_space=self.uses_physical_modes,
         )
         self.enkf_n_members = enkf_n_members
+        self.background_state_dim = basis_dim
 
         self.background_residual_cap = float(
             config.get('background_residual_cap', 0.5))
         self.fy_dlon_window = float(config.get('fy_nb_dlon', 15.0))
         self.cosmic_dlon_window = float(
             config.get('cosmic_nb_dlon', 15.0))
+        self.fy_dlat_window = float(config.get('fy_nb_dlat', 5.0))
+        self.fy_dt_window = float(config.get('fy_nb_dt', 1.5))
+        self.cosmic_dlat_window = float(config.get('cosmic_nb_dlat', 5.0))
+        self.cosmic_dt_window = float(config.get('cosmic_nb_dt', 1.5))
         self.background_decoder = nn.Sequential(
             nn.Linear(basis_dim + sw_out_dim + 2, 64),
             nn.SiLU(),
@@ -609,11 +645,17 @@ class FSIA_INR_Model(nn.Module):
         # Shared physical observation operator.  It is nonlinear in continuous
         # coordinates/context, but affine in the low-dimensional ETKF state.
         basis_in_dim = basis_dim + sw_out_dim + 12
-        self.density_basis_decoder = nn.Sequential(
-            nn.Linear(basis_in_dim, 64),
-            nn.SiLU(),
-            nn.Linear(64, basis_dim),
-        )
+        if not self.uses_physical_modes:
+            self.density_basis_decoder = nn.Sequential(
+                nn.Linear(basis_in_dim, 64),
+                nn.SiLU(),
+                nn.Linear(64, basis_dim),
+            )
+        else:
+            self.mode_residual_cap = float(config.get('mode_residual_cap', 0.25))
+            mode_in_dim = 2 * (basis_dim + sw_out_dim) + 12
+            self.mode_residual = nn.Sequential(
+                nn.Linear(mode_in_dim, 64), nn.SiLU(), nn.Linear(64, 7))
 
         self._initialize_weights()
 
@@ -748,9 +790,283 @@ class FSIA_INR_Model(nn.Module):
             'delta_alt': delta_alt,
         }
 
+    def _physical_mode_raw(self, unit_center, unit_hmf2, target_coords,
+                           query_z=None, query_h_sw=None, target_z=None,
+                           target_h_sw=None, target_background=None):
+        """Seven fixed continuous log-density increment modes for M2-R R1."""
+        lat, lon, alt, time = (target_coords[..., index] for index in range(4))
+        dlat = (lat - unit_center[:, None, 0]) / self.fy_dlat_window
+        dlon = torch.remainder(
+            lon - unit_center[:, None, 1] + 180.0, 360.0) - 180.0
+        dlon = dlon / self.fy_dlon_window
+        dt = (time - unit_center[:, None, 3]) / self.fy_dt_window
+        height = (alt - unit_hmf2[:, None]) / 190.0
+        cos_sza, _, _ = _compute_solar_features(
+            lat.reshape(-1), lon.reshape(-1), time.reshape(-1))
+        cos_sza = cos_sza.reshape_as(lat)
+        center_sza, _, _ = _compute_solar_features(
+            unit_center[:, 0], unit_center[:, 1], unit_center[:, 3])
+        fixed = torch.stack([
+            torch.ones_like(height),
+            height,
+            0.5 * (3.0 * height.square() - 1.0),
+            0.5 * (5.0 * height.pow(3) - 3.0 * height),
+            torch.sin(0.5 * math.pi * dlat),
+            torch.sin(0.5 * math.pi * dlon),
+            (torch.sin(0.5 * math.pi * dt)
+             + 0.25 * (cos_sza - center_sza[:, None])),
+        ], dim=-1)
+        if query_z is None:
+            return fixed
+        count = target_coords.shape[1]
+        if target_z is None:
+            target_z = query_z[:, None, :].expand(-1, count, -1)
+        if target_h_sw is None:
+            target_h_sw = query_h_sw[:, None, :].expand(-1, count, -1)
+        if target_background is None:
+            target_background = target_coords.new_zeros(target_coords.shape[:2])
+        query_context = torch.cat([query_z, query_h_sw], dim=-1)
+        query_context = query_context[:, None, :].expand(-1, count, -1)
+        descriptors = torch.stack([
+            (target_background - 10.5) / 1.5,
+            lat / 90.0,
+            torch.sin(torch.deg2rad(lon)),
+            torch.cos(torch.deg2rad(lon)),
+            2.0 * (alt - self.alt_min) / (self.alt_max - self.alt_min) - 1.0,
+            cos_sza,
+            torch.sin(torch.deg2rad(15.0 * torch.remainder(time, 24.0))),
+            torch.cos(torch.deg2rad(15.0 * torch.remainder(time, 24.0))),
+            dlat, dlon, dt, height,
+        ], dim=-1)
+        residual = self.mode_residual(torch.cat([
+            query_context, target_z, target_h_sw, descriptors], dim=-1))
+        return fixed + self.mode_residual_cap * torch.tanh(residual)
+
+    def _physical_reference_coords(self, unit_center):
+        """Deterministic quadrature coordinates for each query-local problem."""
+        dtype, device = unit_center.dtype, unit_center.device
+        axis = torch.tensor([-1.0, 0.0, 1.0], device=device, dtype=dtype)
+        alt = torch.linspace(
+            self.alt_min, self.alt_max, 5, device=device, dtype=dtype)
+        h, y, x, t = torch.meshgrid(alt, axis, axis, axis, indexing='ij')
+        offsets = torch.stack([y, x, h, t], dim=-1).reshape(-1, 4)
+        reference = unit_center[:, None, :4] + offsets[None] * unit_center.new_tensor([
+            self.fy_dlat_window, self.fy_dlon_window, 0.0,
+            self.fy_dt_window])
+        reference[..., 0].clamp_(-90.0, 90.0)
+        reference[..., 1] = torch.remainder(reference[..., 1] + 180.0, 360.0) - 180.0
+        reference[..., 2] = offsets[None, ..., 2]
+        return reference
+
+    def _physical_mode_transform(self, unit_center, unit_hmf2,
+                                 query_z=None, query_h_sw=None,
+                                 query_background=None, reference_z=None,
+                                 reference_h_sw=None,
+                                 reference_background=None):
+        """Reference-grid Cholesky gauge; independent of observations."""
+        dtype, device = unit_center.dtype, unit_center.device
+        reference = self._physical_reference_coords(unit_center)
+        raw = self._physical_mode_raw(
+            unit_center, unit_hmf2, reference, query_z, query_h_sw,
+            reference_z, reference_h_sw,
+            (reference_background if reference_background is not None else
+             (query_background[:, None].expand(-1, reference.shape[1])
+              if query_background is not None else None)))
+        gram = torch.einsum('uri,urj->uij', raw, raw) / raw.shape[1]
+        eigenvalues = torch.linalg.eigvalsh(gram)
+        chol = torch.linalg.cholesky(gram)
+        modes = torch.linalg.solve_triangular(
+            chol, raw.transpose(1, 2), upper=False).transpose(1, 2)
+        normalized_gram = torch.einsum(
+            'uri,urj->uij', modes, modes) / modes.shape[1]
+        correction = torch.linalg.cholesky(normalized_gram)
+        modes = torch.linalg.solve_triangular(
+            correction, modes.transpose(1, 2), upper=False).transpose(1, 2)
+        chol = torch.bmm(chol, correction)
+        normalized_gram = torch.einsum(
+            'uri,urj->uij', modes, modes) / modes.shape[1]
+        return modes, chol, {
+            'mode_reference_gram_error': (
+                normalized_gram - torch.eye(
+                    7, device=device, dtype=dtype)).abs().amax(dim=(1, 2)),
+            'raw_mode_gram_min_eigenvalue': eigenvalues[:, 0],
+            'raw_mode_gram_condition': (
+                eigenvalues[:, -1] / eigenvalues[:, 0].clamp_min(1e-12)),
+        }
+
+    @staticmethod
+    def _apply_mode_transform(raw, chol):
+        return torch.linalg.solve_triangular(
+            chol, raw.transpose(1, 2), upper=False).transpose(1, 2)
+
+    @staticmethod
+    def _spectrum(matrix):
+        singular = torch.linalg.svdvals(matrix)
+        if singular.shape[-1] == 0:
+            empty = matrix.new_zeros(matrix.shape[0])
+            return singular, empty, empty
+        energy = singular.square()
+        probability = energy / energy.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+        effective_rank = torch.exp(-torch.sum(
+            probability * torch.log(probability.clamp_min(1e-12)), dim=-1))
+        first_energy = probability[..., 0]
+        return singular, effective_rank, first_energy
+
+    def _physical_mode_forward(self, coords, background, observations_fy,
+                               observations_cosmic):
+        """M2-R query-local coefficient ETKF over the existing M2-O neighbors."""
+        batch = len(coords)
+        center = coords[:, :4]
+        hmf2 = background['iri_peak'][:, 0]
+        reference_modes, chol, mode_diagnostics = self._physical_mode_transform(
+            center, hmf2, background['z_background'], background['h_sw'],
+            background['ne_bkg'].flatten())
+        query_modes = self._apply_mode_transform(
+            self._physical_mode_raw(
+                center, hmf2, coords[:, None, :4],
+                background['z_background'], background['h_sw'],
+                background['z_background'][:, None, :],
+                background['h_sw'][:, None, :], background['ne_bkg']),
+            chol).squeeze(1)
+
+        def prepare(observations):
+            if observations is None:
+                return ({
+                    'coords': coords.new_zeros(batch, 0, 4),
+                    'value': coords.new_zeros(batch, 0),
+                    'background': coords.new_zeros(batch, 0),
+                    'valid_mask': torch.zeros(
+                        batch, 0, device=coords.device, dtype=torch.bool),
+                    'rho_squared': coords.new_zeros(batch, 0),
+                }, coords.new_zeros(batch, 0, 7))
+            required = {
+                'coords', 'value', 'background', 'valid_mask', 'rho_squared',
+                'basis_z_background', 'basis_h_sw'}
+            missing = required.difference(observations)
+            if missing:
+                raise ValueError(
+                    f'M2-R observation payload missing fields: {sorted(missing)}')
+            valid = observations['valid_mask']
+            count = valid.shape[1]
+            prepared = dict(observations)
+            prepared['coords'] = torch.where(
+                valid.unsqueeze(-1), observations['coords'],
+                coords[:, None, :4].expand(-1, count, -1))
+            prepared['background'] = torch.where(
+                valid, observations['background'],
+                background['ne_bkg'].expand(-1, count))
+            prepared['value'] = torch.where(
+                valid, observations['value'], prepared['background'])
+            prepared['rho_squared'] = torch.where(
+                valid, observations['rho_squared'],
+                torch.ones_like(observations['rho_squared']))
+            if 'representativeness_weight' in observations:
+                prepared['representativeness_weight'] = torch.where(
+                    valid, observations['representativeness_weight'],
+                    torch.ones_like(observations['representativeness_weight']))
+            modes = self._apply_mode_transform(
+                self._physical_mode_raw(
+                    center, hmf2, prepared['coords'],
+                    background['z_background'], background['h_sw'],
+                    prepared['basis_z_background'], prepared['basis_h_sw'],
+                    prepared['background']), chol)
+            return prepared, modes.masked_fill(~valid.unsqueeze(-1), 0.0)
+
+        fy_obs, fy_modes = prepare(observations_fy)
+        cosmic_obs, cosmic_modes = prepare(observations_cosmic)
+        coefficient_background = coords.new_zeros(batch, 7)
+        etkf = self.kalman_layer(
+            coefficient_background,
+            torch.cat([background['z_background'], background['h_sw']], dim=-1),
+            query_modes,
+            {'FY': (fy_obs, fy_modes), 'COSMIC': (cosmic_obs, cosmic_modes)},
+            background['lat_n'], background['cos_sza'], background['sin_doy'],
+            background['cos_doy'], background['sin_i'])
+        ne_delta = (etkf['delta_FY'] + etkf['delta_COSMIC']).unsqueeze(-1)
+        ne_fused = background['ne_bkg'] + ne_delta
+        reference_anomalies = torch.einsum(
+            'brc,bnc->brn', reference_modes, etkf['latent_anomalies'])
+        spectra = {}
+        for name, matrix in (
+                ('mode_reference', reference_modes),
+                ('reference_anomalies', reference_anomalies),
+                ('FY_observation_anomalies', etkf['obs_anomalies_FY'] *
+                 etkf['precision_FY'].sqrt().unsqueeze(-1)),
+                ('COSMIC_observation_anomalies', etkf['obs_anomalies_COSMIC'] *
+                 etkf['precision_COSMIC'].sqrt().unsqueeze(-1)),
+                ('joint_observation_anomalies', torch.cat([
+                    etkf['obs_anomalies_FY'] *
+                    etkf['precision_FY'].sqrt().unsqueeze(-1),
+                    etkf['obs_anomalies_COSMIC'] *
+                    etkf['precision_COSMIC'].sqrt().unsqueeze(-1),
+                ], dim=1))):
+            if not torch.isfinite(matrix).all():
+                raise FloatingPointError(f'non-finite M2-R spectrum input: {name}')
+            singular, effective_rank, first_energy = self._spectrum(matrix)
+            spectra[f'{name}_singular_values'] = singular
+            spectra[f'{name}_effective_rank'] = effective_rank
+            spectra[f'{name}_first_energy_fraction'] = first_energy
+
+        extras = {
+            'ne_bkg': background['ne_bkg'], 'ne_iri': background['ne_iri'],
+            'background_residual': background['background_residual'],
+            'ne_residual': ne_delta,
+            'h_iri_aligned': background['z_background'],
+            'hmF2_det': hmf2.detach(),
+            'peak_params': {'hmF2': hmf2, 'NmF2': background['iri_peak'][:, 1]},
+            'K_FY': etkf['gain_FY'], 'K_COSMIC': etkf['gain_COSMIC'],
+            'r_fy': self.kalman_layer.r_fy,
+            'r_cosmic': self.kalman_layer.r_cosmic,
+            'innov_FY': etkf['innovation_FY'],
+            'innov_COSMIC': etkf['innovation_COSMIC'],
+            'update_FY': etkf['delta_FY'].unsqueeze(-1),
+            'update_COSMIC': etkf['delta_COSMIC'].unsqueeze(-1),
+            'weights_FY': etkf['weights_FY'],
+            'weights_COSMIC': etkf['weights_COSMIC'],
+            'member_weights': self.kalman_layer.last_member_weights,
+            'inflation_scale': etkf['inflation'],
+            'r_ref_FY': self.kalman_layer.r_fy,
+            'r_ref_COSMIC': self.kalman_layer.r_cosmic,
+            'h_prior': coefficient_background,
+            'h_analysis': etkf['z_analysis'],
+            'basis_z_background': background['z_background'],
+            'basis_h_sw': background['h_sw'],
+            'latent_increment': etkf['latent_increment'],
+            'latent_anomalies': etkf['latent_anomalies'],
+            'analysis_anomalies': etkf['analysis_anomalies'],
+            'etkf_transform': etkf['transform'], 'system': etkf['system'],
+            'query_anomalies': etkf['query_anomalies'],
+            'query_basis': query_modes, 'basis_FY': fy_modes,
+            'basis_COSMIC': cosmic_modes,
+            'factor_scales': etkf['factor_scales'],
+            'anomaly_singular_values': etkf['anomaly_singular_values'],
+            'anomaly_effective_rank': etkf['anomaly_effective_rank'],
+            'anomaly_condition': etkf['anomaly_condition'],
+            'scale_boundary_saturation': etkf['scale_boundary_saturation'],
+            'coefficient_background_query': coefficient_background,
+            'coefficient_analysis_query': etkf['z_analysis'],
+            **mode_diagnostics, **spectra,
+        }
+        for source, payload in (('FY', fy_obs), ('COSMIC', cosmic_obs)):
+            extras.update({
+                f'obs_anomalies_{source}': etkf[f'obs_anomalies_{source}'],
+                f'precision_{source}': etkf[f'precision_{source}'],
+                f'representativeness_{source}': etkf[
+                    f'representativeness_{source}'],
+                f'ensemble_covariance_{source}': etkf[
+                    f'ensemble_covariance_{source}'],
+                f'ensemble_rhs_{source}': etkf[f'ensemble_rhs_{source}'],
+                f'cross_covariance_{source}': etkf[f'cross_covariance_{source}'],
+                f'observation_coords_{source}': payload['coords'],
+                f'observation_rho_squared_{source}': payload['rho_squared'],
+            })
+        return (ne_fused, torch.zeros_like(ne_fused),
+                torch.zeros_like(background['ne_bkg']), ne_delta, extras)
+
     def forward(self, coords, sw_seq, precomputed_h_sw=None,
                 iri_peak=None, observations_fy=None,
-                observations_cosmic=None):
+                observations_cosmic=None, analysis_unit_ids=None,
+                analysis_unit_context=None):
         """Decode a joint low-dimensional ETKF analysis into physical log10Ne."""
         B = coords.shape[0]
         background = self.encode_background(
@@ -768,6 +1084,13 @@ class FSIA_INR_Model(nn.Module):
         _iri_peak = background['iri_peak']
         hmF2_det = _iri_peak[:, 0].detach()
         peak_params = {'hmF2': _iri_peak[:, 0], 'NmF2': _iri_peak[:, 1]}
+
+        if self.uses_physical_modes:
+            if analysis_unit_ids is not None or analysis_unit_context is not None:
+                raise ValueError(
+                    'M2-R query-local semantics do not accept analysis-unit inputs')
+            return self._physical_mode_forward(
+                coords, background, observations_fy, observations_cosmic)
 
         def prepare(observations):
             if observations is None:
@@ -901,9 +1224,13 @@ class FSIA_INR_Model(nn.Module):
 
     def _initialize_weights(self):
         """Initialize Background conservatively and keep ETKF gradients alive."""
-        nn.init.xavier_uniform_(
-            self.density_basis_decoder[-1].weight, gain=0.1)
-        nn.init.zeros_(self.density_basis_decoder[-1].bias)
+        if not self.uses_physical_modes:
+            nn.init.xavier_uniform_(
+                self.density_basis_decoder[-1].weight, gain=0.1)
+            nn.init.zeros_(self.density_basis_decoder[-1].bias)
+        else:
+            nn.init.zeros_(self.mode_residual[-1].weight)
+            nn.init.zeros_(self.mode_residual[-1].bias)
         nn.init.zeros_(self.background_decoder[-1].weight)
         nn.init.zeros_(self.background_decoder[-1].bias)
         nn.init.zeros_(self.iri_align_net[-1].weight)

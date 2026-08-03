@@ -150,6 +150,9 @@ def test_architecture_signature_and_dimension_validation():
         'enkf_scale_init': 1.1,
         'enkf_scale_condition_max': 3.0,
         'density_basis_semantics': 'query_conditioned',
+        'analysis_state_semantics': 'legacy_feature_increment',
+        'context_semantics': 'query_conditioning',
+        'mode_basis_semantics': 'learned_density_basis',
     }
     try:
         NeuralETKFLayer(d_model=64, n_members=1)

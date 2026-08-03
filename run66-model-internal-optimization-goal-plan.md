@@ -660,6 +660,247 @@ P2有效结果记录于`checkpoints_fsia/run66-modelonly-m2p-unified-latent-p2-r
 
 动态传播不属于M2-P。当前时间坐标仅表示窗口内四维重构条件，不建立`z_a(t) -> z_b(t+Δt)`的状态转移，也不宣称顺序预测。只有P4冻结后，才能另立M2-Q，单独定义forecast operator、跨窗口误差传播、循环稳定性和新的零观测预测门禁；不得与统一状态重构同时实现或联合调参。
 
+## 🧭 M2-R：规范固定的物理模态系数latent方案
+
+状态：**R0、R1通过；R2 train-only留出门禁失败，M2-R已停止，R3/R4未启动**。M2-P保持放弃；M2-R不实现M2-P固定网格、跨query统一状态、`observation_set_id`或partition-of-unity融合，而是在M2-O `endpoint_context_symmetric`查询局地同化路径上单因素替换求逆前的decoder/异常表示。M2-R默认关闭；Global R、N8、窗口、top-8、连续precision、现有QC数据和正式Analysis loss均不变，未读取development、locked-test或ISR，也不加入跨窗口forecast-transition。
+
+### 失败证据与尚未区分的三层原因
+
+M2-P retry2中，FY、COSMIC和联合白化观测异常的有效秩相对同样本M2-O分别下降`0.5273`、`0.3526`和`0.4720`，三个95% profile-blocked bootstrap区间均完全小于零；所有主要低/高空×昼/夜分层恶化约`7.1%–41.4%`。低/高空decoder响应重叠增加尤其明显，FY白天和夜间分别增加约`0.863/0.638`，COSMIC分别增加约`0.724/0.461`。与此同时，条件方向/尺度梯度有限非零、QR满列秩、ETKF条件数有限，FY/COSMIC观测坐标后验innovation仍降至先验的`0.972/0.923`。因此已确认失败发生在求逆前，但现有报告尚不能把以下三层混为一个原因：
+
+1. **decoder形状塌缩**：固定参考坐标上的多个decoder响应本身已近共线；
+2. **异常—decoder对齐塌缩**：decoder全空间有多个方向，但条件异常恰好对齐到同一主导响应；
+3. **观测采样塌缩**：query-local参考模板响应可区分，但实际top-8坐标只采到一个方向。
+
+首个实施动作必须在同一train-only样本上依次记录`M_ref`、`M_ref A`和`M_obs A`的奇异谱、第一模态能量占比、有效秩、条件数和主角度。若只在`M_obs A`退化，直接归因top-8观测支持或M2-O query-local窗口尺度，不得修改ETKF或通过decoder rank loss制造观测信息。
+
+### M2-P与M2-O的比较解释及父系选择
+
+| 比较维度 | M2-O | M2-P retry2 | 可作出的结论 |
+| --- | --- | --- | --- |
+| 同化域/状态身份 | 每个目标query独立构造top-8邻域并局地更新 | 固定重叠单元内跨query共享状态并融合 | 两者不是单因素差异；P同时改变状态域、观测集合和输出融合 |
+| 数学与状态语义 | query-local ETKF硬不变量通过 | 统一状态、一次ETKF、边界融合及硬不变量通过 | P改善的是架构语义一致性，不等于同化效果改善 |
+| 求逆前表示 | M2-P配对比较的基线 | FY/COSMIC/联合有效秩均显著下降，所有主要分层恶化`7.1%–41.4%`，响应重叠增加 | P在R要修复的首要终点上明确劣于O |
+| 观测坐标后验innovation | M2-O已有局地消化能力 | P2为`0.972/0.923`，均低于1 | P能拟合部分输入观测，但不能抵消其表示秩退化，也不证明留出目标方向改善 |
+| development方向/RMSE | 已有epoch 6–10完整报告，但无epoch通过全部方向门禁 | P3未启动 | 不存在合格的P对O development性能比较，禁止声称P整体改善 |
+| 归因价值 | 当前可复现生产对照 | 暴露共享仿射decoder/条件异常在统一架构下塌缩 | P是失败机制证据和测试经验，不是后续训练checkpoint或代码父系 |
+
+父系选择规则固定为：候选只有同时通过数学硬不变量和求逆前表示门禁，才可作为下一阶段代码/训练基线。M2-P只满足前者，故不得作为M2-R父系。M2-R以M2-O代码、Background checkpoint、query-local邻域和端点上下文为唯一父系；P的历史输出只用于负对照和失败归因，不加载P checkpoint、不复用P unit payload，也不把P的posterior innovation下降当成R的初始化优势。
+
+### 实施基础修正：只继承M2-O，不继承M2-P
+
+M2-R中的局地索引`q`固定表示M2-O的一次目标query及其现有FY/COSMIC top-8邻域；它不是M2-P固定网格单元。同一query的M10/M01/M11共享一次联合前向中的物理模态和系数异常，但不同query仍按M2-O分别构造邻域、分别执行ETKF并输出局地增量。现有端点自身detached `z_background/h_sw`继续作为conditioning-only上下文，既不作为ETKF状态，也不建立跨query共享状态。
+
+因此后续明确不实施：固定50%重叠网格、单元中心批量查询、`analysis_unit_id + observation_set_id`状态身份、多单元增量融合和边界partition-of-unity。连续性仍由M2-O共享端点算子、连续坐标特征和既有垂直/时间结构门禁约束。R0中“每个query作为一个shadow unit”的谱结果恰好符合修订后的语义，继续有效；R1中关于多query共享单元及边界融合的测试不再作为M2-R资格或实现要求。
+
+### 必须区分的状态语义
+
+| 符号 | 固定语义 | 禁止混写 |
+| --- | --- | --- |
+| `B_q(x)` | M2-O query-local连续Background物理密度场 | 不是ETKF latent成员 |
+| `c_q,c_x` | query端和目标/观测端自身detached D64背景/空间天气上下文，只条件化模态和尺度 | 不作为被ETKF更新的状态，不跨query共享 |
+| `a_q in R^7` | 一次M2-O query-local求解内、以Background为原点的物理密度**增量系数** | 不是IRI隐藏特征，也不是跨query统一状态 |
+| `M_q(x) in R^(1x7)` | 该query的增量系数到任意端点坐标密度增量的连续物理模态 | 不是协方差，也不是Kalman增益 |
+| `d_j` | 观测自身坐标的`y_j-B_q(x_j)` | 不等于留出目标残差 |
+| 目标方向 | 留出profile残差与分析增量的符号一致率 | 只用于训练后验收，不进入ETKF恒等式 |
+| 邻域代表性 | 邻域innovation与留出目标残差的一致性诊断 | 不应由rank或方向loss强制为100% |
+
+推荐的是M2-O每次query-local求解内部唯一的低维**增量状态**：以Background为展开原点，因此`a_b^q=0`是坐标定义，不表示背景信息为空；背景信息已进入`B_q`及端点上下文。最终输出仍为`B_q(q)+M_q(q)a_a^q`。这不是M2-P跨query统一latent；若未来要求统一场状态或总状态autoencoder，必须另立模型族，不得把`z_ctx`改名为已同化的`z_b`。
+
+### 推荐架构：直接参数化可观测物理模态
+
+保留`N=8`，令`r=N-1=7`。取消首版M2-P中自由旋转的`phi_D64(x) × Q_u`分解，直接生成7个连续密度增量模态：
+
+```text
+M_raw,q(x) = M0,q(x) + alpha * tanh(delta_M_theta(c_q, c_x, x))
+G_q = transpose(M_raw,q(X_ref,q)) * W_ref * M_raw,q(X_ref,q) + epsilon * I
+L_q = chol(G_q)
+M_q(x) = M_raw,q(x) * inverse(transpose(L_q))
+
+A_q = diag(s_q) * C_Helmert                       # [7, 8]
+Y_q = M_q(X_obs,q) * A_q                          # [m, 8]
+w_q = ETKF(Y_q, d_q, R_q)
+a_a^q = A_q * w_q                                 # 本次query唯一7维分析状态
+delta_q(x) = M_q(x) * a_a^q
+```
+
+`X_ref,q`是由M2-O当前query及固定窗口唯一确定的参考模板：覆盖`120–500 km`及query周围纬度/周期经度/时间支持端点，不依赖实际选中的top-8、观测顺序或batch组成；参考端点沿用M2-O自身detached背景上下文。`W_ref`确定性等权。Cholesky规范使`M_q(X_ref,q)^T W_ref M_q(X_ref,q)=I`，从结构上消除模态形状共线，而不是强迫实际观测矩阵`Y`达到指定秩。
+
+`M0`采用七个连续、可解释且线性独立的初始模态：共同幅度、Background垂直一阶敏感度、垂直曲率/厚度、平滑bottomside–topside对比、query邻域纬度奇模态、周期经度奇模态和连续当地时/SZA模态。所有模态使用归一化高度、相对hmF2高度及连续周期坐标，不建立低/高空或昼/夜专属参数。`delta_M_theta`末层零初始化且首轮有界，只允许在物理初始字典附近修正；若固定字典已通过表示门禁，首个训练screen不升级SIREN或增加网络深度。
+
+首版只保留query-local条件尺度网络`s_q=s0*exp(0.5*log(kappa_max)*tanh(g_theta(c_q)))`及既有`kappa_max=3`。不再设置独立条件方向网络：模态形状已由`M_q`定义，再增加可学习旋转会重新引入`M × Q`的不可辨识自由度。只有固定规范下的模态与尺度通过全部门禁后，才允许单独测试非对角系数协方差。
+
+```mermaid
+flowchart LR
+    background["M2-O Background B_q(x)"] --> context["端点D64 context\n不参与ETKF更新"]
+    context --> modes["7个raw物理模态"]
+    reference["固定参考求积点"] --> whitening["Cholesky规范固定"]
+    modes --> whitening
+    whitening --> operator["M_q(x)"]
+    scales["query-local尺度 s_q"] --> anomalies["系数异常 A_q"]
+    operator --> observed["Y=M_obs A_q"]
+    anomalies --> observed
+    observations["观测innovation d"] --> etkf["一次ETKF"]
+    observed --> etkf
+    etkf --> state["唯一分析系数 a_a"]
+    operator --> decode["query-local增量 M_q(q)a_a"]
+    state --> decode
+```
+
+### 训练方式：先识别模态，再训练同化
+
+1. **R0只读谱分解（已通过）**：在固定train-only M2-O同样本上完成`M_ref → M_ref A → M_obs A`三级审计及profile-blocked配对bootstrap；每个query独立审计，不恢复M2-P训练或单元payload。
+2. **R1 M2-O query-local shadow重绑定**：保留已通过的`M0`、参考规范和7维系数ETKF数学核心；移除M2-P式显式固定网格单元前置条件，将默认关闭的M2-R路径接到M2-O现有`query_observation_payload → attach_observation_background → endpoint_context_symmetric`数据流。新manifest只使用`analysis_state_semantics=query_local_increment_coefficients`、`context_semantics=endpoint_conditioning_only`和`mode_basis_semantics=reference_whitened_physical_modes`。验证每个query的M10/M01/M11复用同一`M_q/A_q`、观测/批次顺序不变、零观测/零innovation/padding回退、贡献可加、正定、严格加载及重复推理。不同query允许不同`a_q`，不验收跨query共享状态或边界融合。
+3. **R2 M2-O数据流上的train-only gappy-profile预训练**：从`checkpoints_fsia/run66-modelonly-m2o-endpoint-context-symmetric/best_background_model.pth`及M2-O日期/profile白名单初始化，只训练有界`delta_M_theta`，不训练ETKF尺度。每个已QC FY/COSMIC profile按高度token做固定哈希拟合/留出；拟合token用带Global R的ridge求7维系数，只以留出token的profile等权重构误差更新共享端点模态。必须同时比较固定`M0`、rank-1幅度基线和M2-O原decoder；FY/COSMIC分别报告低/高空×昼/夜留出RMSE。该阶段不查询邻域、不使用目标方向、不读取development，也不改变正式Analysis loss。只有两来源总体及每个主要分层均不差于M2-O超过1%，且总体显著优于rank-1，才进入R3。
+4. **R3 M2-O query-local 100批同化预检**：加载R2模态并先冻结，只训练条件尺度`s_q`；训练数据、endpoint context、top-8、Global R、N8、连续precision、exact M10/M01/M11、经验协方差及既有辅助项全部沿用M2-O。先以100个train-only batch验收FY/COSMIC/联合`R^-1/2Y`、第一模态能量、条件数、尺度饱和、各来源观测坐标后验innovation和全部梯度。FY与COSMIC后验/先验innovation绝对值比均须`<1`；当前未训练尺度的`1.056/1.013`只是R3待修复基线，不再作为实现M2-P固定网格的理由。尺度通过后才允许一次小学习率联合微调有界`delta_M_theta`，每步重新规范；失败即停止，不调ETKF、R、N8或loss。
+5. **R4唯一五epoch M2-O配对development screen**：仅在修订后的R1、R2、R3全部通过后，从上述M2-O `best_background_model.pth`以及相同seed、batch顺序和epoch日程启动一次五epoch screen。唯一架构差异是“原endpoint density basis/固定异常表示 → 参考规范物理模态/条件尺度”；邻域、R、N8、窗口、top-8、loss、QC与evaluation路径不变。epoch 6–10分别与M2-O同epoch配对报告，不挑选单个有利O epoch；统计以profile为独立单位，并按目标来源及低/高空×昼/夜分层阻断。每个R epoch先过绝对方向、分层、RMSE、M11、连续性、strict加载、有限性和确定性门禁，再检查相对同epoch O的有效秩和第一模态能量，最后只在全部合格R epoch中按FY/COSMIC profile RMSE等权选择；不读取locked-test或ISR。
+
+执行记录（2026-08-03）：首版shadow历史名为`unit_increment_coefficients`；R1现已正式更名并实现为`query_local_increment_coefficients`，不得沿用`unit`名称。七个固定物理模态、参考点Cholesky二次规范、N8系数异常、逐query一次局地ETKF及三级谱诊断均保留，M2-P固定单元路径已从M2-R删除。R0本身按“一query一shadow实例”运行，因而不依赖M2-P。R0在M2-O epoch 7的train-only同样本上各固定抽取128个FY/COSMIC profile；FY目标的FY/COSMIC/联合有效秩配对差为`+1.483/+2.240/+2.032`，95% profile-blocked CI下界为`+1.334/+1.915/+1.840`；COSMIC目标对应为`+1.115/+2.414/+2.657`，CI下界为`+0.958/+2.257/+2.506`。第一模态能量均低于M2-O，主要分层未出现超过5%的秩恶化，参考Gram最大误差`9.54e-7`，Background逐元素差为0，故R0表示门禁通过。报告为`isr_validation_outputs/run66-modelonly-m2r-physical-modes/r0_train_only_paired.json`。
+
+R0白化审计同时发现既有紧支撑多项式在float边界可能产生极小负precision；共享函数仅增加理论零下界钳制，避免`R^{-1/2}`出现NaN并保持ETKF正定语义。71项完整pytest通过；R1已验证参考规范、逐query唯一系数求解、查询/观测/batch顺序、零观测/零innovation、padding、贡献可加、正定、有限梯度和重复推理。生产契约不接受`analysis_unit_ids`或共享unit context；M2-R保持默认关闭且因R2失败不具备训练候选资格。
+
+修订后的执行结果：R1已完成M2-O query-local端点数据流重绑定；不同query独立保留top-8邻域和系数状态，端点D64背景上下文与7维ETKF系数状态明确分离，71项完整pytest通过。R2使用train-only固定哈希gappy-profile、FY/COSMIC各128个profile，只训练有界物理模态残差。初次实现复核时发现参考求积点错误复用了query上下文，前两份报告保留但标记为无决策资格；改为参考端点自身detached背景/空间天气上下文后，20 epoch正式复核中FY总体RMSE相对M2-O为`0.9213`且总体显著优于rank-1，但COSMIC总体为`1.1741`；FY高空白天/高空夜间为`1.4790/1.0234`，COSMIC高空白天/高空夜间/低空夜间为`1.0121/1.3730/1.1466`。因此“所有主要分层不劣于M2-O超过1%”明确失败。按预注册顺序停止，R3条件尺度预检和R4 development screen均未启动，不调ETKF、R、N8、窗口或loss，也不归因联合竞争。
+
+R2归因：参考规范和R0观测秩证明固定物理字典能缓解单一主导方向，但共享七模态在gappy-profile跨来源/分层泛化上仍不足；正式复核使FY总体与rank-1门禁改善，却未修复COSMIC高空夜间等系统性误差，说明问题不只是optimizer未收敛。当前证据定位在ETKF求逆前的物理模态形状/来源共享表示与稀疏高度支持之间，不是ETKF求逆翻转；R3尚未运行，不能把失败归因条件尺度。正式报告见`isr_validation_outputs/run66-modelonly-m2r-physical-modes/r2_final/r2_gappy_profile_report.json`；同目录前两份报告复用了错误参考上下文，仅保留为实现诊断，不参与门禁。
+
+历史R0 JSON中的`R1_fixed_grid_payload_and_blending_complete=false`和`progression_to_R2_allowed=false`记录的是本次修订前的M2-P继承边界，不回写历史报告；它们不否定R0数值门禁。新的推进条件以本节为准：完成M2-O query-local R1重绑定及相应回归后即可执行R2。
+
+### 表示资格门禁
+
+- 参考模态Gram误差`max_abs(M_ref^T W M_ref-I) <= 1e-5`；raw Gram最小特征值、Cholesky及重复推理必须有限，禁止以过大的`epsilon`掩盖退化。
+- FY、COSMIC及联合`R^-1/2 Y`相对同样本M2-O的有效秩差，其profile-blocked 95% bootstrap下界均须大于零；不规定绝对秩达到3或7。
+- 任一主要目标来源×观测来源×低/高空×昼/夜分层有效秩不得比M2-O恶化超过5%。
+- 第一奇异模态能量占比必须显著低于M2-P，并不得高于M2-O；高低空和昼夜响应余弦不得显著高于M2-O。
+- FY/COSMIC观测坐标后验innovation绝对值均须下降，且下降不得以非有限条件数、尺度饱和或单一模态独占为代价。
+- gappy-profile留出RMSE必须优于同样本rank-1幅度基线；该指标证明额外模态携带可泛化结构，不以人为rank目标代替。
+
+若`M_ref A`通过而`M_obs A`仍退化，判定为M2-O实际top-8观测几何、query-local窗口或空间表示支持不足，停止M2-R；不得调ETKF、R、N8或归因联合竞争。若`Y`改善且后验innovation下降，但留出目标方向仍停留在M2-O水平，判定为邻域innovation代表性或query-local空间支持问题，不继续增加decoder容量。只有两个单源均正确后，才允许讨论FY/COSMIC联合竞争。
+
+### 风险与控制
+
+| 风险 | 控制 |
+| --- | --- |
+| 参考点规范固定制造数据不支持的模态 | 规范只固定形状尺度；系数尺度可收缩，禁止绝对rank门槛，并以gappy-profile留出误差证明模态有信息 |
+| Cholesky放大近奇异raw模态 | `M0`保证初始独立；审计raw Gram最小特征值和条件数，失败即停止而非增大抖动项 |
+| 物理初始字典过强 | learnable residual零初始化且有界；只在train-only留出重构通过后放开联合微调 |
+| FY/COSMIC来源偏差主导模态 | 共享模态、profile等权、来源分开报告；不建来源专属decoder或参数 |
+| query-local物理模态仍可能传播错误innovation | 沿用M2-O既有QC成品、目标profile排除、top-8窗口和连续precision；传播范围不扩展到M2-P跨query单元，不重新QC |
+| 增加计算量 | 每个M2-O query只在固定参考模板计算一次`7x7`Gram/Cholesky，FY/COSMIC观测与query响应复用同一变换 |
+| 把局地增量latent误称统一场状态 | manifest显式记录`analysis_state_semantics=query_local_increment_coefficients`、`context_semantics=endpoint_conditioning_only`；禁止使用`analysis_unit_unified` |
+| 动态预测语义混入 | 本阶段仍是四维窗口重构；forecast-transition继续后置 |
+
+### 方法依据
+
+LETKF支持对每个局地分析问题以一次集合变换更新唯一局地状态[^1]；M2-R沿用M2-O的query-local局地问题，不据此恢复M2-P固定网格统一状态。表示误差文献要求把观测采样/代表性问题与算法求解错误分开[^4]。Fan等的latent DA工作支持先建立可解码的低维背景—观测表示，再在latent中分析，而不是把任意隐藏特征直接当作物理状态[^2][^3]。Sui等以电子密度场快照的POD/DMD模态进行低秩重构，支持“物理场模态系数”作为低维控制变量，但本方案不引入其跨窗口动力传播[^8]。Yang等的电离层ST-INR支持连续周期时间编码、空间特征及可微坐标网络表达连续电子密度与梯度[^6]。以上文献支撑架构选择，不替代本项目的同样本谱、方向和连续性门禁。
+
+## 🧪 M2-S：分层冲突归因与连续物理条件化方案
+
+状态：**S0/S1已执行，S2双折门禁失败并停止**。M2-S只继承M2-O的Background、query-local top-8数据流和M2-R R1的固定`M0`/参考Cholesky规范；R2正式checkpoint仅用于失败机制诊断，未作为候选初始化。全程只使用train-only已QC FY/COSMIC profile，未读取development、locked-test或ISR，未修改Global R、N8、窗口、top-8、正式Analysis loss或ETKF求解。
+
+### 决策目标与禁止混写的语义
+
+R2失败只证明“当前共享七模态训练结果不能跨来源/分层泛化”，尚未区分共享容量、观测支持、训练暴露和观测系统差异。M2-S先回答原因，再决定是否需要新表示；不得把来源标签直接写入物理密度模态。
+
+| 符号/字段 | 固定语义 | 禁止解释 |
+| --- | --- | --- |
+| `B_q(x)` | M2-O query-local连续Background密度 | 不是7维ETKF状态 |
+| `a_q in R^7` | 以Background为原点的query-local物理增量系数 | 不是跨query统一状态，也不是FY/COSMIC来源状态 |
+| `M_q(x;c_q,c_x)` | 同一物理电子密度场的共享连续模态；同坐标、同物理上下文下对FY/COSMIC必须完全相同 | 不是观测偏差、R、Kalman增益或来源专属decoder |
+| `c_q,c_x` | detached连续物理上下文：Background及其垂直形状、hmF2相对高度、SZA/LST/DOY、纬度/磁倾角和空间天气 | 不被ETKF更新；不得包含source id、profile id、邻域数量或输出残差 |
+| `G_s` | 来源`s`的高度token数、跨度、最大空洞、top-8距离/precision和拟合—留出间距等观测支持几何 | 不是背景协方差方向 |
+| `b_s(x)` | 待检验的观测系统偏差项，只属于观测算子语义 | 不得吸收到物理latent或共享`M_q`中 |
+| `g_k=grad_theta L_k` | 来源×高度×昼夜组对模态参数的gappy重构梯度 | 不是Kalman增益`K`、交叉协方差或ETKF成员方向 |
+| 分层标签 | 仅用于阻断、统计和训练暴露平衡 | 不作为模态网络输入，不建立昼/夜或高/低空专属参数 |
+
+### 五个竞争假设及可证伪预测
+
+| 假设 | 机制 | 若成立应观察到 | 否证条件 |
+| --- | --- | --- | --- |
+| H1 支持几何不足 | COSMIC高度跨度、空洞或fit→holdout距离使7模态不可由稀疏token识别 | 在Background/SZA/LST/纬度及高度支持匹配后，COSMIC超额RMSE点估计至少缩小50%且缩小量的profile-blocked 95%下界>0；误差与最大高度空洞/杠杆值稳定相关 | 支持匹配后COSMIC高空夜间差距基本不变，且相关区间包含0 |
+| H2 暴露/权重不足 | pooled预训练中某些分层梯度方向一致但质量或频次太小 | 组间梯度余弦非负、冲突率低，但梯度范数或有效profile质量相差>3倍；仅做profile×分层等权即可通过R2门禁 | 等权后仍失败，或关键组梯度方向本身相反 |
+| H3 共享模态容量冲突 | 同一自由残差必须同时拟合互不兼容的FY/COSMIC或昼夜/高度形状 | profile-blocked梯度余弦95%区间上界<0或冲突率95%下界>50%；来源单独训练均改善本来源，却损害另一来源；支持匹配不能消除 | pooled、单源与匹配实验没有上述交叉损害 |
+| H4 观测系统差异 | 已QC数据仍存在来源相关的Abel/产品垂直偏差，不能由共享物理场表示 | 在足量近同时空、支持和物理上下文匹配样本上，source对Background残差曲线仍有`abs(SMD)>=0.2`且95%区间不含0，并跨日期块同向；来源标签可预测系统残差但不改善物理交叉重构 | 匹配后来源效应消失；若主要分层每来源不足30个匹配profile则只记“无法判定”，不得据此增加偏差模型 |
+| H5 规范/上下文漂移 | 参考点和profile端点上下文变化使规范模态在fit与holdout间旋转 | 误差与`M_ref→M_fit/M_holdout`主角度或条件数相关（profile-blocked `abs(rho)>=0.3`且95%区间不含0），冻结端点上下文显著减小误差 | Gram合格且主角度、条件数与误差无稳定关系 |
+
+H1、H4优先于H2、H3处理，因为错误观测支持或观测系统偏差不能靠扩大共享decoder修复；H5若成立先修规范数据流。多个假设可同时成立，但每次只处理优先级最高者并重跑同一审计。
+
+### S0：train-only分层梯度与leave-source-out审计
+
+1. **冻结样本与独立单位**：沿用当前日期manifest和profile白名单；FY/COSMIC各最多固定抽取512个profile，按来源×profile高度覆盖类（低层/高层/跨层）×昼/夜×纬度带×日期块分层。profile是独立单位，高度token只是profile内重复测量。用`SHA256(profile_id, source, seed=42)`分成A/B两折，A拟合B评估、B拟合A评估；同一profile的token不得跨折。
+2. **共同对照**：所有实验复用完全相同profile与gappy token划分，同时报告rank-1、固定`M0`、M2-O原decoder、R2当前自由MLP、FY-only、COSMIC-only和pooled模型。R2正式checkpoint只作失败机制诊断，不作为初始化或候选。
+3. **梯度审计**：在零初始化以及固定25/50/100步保存每个来源×高度×昼夜组对`delta_M`的profile等权梯度；记录两两余弦、负余弦率、范数份额、主梯度子空间夹角和投影残差。PCGrad只作为冲突定义的文献依据，本阶段不做梯度投影或“修复”，以免掩盖任务不兼容[^9]。
+4. **支持匹配**：只按结果发生前可知的特征匹配FY/COSMIC profile：高度token数/跨度/最大空洞、fit→holdout高度距离、LST/SZA、纬度/磁倾角、DOY、hmF2、Background及空间天气。固定顺序最近邻加预注册caliper，不按观测值、残差或RMSE匹配；报告匹配保留率和未匹配区域。
+5. **观测系统诊断**：在匹配集上比较`y_s-B(x)`的profile级垂直曲线、均值/斜率/曲率及source效应；只诊断既有QC产品，不重新QC、不删除样本、不调整R。Shi等已显示不同观测系统可存在需单独校准的系统差异，因此该效应必须与物理密度模态分开[^11]。
+6. **规范稳定性**：记录每profile的`M_ref` Gram、raw最小奇异值、`M_fit/M_holdout`有效秩、主角度、ridge杠杆值及条件数；分别运行“端点自身上下文”和“冻结query上下文”只读反事实，后者不具候选资格。
+7. **统计**：主要比较均以profile为单位，在日期块内bootstrap后再汇总；报告均值差、95%区间和每个分层，不把token当独立样本。所有阈值在运行前写入manifest，禁止看结果后改caliper、样本数或分层定义。
+
+```mermaid
+flowchart TD
+    audit["S0 同一样本归因"] --> support{"支持匹配后差距缩小>=50%?"}
+    support -->|是| stop_support["归因H1：停止模态扩容\n另立观测支持方案"]
+    support -->|否| bias{"匹配后source效应仍显著?"}
+    bias -->|是| stop_bias["归因H4：物理latent保持共享\n另立观测算子偏差方案"]
+    bias -->|否| gauge{"规范主角度/条件数关联误差?"}
+    gauge -->|是| fix_gauge["归因H5：只修参考上下文/规范"]
+    gauge -->|否| gradients{"梯度方向冲突?"}
+    gradients -->|否，范数失衡| balance["归因H2：只平衡profile×分层暴露"]
+    gradients -->|是| film["归因H3：实施连续物理FiLM模态"]
+```
+
+### S1：按归因选择唯一修改
+
+- **H1成立**：M2-S停止，不修改模态、ETKF、R或N8。另立单因素观测支持方案，比较profile-block邻域或高度覆盖约束；在其获批前不改top-8/窗口。
+- **H2成立**：架构保持R1固定，R2预训练采样改为来源×低/高空×昼/夜profile等权；不改变正式Analysis loss。若一次复验仍失败即停止，不升级网络。
+- **H4成立**：M2-S停止；另立观测算子计划`H_s(field)=field+b_s(x)`，其中`b_s`为train-only估计、零均值有界且不进入物理latent。不得创建FY/COSMIC密度状态或来源专属`M_q`，也不得用R吸收偏差。
+- **H5成立**：只修参考端点自身上下文、规范与缓存身份；固定`M0`复验通过前不训练残差。
+- **仅H3成立**：从M2-O Background和R1零残差重新初始化，以一个共享坐标trunk加有界FiLM调制替换当前“拼接全部端点D64上下文的自由MLP”：
+
+\[
+u(x)=f_{coord}(\xi_x),\qquad
+(\gamma_q,\beta_q)=f_{cond}(c^{phys}_q),
+\]
+
+\[
+\Delta M_q(x)=W_2\left[(1+\epsilon\tanh\gamma_q)\odot u(x)
++\epsilon\tanh\beta_q\right],
+\qquad M_{raw,q}=M_{0,q}+\alpha\tanh\Delta M_q.
+\]
+
+`c_phys`只保留连续Background值/垂直一二阶形状、hmF2相对高度、SZA、`sin/cos(LST)`、DOY、纬度/磁倾角、Kp/F10.7；不输入source id或分层标签。FiLM只调制共享坐标特征，不增加来源分支、注意力、mixture-of-experts或新的latent维度[^10]。末层、`gamma/beta`均零初始化，`alpha=0.25`和调制幅度`epsilon<=0.1`首版固定；每步仍在使用端点自身上下文的固定参考模板上重新Cholesky规范。相同坐标和相同物理上下文下，FY/COSMIC必须逐元素获得相同`M_q(x)`。
+
+不在首版使用PCGrad、GradNorm、source-specific adapter、rank loss或非对角系数协方差。若H3成立但FiLM后梯度仍冲突，结论为“共享七维物理状态不足以同时表达已QC两来源”，停止而不是用梯度手术隐藏冲突。
+
+### S2–S4实施与门禁
+
+1. **S2结构shadow**：legacy/M2-O checkpoint继续`strict=True`逐元素重现；验证同一query的M10/M01/M11复用同一`M_q/A_q`、参考端点上下文无query fallback、source标签置换不改变模态、观测/query/batch顺序不变、padding/零观测/零innovation回退、贡献可加、Gram误差`<=1e-5`、有限性和重复推理。
+2. **S2 gappy双折门禁**：A/B交叉拟合两折均须满足FY/COSMIC总体及每个样本充足主要分层`RMSE(M2-S)/RMSE(M2-O)<=1.01`；相对rank-1的profile配对bootstrap 95%上界`<0`。若按H3实施，关键冲突组的负梯度率须相对R2下降至少25%，且不得以另一来源恶化换取。任一折失败即停止。
+3. **S3表示与100批同化预检**：在同样本M2-O对照上，FY/COSMIC/联合白化`Y`有效秩差的profile-blocked 95%下界均`>0`，任一主要分层不得恶化超过5%，第一模态能量不高于M2-O；FY/COSMIC观测坐标后验/先验绝对innovation比均`<1`。保持Global R、N8、窗口、top-8、连续precision、exact M10/M01/M11和正式loss不变。
+4. **S4唯一五epoch screen**：只有S0归因唯一、S2/S3全部通过才允许一次M2-O同epoch配对development screen。沿用自源负响应、跨源方向、全部分层、RMSE、M11和硬不变量门禁；两个单源未同时正确不得讨论联合竞争。失败不读取ISR、不进入三折、不调ETKF/R/N8。
+
+### 风险与控制
+
+| 风险 | 控制 |
+| --- | --- |
+| profile内高度点被当成独立证据 | profile级A/B划分、profile-blocked统计，token只作重复测量 |
+| 支持匹配引入结果选择 | 只使用观测前几何/物理特征，固定caliper，报告保留率和不可匹配域 |
+| source通过上下文代理泄漏进物理模态 | 禁止source/profile/邻域数量输入；做source标签置换和同坐标同上下文逐元素测试 |
+| 梯度大小受参数尺度影响 | 同一初始化、同一参数块、单位范数余弦，并同时报告原始范数和投影残差 |
+| PCGrad掩盖真实不可兼容 | 仅诊断，不用于首轮优化或通过门禁 |
+| FiLM再次塌缩到单模态 | 有界零初始化、参考Gram/有效秩/第一模态能量和分层响应硬门禁 |
+| 观测偏差被误学成物理场 | H4优先判断；偏差项只能另立观测算子，不能进入`a_q/M_q` |
+| 连续条件化过拟合日期或空间天气 | train-only profile双折、日期块bootstrap；通过后仍需既定三折日期阻断 |
+| 稀疏观测本身不可识别七模态 | 不设绝对rank目标；H1成立即停止decoder扩容 |
+
+方法依据：LETKF的query-local低维分析语义沿用Hunt等[^1]；表示误差与观测支持必须和求解误差分开的原则沿用Janjić等[^4]；连续坐标场与稀疏重构依据Yang等[^6]；多观测系统差异依据Shi等[^11]。PCGrad文献仅支撑梯度冲突的可测定义[^9]，FiLM支撑用有界连续条件调制共享特征而非建立来源专属网络[^10]。
+
+### M2-S执行结果（2026-08-03）
+
+S0在train-only既有QC数据上固定抽取FY/COSMIC各512个profile。跨来源分层梯度平均余弦为`0.1514`（profile-bootstrap 95% CI `[0.0808, 0.2198]`），负余弦率为`28.13%`（`[17.19%, 39.06%]`），但梯度范数比为`36.88`，因此按预注册优先级选择H2而非H3。H1虽然匹配后的来源总体差点估计缩小`58.09%`，但预注册缩小量bootstrap区间为`[-0.3498, -0.2456]`，未通过；H4匹配样本在高空白天/低空夜间不足30且source效应CI含0；H5主角度和条件数相关CI均含0。FY-only/COSMIC-only没有形成“双向本源改善、跨源损害”，故不允许FiLM。
+
+S1只把R1零残差预训练改为来源×低/高空×昼/夜profile等权，其他语义和超参数保持不变。S2 A→B折的FY/COSMIC总体`RMSE(M2-S)/RMSE(M2-O)`分别为`1.1415/1.2159`，B→A折为`1.2617/1.2823`；两折相对rank-1的profile配对bootstrap 95%上界分别为`0.00718/0.02272`，均失败。分层等权没有修复R2，反而在FY高空和COSMIC高空夜间显著恶化；因此“H2暴露不足是充分首因”被干预复验否证。本轮按规则停止，不进入S3、S4，不实现FiLM，也不把失败归因ETKF求逆或FY/COSMIC联合竞争。
+
+正式记录：`isr_validation_outputs/run66-modelonly-m2s-conflict/s0_retry2_512_dayblocks/s0_manifest.json`、`s0_report.json`、`s0_attribution.json`及`isr_validation_outputs/run66-modelonly-m2s-conflict/s1_h2_balanced/s1_h2_balanced_report.json`。128-profile初次审计因H4样本不足只保留为执行诊断，不参与最终归因；`smoke`目录只验证入口。
+
 ## ⚙️ M3：胜出配置全量训练
 
 - 从`run66-etkf-loss/best_background_model.pth`重新初始化Analysis
@@ -748,7 +989,7 @@ ISR结果不触发本轮继续调参。若ISR改善，结论为“模型内改�
 | ISR目标污染 | 单独报告产品限制 |
 | 全月数据已被历史实验接触 | 后续只报告日期阻断交叉验证，不再宣称卫星盲验收；ISR是唯一独立外部比较 |
 
-当前已放弃M2-P并将源码回退至M2-O/legacy语义；不再执行M2-P的P0–P4，也不从历史M2-P输出恢复训练。FY/COSMIC统一时空L1排序、既有QC数据及历史run输出继续保留；locked-test和ISR未因M2-P被访问。
+当前已放弃M2-P且不从其代码或历史输出恢复训练。M2-R已在M2-O query-local语义完成R0/R1，但R2 train-only留出门禁失败，R3/R4未启动。M2-S的S0归因选择H2，唯一分层等权干预随后在S2双折门禁失败，已停止且未实施FiLM。FY/COSMIC统一时空L1排序、既有QC数据及历史run输出继续保留；development、locked-test和ISR未因M2-R/M2-S被访问。
 
 ## ✍️ 持续追踪
 
@@ -784,6 +1025,8 @@ ISR结果不触发本轮继续调参。若ISR改善，结论为“模型内改�
 | 2026-08-01 | M2-L排序一致性修复与冻结反事实 | 完成 | FY/COSMIC复用归一化纬度、经度、时间L1 top-8距离 | `FY_dataloader.py`、`audit_low_night_coverage.py`、`test_empirical_covariance.py`、`run66-modelonly-m2l-spacetime-top8`、本计划M2-L | 生产索引与直接检索审计复用同一函数；冻结checkpoint影响仅为浮点/稀少候选替换量级；不执行同配置重训 | 排序修复无条件保留；进入共享状态语义审计 |
 | 2026-08-02 | M2-O端点上下文对称映射 | 完成，未通过 | 物理端点自身背景上下文；其余M2-N配置固定 | `run66-modelonly-m2o-endpoint-context-symmetric`、`development_qualification_summary.json` | FY自源68.07%–69.45%；每epoch 14–16个分层失败；求逆前链条仍受限；硬不变量通过 | 停止局地核路线；转M2-P统一latent架构 |
 | 2026-08-02 | M2-P统一latent与两层表示修正 | 已放弃；代码已回退 | 曾实施P0/P1并执行P2 train-only预检 | `run66-modelonly-m2p-unified-latent-p2*`历史输出、本计划M2-P | retry2确认表示秩与响应重叠恶化；P3/development未启动；locked-test/ISR未使用 | 保留失败证据，不恢复M2-P训练 |
+| 2026-08-03 | M2-R规范固定物理模态系数latent | R0/R1通过，R2未通过并停止 | M2-O query-local 7维物理增量系数、参考Cholesky规范和有界共享模态残差 | `audit_m2r_representation.py`、`pretrain_m2r_modes.py`、`r0_train_only_paired.json`、`r2_final/r2_gappy_profile_report.json` | R0六项有效秩CI下界>0；R1 71项测试；R2 FY总体比M2-O为0.9213、COSMIC为1.1741，FY高空白天及COSMIC多个分层失败 | 不进入R3/R4；先执行M2-S train-only冲突/支持归因 |
+| 2026-08-03 | M2-S冲突归因与连续物理条件化 | S0选择H2；S2失败并停止 | 只诊断R2 checkpoint；唯一干预为来源×高低空×昼夜profile等权 | `audit_m2s_conflict.py`、`run_m2s_h2.py`、`run66-modelonly-m2s-conflict/s0_retry2_512_dayblocks`、`s1_h2_balanced` | S0余弦CI为正、范数比36.88；等权双折FY总体比M2-O为1.1415/1.2617，COSMIC为1.2159/1.2823，rank-1门禁均失败 | 不进入S3/S4，不实现FiLM，不读development/locked-test/ISR；重新审查共享物理模态形状与分层可识别性的联合约束 |
 
 [^1]: Hunt, B. R., Kostelich, E. J., & Szunyogh, I. (2007). “Efficient data assimilation for spatiotemporal chaos: A local ensemble transform Kalman filter.” *Physica D: Nonlinear Phenomena, 230*(1–2), 112–126. https://doi.org/10.1016/j.physd.2006.11.008
 
@@ -798,3 +1041,11 @@ ISR结果不触发本轮继续调参。若ISR改善，结论为“模型内改�
 [^6]: Yang, F., Li, W., Li, J., Zuo, X., Zhao, D., & Zhang, K. (2026). “Spatiotemporal implicit neural representation for ionospheric tomography with multi-LEO occultation data.” *IEEE Transactions on Geoscience and Remote Sensing, 64*, 4103816. https://doi.org/10.1109/TGRS.2026.3667515
 
 [^7]: Xu, X., Sun, X., Han, W., Zhong, X., Chen, L., Gao, Z., & Li, H. (2025). “FuXi-DA: A generalized deep learning data assimilation framework for assimilating satellite observations.” *npj Climate and Atmospheric Science, 8*, 156. https://doi.org/10.1038/s41612-025-01039-3
+
+[^8]: Sui, Y., Fu, H., Dai, Y., Xu, F., Lu, S., Cheng, J., & Jin, Y.-Q. (2025). “Global ionospheric 4-D tomography and forecast based on multisource DMD data assimilation.” *IEEE Transactions on Geoscience and Remote Sensing, 63*, 2004510. https://doi.org/10.1109/TGRS.2025.3633701
+
+[^9]: Yu, T., Kumar, S., Gupta, A., Levine, S., Hausman, K., & Finn, C. (2020). “Gradient surgery for multi-task learning.” *Advances in Neural Information Processing Systems, 33*, 5824–5836. https://proceedings.neurips.cc/paper/2020/hash/3fe78a8acf5fda99de95303940a2420c-Abstract.html
+
+[^10]: Perez, E., Strub, F., de Vries, H., Dumoulin, V., & Courville, A. (2018). “FiLM: Visual reasoning with a general conditioning layer.” *Proceedings of the AAAI Conference on Artificial Intelligence, 32*(1), 3942–3951. https://doi.org/10.1609/aaai.v32i1.11671
+
+[^11]: Shi, S., Wu, S., Zhang, K., Li, W., Shi, J., & Song, F. (2022). “An investigation of a new artificial neural network-based TEC model using ground-based GPS and COSMIC-2 measurements over low latitudes.” *Advances in Space Research, 70*(9), 2522–2540. https://doi.org/10.1016/j.asr.2022.07.027
