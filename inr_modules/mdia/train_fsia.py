@@ -751,7 +751,7 @@ def _covariance_training_loss(
 def _paired_analysis_losses(
         model, batch_processor, fy_batch, cosmic_batch, device, config,
         sw_manager, iri_peak_manager, allowed_profile_ids=None,
-        source_mode=None, analysis_epoch=0):
+        source_mode=None, analysis_epoch=0, include_gram=False):
     coords, target, profile_ids = _unpack_source_batch(fy_batch, device)
     sw_seq = sw_manager.get_drivers_sequence(coords[:, 3])
     iri_peak = (iri_peak_manager.get_iri_peak(coords)
@@ -803,7 +803,9 @@ def _paired_analysis_losses(
                 fy_extras, profile_ids, model.kalman_layer)
             + observation_gram_whitening_loss(
                 cosmic_extras, cosmic_ids, model.kalman_layer))
-    return observation_loss, covariance_loss, direction_loss, gram_loss
+    if include_gram:
+        return observation_loss, covariance_loss, direction_loss, gram_loss
+    return observation_loss, covariance_loss, direction_loss
 
 
 def _resolve_covariance_weight(
@@ -830,7 +832,7 @@ def _resolve_covariance_weight(
             except StopIteration:
                 cosmic_iter = iter(cosmic_train_loader)
                 cosmic_batch = next(cosmic_iter)
-            observation, covariance, _, _ = _paired_analysis_losses(
+            observation, covariance, _ = _paired_analysis_losses(
                 model, batch_processor, fy_batch, cosmic_batch, device,
                 config, sw_manager, iri_peak_manager, allowed_profile_ids,
                 _source_mode_for_batch(
@@ -887,10 +889,10 @@ def _resolve_direction_weight(
             except StopIteration:
                 cosmic_iter = iter(cosmic_train_loader)
                 cosmic_batch = next(cosmic_iter)
-            observation, _, direction, _ = _paired_analysis_losses(
+            observation, _, direction = _paired_analysis_losses(
                 model, batch_processor, fy_batch, cosmic_batch, device,
                 config, sw_manager, iri_peak_manager, allowed_profile_ids,
-                'exact_M10_M01_M11')
+                'exact_M10_M01_M11', include_gram=True)
             decoder = (model.density_basis_decoder
                        if hasattr(model, 'density_basis_decoder')
                        else model.kalman_layer)
