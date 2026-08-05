@@ -15,6 +15,7 @@ from matplotlib.colors import LogNorm
 from sklearn.metrics import r2_score, mean_squared_error
 from scipy.stats import pearsonr
 from .sliding_dataset import attach_observation_background
+from .sliding_dataset import query_observation_directory, build_shared_anchor_catalog
 
 
 # ======================== 内部辅助 ========================
@@ -37,20 +38,42 @@ def _collect_predictions(model, dataloader, batch_processor,
         for batch_data in dataloader:
             (coords, target_ne, sw_seq,
              observations_fy, observations_cosmic,
-             _) = batch_processor.process_batch(batch_data)
+             profile_ids) = batch_processor.process_batch(batch_data)
             iri_peak = (iri_peak_manager.get_iri_peak(coords)
                         if iri_peak_manager is not None else None)
-            observations_fy = attach_observation_background(
-                observations_fy, model, batch_processor.sw_manager,
-                iri_peak_manager)
-            observations_cosmic = attach_observation_background(
-                observations_cosmic, model, batch_processor.sw_manager,
-                iri_peak_manager)
-            Ne_fused, _, _, _, extras = model(
-                coords, sw_seq,
-                iri_peak=iri_peak,
-                observations_fy=observations_fy,
-                observations_cosmic=observations_cosmic)
+            if getattr(model, 'uses_shared_anchor_response', False):
+                # Keep the validation target profile out of the corresponding
+                # anchor catalog; the M2-U model then solves shared anchors once.
+                exclude = profile_ids.detach().cpu().numpy()
+                def catalog(index, excluded):
+                    if index is None:
+                        return None
+                    raw = query_observation_directory(
+                        index, coords, coords.device,
+                        exclude_profile_ids=excluded,
+                        space_km=model.m2u_space_support_km,
+                        time_h=model.m2u_time_support_h)
+                    return attach_observation_background(
+                        build_shared_anchor_catalog(raw), model,
+                        batch_processor.sw_manager, iri_peak_manager)
+                fy_anchor = catalog(batch_processor.fy_nb_index, exclude)
+                cosmic_anchor = catalog(batch_processor.cosmic_nb_index, None)
+                Ne_fused, _, _, _, extras = model(
+                    coords, sw_seq, iri_peak=iri_peak,
+                    anchor_observations_fy=fy_anchor,
+                    anchor_observations_cosmic=cosmic_anchor)
+            else:
+                observations_fy = attach_observation_background(
+                    observations_fy, model, batch_processor.sw_manager,
+                    iri_peak_manager)
+                observations_cosmic = attach_observation_background(
+                    observations_cosmic, model, batch_processor.sw_manager,
+                    iri_peak_manager)
+                Ne_fused, _, _, _, extras = model(
+                    coords, sw_seq,
+                    iri_peak=iri_peak,
+                    observations_fy=observations_fy,
+                    observations_cosmic=observations_cosmic)
 
             preds.append(Ne_fused.reshape(-1).cpu().numpy())
             bkgs.append(extras['ne_bkg'].reshape(-1).cpu().numpy())

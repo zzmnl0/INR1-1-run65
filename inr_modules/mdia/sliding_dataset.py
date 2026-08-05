@@ -183,6 +183,56 @@ def query_observation_payload(index, coords, device, exclude_profile_ids=None,
     }
 
 
+def query_observation_directory(index, coords, device,
+                                exclude_profile_ids=None,
+                                allowed_profile_ids=None,
+                                space_km=1800.0, time_h=1.5):
+    """Query the M2-U positive-support token directory."""
+    if index is None:
+        return None
+    payload = index.query_observation_directory(
+        coords.detach().cpu().numpy(),
+        exclude_profile_ids=exclude_profile_ids,
+        allowed_profile_ids=allowed_profile_ids,
+        space_km=space_km,
+        time_h=time_h,
+    )
+    return {
+        key: torch.from_numpy(value).to(device, non_blocking=True)
+        for key, value in payload.items()
+    }
+
+
+def build_shared_anchor_catalog(payload):
+    """Collapse a batch directory into one deterministic anchor catalog.
+
+    Target profiles are removed before this function is called.  Keeping one
+    catalog per source makes anchor ETKF systems independent of the query row;
+    the model can therefore share the solved response over its flat-top core.
+    """
+    if payload is None:
+        return None
+    valid = payload['valid_mask'].bool()
+    indices = valid.flatten().nonzero(as_tuple=True)[0]
+    if len(indices) == 0:
+        reference = payload['value']
+        return {
+            key: reference.new_zeros((1, 0) + value.shape[2:])
+            if key not in ('valid_mask', 'profile_id', 'source')
+            else (torch.zeros((1, 0), device=reference.device,
+                              dtype=value.dtype if key == 'valid_mask'
+                              else value.dtype))
+            for key, value in payload.items()
+        }
+    flat = {key: value.reshape(-1, *value.shape[2:])[indices]
+            for key, value in payload.items()}
+    key = torch.cat([
+        flat['coords'].float(), flat['profile_id'].float().unsqueeze(-1)], dim=-1)
+    _, first = np.unique(key.detach().cpu().numpy(), axis=0, return_index=True)
+    first = torch.as_tensor(np.sort(first), device=key.device, dtype=torch.long)
+    return {name: value[first].unsqueeze(0) for name, value in flat.items()}
+
+
 def attach_observation_background(
         payload, model, sw_manager, iri_peak_manager=None, chunk_size=4096):
     """Evaluate shared Background and optional endpoint context at valid tokens."""

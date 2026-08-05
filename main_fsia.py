@@ -21,7 +21,7 @@ from inr_modules.mdia.evaluation_mdia import evaluate_and_save_report, evaluate_
 from inr_modules.mdia.visualization_mdia import (plot_global_slice, plot_altitude_profile,
                                                   plot_hmf2_nmf2_map)
 
-_DEFAULT_RUN_NAME = 'run66-m2o-full-15epoch'
+_DEFAULT_RUN_NAME = 'run66-m2u-shared-anchor-etkf'
 _DEFAULT_BACKGROUND_SEED = (
     Path(current_dir) / 'checkpoints_fsia' / 'run66-etkf-loss'
     / 'best_background_model.pth')

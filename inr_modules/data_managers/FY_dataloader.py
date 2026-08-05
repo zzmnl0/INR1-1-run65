@@ -77,6 +77,95 @@ def _observation_payload_from_cached(cached, dlat, dlon, dt, source_code):
     return payload
 
 
+def _great_circle_km_np(lat_a, lon_a, lat_b, lon_b):
+    """Vectorized great-circle distance used only by the M2-U directory."""
+    lat_a, lon_a, lat_b, lon_b = map(np.deg2rad, (lat_a, lon_a, lat_b, lon_b))
+    dlat = lat_b - lat_a
+    dlon = (lon_b - lon_a + np.pi) % (2.0 * np.pi) - np.pi
+    hav = (np.sin(dlat * 0.5) ** 2
+           + np.cos(lat_a) * np.cos(lat_b) * np.sin(dlon * 0.5) ** 2)
+    return 2.0 * 6371.0 * np.arcsin(np.sqrt(np.clip(hav, 0.0, 1.0)))
+
+
+def _directory_payload(index, coords_np, exclude_profile_ids=None,
+                       allowed_profile_ids=None, space_km=1800.0,
+                       time_h=1.5):
+    """Return every positive-support sampled token, without profile top-k.
+
+    The profile sampler remains capped at ``n_alt`` height tokens, as required
+    by the data contract.  The profile count itself is intentionally unbounded;
+    the result is padded only at the batch boundary.
+    """
+    coords_np = np.asarray(coords_np, dtype=np.float32)
+    if coords_np.ndim != 2 or coords_np.shape[1] < 4:
+        raise ValueError('coords_np must have shape [B,4+]')
+    B = len(coords_np)
+    records = []
+    excluded = None if exclude_profile_ids is None else np.asarray(
+        exclude_profile_ids, dtype=np.int64).reshape(-1)
+    global_excluded = (set(excluded.tolist())
+                       if excluded is not None and len(excluded) != B else None)
+    for row in range(B):
+        if isinstance(index, FYNeighborhoodIndex):
+            lo, hi = index._cand_slice(
+                int(np.floor((coords_np[row, 3] - time_h - index.t_min)
+                             / index.bin_size)),
+                int(np.floor((coords_np[row, 3] + time_h - index.t_min)
+                             / index.bin_size)))
+        else:
+            lo, hi = index._cand_slice(float(coords_np[row, 3]))
+        if lo >= hi:
+            records.append([])
+            continue
+        meta = index.prof_sorted_meta[lo:hi]
+        ids = index.prof_sorted_ids[lo:hi]
+        dt = np.abs(meta[:, 2] - coords_np[row, 3])
+        distance = _great_circle_km_np(
+            coords_np[row, 0], coords_np[row, 1], meta[:, 0], meta[:, 1])
+        keep = (distance <= float(space_km)) & (dt <= float(time_h))
+        keep &= _allowed_profile_mask(ids, allowed_profile_ids)
+        if global_excluded is not None:
+            keep &= ~np.isin(ids, list(global_excluded))
+        elif excluded is not None and len(excluded) == B:
+            keep &= ids != excluded[row]
+        rows = []
+        for local in np.flatnonzero(keep):
+            values = index.prof_sorted_abs[lo + local]
+            valid = index.prof_sorted_vmask[lo + local]
+            values = values[valid]
+            if len(values):
+                rows.append((values, int(ids[local])))
+        records.append(rows)
+
+    width = max((sum(len(values) for values, _ in rows) for rows in records),
+                default=0)
+    payload = {
+        'coords': np.zeros((B, width, 4), dtype=np.float32),
+        'value': np.zeros((B, width), dtype=np.float32),
+        'valid_mask': np.zeros((B, width), dtype=bool),
+        'profile_id': np.full((B, width), -1, dtype=np.int64),
+        'source': np.zeros((B, width), dtype=np.int8),
+        'rho_squared': np.ones((B, width), dtype=np.float32),
+    }
+    source_code = 0 if isinstance(index, FYNeighborhoodIndex) else 1
+    payload['source'].fill(source_code)
+    for row, rows in enumerate(records):
+        offset = 0
+        for values, profile_id in rows:
+            count = len(values)
+            payload['coords'][row, offset:offset + count] = values[:, :4]
+            payload['value'][row, offset:offset + count] = values[:, 4]
+            payload['valid_mask'][row, offset:offset + count] = True
+            payload['profile_id'][row, offset:offset + count] = profile_id
+            dlat = np.abs(values[:, 0] - coords_np[row, 0]) / 5.0
+            dlon = np.abs((values[:, 1] - coords_np[row, 1] + 180.0) % 360.0 - 180.0) / 15.0
+            dt = np.abs(values[:, 3] - coords_np[row, 3]) / float(time_h)
+            payload['rho_squared'][row, offset:offset + count] = np.maximum.reduce(
+                [dlat, dlon, dt]).astype(np.float32) ** 2
+            offset += count
+    return payload
+
+
 def _load_profile_index(index_path, row_count):
     """Expand profile-level QC boundaries to one profile ID per NPY row."""
     with np.load(index_path, allow_pickle=False) as index:
@@ -743,6 +832,14 @@ class FYNeighborhoodIndex:
         return _observation_payload_from_cached(
             cached, self.dlat, self.dlon, self.dt, source_code=0)
 
+    def query_observation_directory(self, coords_np, exclude_profile_ids=None,
+                                    allowed_profile_ids=None,
+                                    space_km=1800.0, time_h=1.5):
+        """M2-U fixed positive-support token directory (no profile top-k)."""
+        return _directory_payload(
+            self, coords_np, exclude_profile_ids, allowed_profile_ids,
+            space_km=space_km, time_h=time_h)
+
 # ===========================================================================
 # run64: COSMIC-2 数据集与邻域索引
 # ===========================================================================
@@ -925,6 +1022,14 @@ class COSMICNeighborhoodIndex:
     def observation_payload_from_cached(self, cached):
         return _observation_payload_from_cached(
             cached, self.dlat, self.dlon, self.dt, source_code=1)
+
+    def query_observation_directory(self, coords_np, exclude_profile_ids=None,
+                                    allowed_profile_ids=None,
+                                    space_km=1800.0, time_h=1.5):
+        """M2-U fixed positive-support token directory (no profile top-k)."""
+        return _directory_payload(
+            self, coords_np, exclude_profile_ids, allowed_profile_ids,
+            space_km=space_km, time_h=time_h)
 
 def get_cosmic_dataloader(cosmic_path, batch_size, bin_size_hours=0.5,
                            num_workers=0, use_memmap=True, val_ratio=0.1,

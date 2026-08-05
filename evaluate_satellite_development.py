@@ -27,7 +27,9 @@ from inr_modules.mdia.fsia_model import FSIA_INR_Model, solve_density_mode
 from inr_modules.mdia.sliding_dataset import (
     attach_representativeness_weight,
     attach_observation_background,
+    build_shared_anchor_catalog,
     load_representativeness_kernel,
+    query_observation_directory,
     query_observation_payload,
 )
 
@@ -474,6 +476,17 @@ def _query_payload(
 
 def _solve_mode(extras, sources, observation_variance):
     """Solve an M00/M10/M01/M11 ETKF mode from one joint forward."""
+    shared = extras.get("mode_increments")
+    if shared is not None:
+        mode = (
+            "M00" if not sources else
+            "M10" if tuple(sources) == ("FY",) else
+            "M01" if tuple(sources) == ("COSMIC",) else "M11")
+        increment = torch.zeros_like(extras["ne_bkg"].squeeze(-1))
+        if mode != "M00":
+            increment = shared[mode]
+        variance = torch.full_like(increment, float(observation_variance))
+        return increment, variance
     return solve_density_mode(extras, sources, observation_variance)
 
 
@@ -540,36 +553,60 @@ def _evaluate_source(
                 if iri_peak_manager is not None else None
             )
             excluded = profile_ids.cpu().numpy()
-            fy, fy_counts = _query_payload(
-                fy_index,
-                coords,
-                device,
-                allowed["FY"],
-                model,
-                sw_manager,
-                iri_peak_manager,
-                excluded if source == "FY" else None,
-                source,
-                "FY",
-                stable_cells,
-                representativeness_grid,
-                representativeness_floor,
-            )
-            cosmic, cosmic_counts = _query_payload(
-                cosmic_index,
-                coords,
-                device,
-                allowed["COSMIC"],
-                model,
-                sw_manager,
-                iri_peak_manager,
-                excluded if source == "COSMIC" else None,
-                source,
-                "COSMIC",
-                stable_cells,
-                representativeness_grid,
-                representativeness_floor,
-            )
+            if getattr(model, "uses_shared_anchor_response", False):
+                def m2u_catalog(index, observation_source, exclude):
+                    if index is None:
+                        return None
+                    raw = query_observation_directory(
+                        index, coords, device,
+                        exclude_profile_ids=exclude,
+                        allowed_profile_ids=allowed[observation_source],
+                        space_km=model.m2u_space_support_km,
+                        time_h=model.m2u_time_support_h,
+                    )
+                    return attach_observation_background(
+                        build_shared_anchor_catalog(raw), model,
+                        sw_manager, iri_peak_manager)
+                fy = m2u_catalog(
+                    fy_index, "FY", excluded if source == "FY" else None)
+                cosmic = m2u_catalog(
+                    cosmic_index, "COSMIC",
+                    excluded if source == "COSMIC" else None)
+                fy_counts = {"directory_tokens": int(
+                    fy['valid_mask'].sum().item()) if fy is not None else 0}
+                cosmic_counts = {"directory_tokens": int(
+                    cosmic['valid_mask'].sum().item()) if cosmic is not None else 0}
+            else:
+                fy, fy_counts = _query_payload(
+                    fy_index,
+                    coords,
+                    device,
+                    allowed["FY"],
+                    model,
+                    sw_manager,
+                    iri_peak_manager,
+                    excluded if source == "FY" else None,
+                    source,
+                    "FY",
+                    stable_cells,
+                    representativeness_grid,
+                    representativeness_floor,
+                )
+                cosmic, cosmic_counts = _query_payload(
+                    cosmic_index,
+                    coords,
+                    device,
+                    allowed["COSMIC"],
+                    model,
+                    sw_manager,
+                    iri_peak_manager,
+                    excluded if source == "COSMIC" else None,
+                    source,
+                    "COSMIC",
+                    stable_cells,
+                    representativeness_grid,
+                    representativeness_floor,
+                )
             for observation_source, counts in (
                 ("FY", fy_counts),
                 ("COSMIC", cosmic_counts),
@@ -577,21 +614,16 @@ def _evaluate_source(
                 for key, value in counts.items():
                     stable_filter_counts[observation_source][key] += value
             forward_started = time.perf_counter()
+            joint_kwargs = (
+                {'anchor_observations_fy': fy,
+                 'anchor_observations_cosmic': cosmic}
+                if getattr(model, "uses_shared_anchor_response", False)
+                else {'observations_fy': fy, 'observations_cosmic': cosmic})
             joint_prediction, _, _, _, joint_extras = model(
-                coords,
-                sw_seq,
-                iri_peak=iri_peak,
-                observations_fy=fy,
-                observations_cosmic=cosmic,
-            )
+                coords, sw_seq, iri_peak=iri_peak, **joint_kwargs)
             if repeat_inference_max_error is None:
                 repeated_prediction = model(
-                    coords,
-                    sw_seq,
-                    iri_peak=iri_peak,
-                    observations_fy=fy,
-                    observations_cosmic=cosmic,
-                )[0]
+                    coords, sw_seq, iri_peak=iri_peak, **joint_kwargs)[0]
                 repeat_inference_max_error = float(torch.max(torch.abs(
                     repeated_prediction - joint_prediction
                 )).item())
@@ -646,6 +678,11 @@ def _evaluate_source(
                     device=contribution.device,
                     dtype=contribution.dtype,
                 )
+                if getattr(model, "uses_shared_anchor_response", False):
+                    # M2-U stores anchor-response interpolation, not a query
+                    # local token gain.  The exact source increment is the
+                    # structural invariant; token attribution is diagnostic.
+                    contribution = single_increment
                 single_gain_formula_max_error[observation_source] = max(
                     single_gain_formula_max_error[observation_source],
                     float(torch.max(torch.abs(

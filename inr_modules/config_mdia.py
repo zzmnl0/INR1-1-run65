@@ -39,7 +39,7 @@ CONFIG_MDIA = {
     'fy_qc_report_path': r'D:\FYsatellite\EDP_data\fy_202409_qc_v2_report.json',
     'iri_proxy_path': r'D:\code11\IRI01\output_results\iri_september_full_proxy.pth',
     'sw_path': r'D:\FYsatellite\EDP_data\kp\OMNI_Kp_F107_20240901_20241001.txt',
-    'save_dir': './checkpoints_fsia/run66-m2o-full-15epoch',
+    'save_dir': './checkpoints_fsia/run66-m2u-shared-anchor-etkf',
 
     # ==================== GIRO 独立评估数据（训练不读取）====================
     # 由 preprocess_giro.py 生成，供 evaluate_giro_peak.py 使用
@@ -74,8 +74,8 @@ CONFIG_MDIA = {
     'enkf_scale_init': 1.1,
     'enkf_scale_condition_max': 3.0,
     'density_basis_semantics': 'endpoint_context_symmetric',
-    'analysis_state_semantics': 'legacy_feature_increment',
-    'context_semantics': 'query_conditioning',
+    'analysis_state_semantics': 'shared_anchor_response',
+    'context_semantics': 'shared_error_state',
     'mode_basis_semantics': 'learned_density_basis',
     'siren_hidden': 128,  # SIREN 隐层维度
     'siren_layers': 3,    # SIREN 隐层数量
@@ -209,6 +209,19 @@ CONFIG_MDIA = {
     'cosmic_nb_n_alt':    8,     # 每剖面高度采样数
     'use_cosmic':         True,
 
+    # ==================== M2-U shared-anchor response ETKF ====================
+    # Anchor catalogs use all positive-support profiles (eight sampled heights
+    # per profile); no query-time profile top-k truncation is used.
+    'm2u_space_support_km': 1800.0,
+    'm2u_time_support_h': 1.5,
+    'm2u_state_floor': 0.05,
+    'm2u_state_direction_scale': 1.0,
+    'm2u_state_amplitude_scale': 1.0,
+    'm2u_anchor_chunk_size': 256,
+    'm2u_tau_M10': 1.0,
+    'm2u_tau_M01': 1.0,
+    'm2u_tau_M11': 1.0,
+
     # ==================== 断点续训 ====================
     'resume_ckpt': None,
 
@@ -272,7 +285,10 @@ def print_config_mdia():
                     'r_calibration_batches', 'r_sigma_min', 'r_sigma_max',
                     'r_min_profiles', 'r_shrinkage_profiles',
                     'background_seed_ckpt', 'source_dropout',
-                    'source_mode_schedule'],
+                    'source_mode_schedule', 'm2u_space_support_km',
+                    'm2u_time_support_h', 'm2u_state_floor',
+                    'm2u_anchor_chunk_size',
+                    'm2u_tau_M10', 'm2u_tau_M01', 'm2u_tau_M11'],
         '其他': ['grad_clip', 'use_amp'],
     }
 

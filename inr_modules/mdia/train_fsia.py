@@ -32,6 +32,8 @@ try:
         load_empirical_covariance_targets,
         load_representativeness_kernel,
         query_observation_payload,
+        query_observation_directory,
+        build_shared_anchor_catalog,
     )
     from .plotting import plot_training_curves
 except ImportError:
@@ -46,6 +48,8 @@ except ImportError:
         load_empirical_covariance_targets,
         load_representativeness_kernel,
         query_observation_payload,
+        query_observation_directory,
+        build_shared_anchor_catalog,
     )
     from plotting import plot_training_curves
 
@@ -199,6 +203,8 @@ def _record_resolved_training_config(config, covariance_strata):
     with open(path, encoding='utf-8') as stream:
         manifest = json.load(stream)
     manifest['resolved_training'] = {
+        'analysis_state_semantics': config.get(
+            'analysis_state_semantics', 'legacy_feature_increment'),
         'analysis_exact_mode_loss': bool(
             config.get('analysis_exact_mode_loss', False)),
         'use_covariance_moment_loss': bool(
@@ -228,6 +234,12 @@ def _record_resolved_training_config(config, covariance_strata):
         'covariance_strata': covariance_strata,
         'date_split': config.get('resolved_date_split'),
     }
+    if config.get('analysis_state_semantics') == 'shared_anchor_response':
+        manifest['resolved_training']['m2u'] = {
+            key: config.get(key) for key in (
+                'm2u_space_support_km', 'm2u_time_support_h',
+                'm2u_state_floor', 'm2u_tau_M10', 'm2u_tau_M01',
+                'm2u_tau_M11')}
     temp_path = f'{path}.tmp'
     with open(temp_path, 'w', encoding='utf-8') as stream:
         json.dump(manifest, stream, ensure_ascii=False, indent=2)
@@ -242,6 +254,30 @@ def _query_observations(index, coords, profile_ids=None,
     return query_observation_payload(
         index, coords, coords.device, exclude_profile_ids=exclude,
         allowed_profile_ids=allowed_profile_ids)
+
+
+def _m2u_anchor_catalog(index, model, sw_manager, iri_peak_manager, coords,
+                        profile_ids, allowed_profile_ids, config):
+    """Build one source-specific anchor catalog for the whole query batch."""
+    if index is None:
+        return None
+    excluded = None
+    if profile_ids is not None:
+        excluded = np.unique(profile_ids.detach().cpu().numpy().astype(np.int64))
+    payload = query_observation_directory(
+        index, coords, coords.device, exclude_profile_ids=excluded,
+        allowed_profile_ids=allowed_profile_ids,
+        space_km=float(config.get('m2u_space_support_km', 1800.0)),
+        time_h=float(config.get('m2u_time_support_h', 1.5)),
+    )
+    catalog = build_shared_anchor_catalog(payload)
+    if catalog is None or catalog['coords'].shape[1] == 0:
+        return catalog
+    # Anchor payloads are already source-separated and target profiles were
+    # removed before catalog construction.  Background/context is evaluated
+    # once per unique token, not once per query.
+    return attach_observation_background(
+        catalog, model, sw_manager, iri_peak_manager)
 
 
 def _unpack_source_batch(batch, device):
@@ -385,6 +421,25 @@ def _source_forward(model, batch_processor, coords, sw_seq, iri_peak,
                     iri_peak_manager=None, allowed_profile_ids=None,
                     source_mode=None, analysis_epoch=0):
     allowed_profile_ids = allowed_profile_ids or {}
+    if (config.get('analysis_state_semantics', 'legacy_feature_increment')
+            == 'shared_anchor_response'):
+        if stage == 'background':
+            return model(coords, sw_seq, iri_peak=iri_peak)
+        fy_anchor = _m2u_anchor_catalog(
+            batch_processor.fy_nb_index, model, batch_processor.sw_manager,
+            iri_peak_manager, coords,
+            profile_ids if target_source == 'FY' else None,
+            allowed_profile_ids.get('FY'), config)
+        cosmic_anchor = _m2u_anchor_catalog(
+            batch_processor.cosmic_nb_index, model,
+            batch_processor.sw_manager, iri_peak_manager, coords,
+            profile_ids if target_source == 'COSMIC' else None,
+            allowed_profile_ids.get('COSMIC'), config)
+        return model(
+            coords, sw_seq, iri_peak=iri_peak,
+            anchor_observations_fy=fy_anchor,
+            anchor_observations_cosmic=cosmic_anchor,
+        )
     if stage == 'background':
         fy_obs = cosmic_obs = None
     elif target_source == 'FY':
@@ -1741,7 +1796,7 @@ def _reset_random_seeds(seed, device):
 
 
 def _architecture_signature(config):
-    return {
+    signature = {
         'basis_dim': int(config.get('basis_dim', 64)),
         'enkf_n_members': int(config.get('enkf_n_members', 8)),
         'enkf_pert_hidden': int(config.get('enkf_pert_hidden', 64)),
@@ -1759,6 +1814,20 @@ def _architecture_signature(config):
         'mode_basis_semantics': config.get(
             'mode_basis_semantics', 'learned_density_basis'),
     }
+    if signature['analysis_state_semantics'] == 'shared_anchor_response':
+        signature.update({
+            'm2u_space_support_km': float(
+                config.get('m2u_space_support_km', 1800.0)),
+            'm2u_time_support_h': float(
+                config.get('m2u_time_support_h', 1.5)),
+            'm2u_state_floor': float(config.get('m2u_state_floor', 0.05)),
+            'm2u_anchor_chunk_size': int(
+                config.get('m2u_anchor_chunk_size', 256)),
+            'm2u_tau_M10': float(config.get('m2u_tau_M10', 1.0)),
+            'm2u_tau_M01': float(config.get('m2u_tau_M01', 1.0)),
+            'm2u_tau_M11': float(config.get('m2u_tau_M11', 1.0)),
+        })
+    return signature
 
 
 def _restrict_training_profiles(loader, fraction, seed, source, manifest_path):
@@ -1882,11 +1951,19 @@ def _load_background_seed(model, checkpoint, device):
 def train_fsia(config=None):
     """Train Background first, freeze it, then train ETKF Analysis."""
     config = get_config_mdia() if config is None else config
-    if config.get('analysis_state_semantics', 'legacy_feature_increment') != (
-            'legacy_feature_increment'):
+    analysis_semantics = config.get(
+        'analysis_state_semantics', 'legacy_feature_increment')
+    if analysis_semantics not in (
+            'legacy_feature_increment', 'shared_anchor_response'):
         raise ValueError(
             'query-local physical states are failed audit shadows; '
-            'M2-O legacy_feature_increment is the only trainable model')
+            'trainable semantics are M2-O legacy_feature_increment or '
+            'M2-U shared_anchor_response')
+    if analysis_semantics == 'shared_anchor_response':
+        if config.get('density_basis_semantics') != 'endpoint_context_symmetric':
+            raise ValueError('M2-U requires endpoint_context_symmetric basis')
+        if config.get('enkf_n_members', 8) != 8:
+            raise ValueError('M2-U currently requires N8')
     if config.get('r_mode') != 'global':
         raise ValueError('density-observation ETKF requires r_mode=global')
     if not config.get('use_distance_localization', False):
@@ -1935,9 +2012,12 @@ def train_fsia(config=None):
     if background_epochs <= 0 or analysis_epochs <= 0:
         raise ValueError('background_epochs and analysis_epochs must both be positive')
     architecture = _architecture_signature(config)
-    format_version = (
-        8 if architecture['enkf_anomaly_parameterization']
-        == 'orthogonal_factor' else 7)
+    if architecture['analysis_state_semantics'] == 'shared_anchor_response':
+        format_version = 9
+    else:
+        format_version = (
+            8 if architecture['enkf_anomaly_parameterization']
+            == 'orthogonal_factor' else 7)
 
     sw_manager = SpaceWeatherManager(
         txt_path=config['sw_path'],
@@ -2366,6 +2446,8 @@ def train_fsia(config=None):
                 'source_mode_schedule', 'random_profile'),
             'analysis_exact_mode_loss': bool(
                 config.get('analysis_exact_mode_loss', False)),
+            'analysis_state_semantics': architecture[
+                'analysis_state_semantics'],
             'use_empirical_covariance_loss': bool(
                 config.get('use_empirical_covariance_loss', False)),
             'use_direction_loss': bool(
@@ -2419,6 +2501,7 @@ def train_fsia(config=None):
             'source_mode_schedule', 'random_profile'),
         'analysis_exact_mode_loss': bool(
             config.get('analysis_exact_mode_loss', False)),
+        'analysis_state_semantics': architecture['analysis_state_semantics'],
         'use_empirical_covariance_loss': bool(
             config.get('use_empirical_covariance_loss', False)),
         'use_direction_loss': bool(
