@@ -4,8 +4,8 @@ FSIA-INR 模型配置文件
 FSIA-INR: Feature-Space Informed Assimilation INR
 核心架构：
     1. IRI proxy 完全冻结，提供背景密度与隐状态
-    2. FY/COSMIC 局部 profile 分别编码后进入 NeuralETKFLayer
-    3. FusionDecoder 输出对 IRI 背景的有界增量
+    2. FY/COSMIC 原始 log10Ne 通过共享密度观测算子进入低维联合 ETKF
+    3. 共享仿射基函数解码器将低维分析状态映射为连续密度增量
     4. 可学习 EWMA 时间常数编码空间天气历史
 """
 
@@ -33,12 +33,13 @@ else:
 
 CONFIG_MDIA = {
     # ==================== 数据路径 ====================
-    'fy_path': r'D:\FYsatellite\EDP_data\fy_202409_clean1.npy',
-    # clean1 supplies physical columns; clean3's seventh column supplies profile_id only.
-    'fy_profile_path': r'D:\FYsatellite\EDP_data\fy_202409_clean3.npy',
+    'fy_path': r'D:\FYsatellite\EDP_data\fy_202409_qc_v2.npy',
+    'fy_profile_path': None,
+    'fy_profile_index_path': r'D:\FYsatellite\EDP_data\fy_202409_qc_v2_index.npz',
+    'fy_qc_report_path': r'D:\FYsatellite\EDP_data\fy_202409_qc_v2_report.json',
     'iri_proxy_path': r'D:\code11\IRI01\output_results\iri_september_full_proxy.pth',
     'sw_path': r'D:\FYsatellite\EDP_data\kp\OMNI_Kp_F107_20240901_20241001.txt',
-    'save_dir': './checkpoints_fsia/run6',
+    'save_dir': './checkpoints_fsia/run66-m2o-full-15epoch',
 
     # ==================== GIRO 独立评估数据（训练不读取）====================
     # 由 preprocess_giro.py 生成，供 evaluate_giro_peak.py 使用
@@ -67,6 +68,15 @@ CONFIG_MDIA = {
 
     # ==================== SIREN 架构参数 ====================
     'basis_dim': 64,      # 空间基函数 / 残差网络输出维度
+    'enkf_n_members': 8,  # ETKF集合成员数；分析异常秩至多为N-1
+    'enkf_pert_hidden': 64,
+    'enkf_anomaly_parameterization': 'orthogonal_factor',
+    'enkf_scale_init': 1.1,
+    'enkf_scale_condition_max': 3.0,
+    'density_basis_semantics': 'endpoint_context_symmetric',
+    'analysis_state_semantics': 'legacy_feature_increment',
+    'context_semantics': 'query_conditioning',
+    'mode_basis_semantics': 'learned_density_basis',
     'siren_hidden': 128,  # SIREN 隐层维度
     'siren_layers': 3,    # SIREN 隐层数量
     'omega_0': 30.0,      # SIREN 频率因子
@@ -80,8 +90,8 @@ CONFIG_MDIA = {
     'batch_size': _BATCH_SIZE,
     'lr': 3e-4,
     'weight_decay': 1e-4,
-    'epochs': 10,
     'seed': 42,
+    'analysis_seed': 42,
     'device': _DEVICE,
     'num_workers': _NUM_WORKERS,
     'pin_memory': _PIN_MEMORY,
@@ -95,24 +105,62 @@ CONFIG_MDIA = {
 
     # ==================== 数据划分 ====================
     'val_ratio': 0.1,
+    'use_date_blocked_split': True,
+    'date_split_manifest': (
+        r'isr_validation_outputs\run66-modelonly-m0\date_split_manifest.json'),
+    'development_days': 5,
+    'locked_test_days': 5,
 
-    # ==================== 损失函数权重 ====================
-    'w_obs': 1.0,           # 观测损失（NLL 或 MSE）权重
-    # 物理损失计算频率（每 N 个 batch 计算一次，加速训练）
-    'physics_loss_freq': 10,
-
-    # ==================== 不确定性学习 ====================
-    'use_uncertainty': True,
-    'uncertainty_warmup_epochs': 5,
-    'log_var_min': -6.0,        # 最大精度 exp(6)≈403，恢复表达能力（原-10风险高；-4过保守）
-    'log_var_min_init': -2.0,   # NLL 冷启动时收紧下限，随 ramp 线性放开到 log_var_min
-    'log_var_max': 6.0,         # 对称设置
-    'log_var_regularization': 0.01,
-    'nll_ramp_epochs': 1,       # NLL ramp 周期：1 epoch 内完成 Huber→NLL 过渡（FY NaN已修复，冷启动风险低）
-
-    # ==================== 模型保存 ====================
-    'save_interval': 5,
-    'early_stopping': True,
+    # ==================== run66 两阶段损失 ====================
+    'background_epochs': 5,
+    # 15个编号epoch = 5个冻结Background编号 + 10个正式Analysis epoch。
+    'analysis_epochs': 10,
+    'profile_points_per_epoch': 8,
+    'train_profile_fraction': 1.0,
+    'profile_subset_manifest': None,
+    'huber_delta': 0.2,
+    'w_iri': 0.02,
+    'w_increment': 0.01,
+    'w_vertical_background': 0.02,
+    'w_time_background': 0.01,
+    'w_vertical_analysis': 0.05,
+    'w_time_analysis': 0.0033,
+    'analysis_loss_active_only': False,
+    'analysis_exact_mode_loss': True,
+    'use_covariance_moment_loss': False,
+    'use_empirical_covariance_loss': True,
+    'covariance_gradient_target': 0.008139966,
+    'covariance_calibration_batches': 20,
+    # M2-T: optional precision-weighted HX Gram whitening; off keeps M2-O exact.
+    'use_observation_gram_loss': False,
+    'gram_gradient_target': 0.02,
+    'gram_calibration_batches': 20,
+    'use_direction_loss': False,
+    'direction_gradient_target': 0.04,
+    'direction_calibration_batches': 20,
+    'structure_batch_size': 32,
+    'structure_alt_step_km': 20.0,
+    'structure_time_step_hours': 1.0,
+    'structure_huber_beta': 0.05,
+    'background_residual_cap': 0.5,
+    # 固定有效观测方差的初值；Background 阶段结束后由训练集残差稳健校准。
+    'r_fy_init': 0.04,
+    'r_cosmic_init': 0.04,
+    'r_mode': 'global',
+    'use_distance_localization': True,
+    'representativeness_kernel_path': (
+        r'isr_validation_outputs\run66-empirical-covariance-date-blocked-train-only'
+        r'\empirical_covariance_cells.npz'),
+    'representativeness_floor': 0.25,
+    'r_calibration_batches': None,
+    'r_sigma_min': 0.05,
+    'r_sigma_max': 0.40,
+    'r_min_profiles': 200,
+    'r_shrinkage_profiles': 200,
+    'background_seed_ckpt': (
+        './checkpoints_fsia/run66-etkf-loss/best_background_model.pth'),
+    'source_dropout': (0.25, 0.25, 0.50),  # M10, M01, M11
+    'source_mode_schedule': 'random_profile',
 
     # ==================== 梯度裁剪 ====================
     'grad_clip': 1.0,
@@ -128,15 +176,6 @@ CONFIG_MDIA = {
     'use_sw_freq':       True,    # 启用 SpectralSWBranch（False 退化为 run28-B 仅时域）
     'sw_gate_bias_init': -1.0,    # run41: -2.0→-1.0；sigmoid(-1)≈0.27 起步 freq 贡献 27%
 
-    # ==================== 早停 ====================
-    'ne_patience': 4,
-
-    # ==================== 廓线-峰高对齐损失（Profile-Peak Alignment）====================
-    # 在 hmF2_pred 高度构造虚拟坐标，额外前向传播后计算 ∂Ne/∂h=0 约束
-    # 约束 3D 场在 IRI hmF2 参考高度附近保持峰值结构
-    # 每 physics_loss_freq 个 batch 计算一次，复用 h_sw_shared.detach()
-    'w_profile_align':     0.1,   # 一阶导数零点损失（∂Ne/∂h=0 @ hmF2，平滑正则）
-
     # ==================== IRI 预计算峰参数（结构参考）====================
     # 数据格式：shape (241, 181, 181), 3h×1°×2°, NaN=无效
     # 详见 D:\IRI\data01\edp_peak_npy\readme.txt
@@ -146,42 +185,32 @@ CONFIG_MDIA = {
     # ==================== IRI 峰对齐特征（iri_align_net）====================
     # 输入: cat(h_iri[128], delta_alt_iri[1], NmF2_IRI_n[1]) → 130D → 64D
     # NmF2_IRI_n    = (NmF2_IRI - 11.0) / 2.0   (归一化幅度)
-    'w_iri_struct': 0.005,         # L_iri_struct：iri_recon_head(h_iri_aligned) → ne_bkg 重建损失
-
-    # P0-C: 高度自适应 bkg 损失（过渡中心上移至 F1/F2 交界 250km）
-    'w_bkg_low':          0.25,    # 低高度 bkg 权重
-    'w_bkg_high':         0.02,    # 高高度 bkg 权重（弱约束，允许充分修正）
-    'w_bkg_transition':  250.0,    # 过渡中心 km（F1/F2 交界）
-    'w_bkg_sharpness':    25.0,    # 过渡宽度 km
-
-    # P0-D: 训练样本连续软权重降权低高度（E/F1 过渡区 FY GNOS 反演可靠性边界）
-    'alt_weight_center':  190.0,   # sigmoid 中心 (km)
-    'alt_weight_scale':    20.0,   # sigmoid 宽度 (km)
-    'alt_weight_low':       0.3,   # 低高度最低权重（alt→120km 时趋近此值）
-
     # ==================== run61: FY 邻域观测编码 ====================
     # FYNeighborhoodIndex 时空检索参数
     'fy_nb_dt':       1.5,   # 邻域时间半径（小时）
     'fy_nb_dlat':     5.0,   # 邻域纬度半径（度）
     'fy_nb_dlon':    15.0,   # 邻域经度半径（度）
-    'fy_nb_kmax':     64,    # 最大邻居数 K = k_prof × n_alt（接口不变）
     # 剖面级聚合参数（run61 profile-level）
     'fy_nb_k_prof':    8,    # 最近剖面数
     'fy_nb_n_alt':     8,    # 每剖面高度采样数
-    # FYObsEncoder 超参数
-    'fy_enc_heads': 4,       # 注意力头数
     # ==================== run64: COSMIC-2 第三数据源 ====================
-    'cosmic_path':    r'D:\cosmic2\cosmic245-274-September\cosmic_september_2024.npy',
+    'cosmic_path':    (r'D:\cosmic2\cosmic245-274-September'
+                       r'\cosmic_september_2024_qc.npy'),
+    'cosmic_profile_index_path': (
+        r'D:\cosmic2\cosmic245-274-September'
+        r'\cosmic_september_2024_qc_index.npz'),
+    'cosmic_qc_report_path': (
+        r'D:\cosmic2\cosmic245-274-September'
+        r'\cosmic_september_2024_qc_report.json'),
     'cosmic_nb_dt':       1.5,   # 邻域时间半径（小时）
     'cosmic_nb_dlat':     5.0,   # 邻域纬度半径（度）
     'cosmic_nb_dlon':    15.0,   # 邻域经度半径（度）
     'cosmic_nb_k_prof':   8,     # 最近掩星剖面数
     'cosmic_nb_n_alt':    8,     # 每剖面高度采样数
-    'w_cosmic':           1.0,   # COSMIC 损失相对 FY 的权重系数
+    'use_cosmic':         True,
 
     # ==================== 断点续训 ====================
-    'resume_ckpt': None,              # last_training_state.pth；旧 raw state_dict 也可兼容
-    'resume_completed_epochs': None,  # 仅旧 raw state_dict 必填；完整状态自动读取
+    'resume_ckpt': None,
 
 }
 
@@ -201,21 +230,50 @@ def print_config_mdia():
     print('=' * 60)
 
     categories = {
-        '数据路径': ['fy_path', 'fy_profile_path', 'iri_proxy_path', 'sw_path',
+        '数据路径': ['fy_path', 'fy_profile_path', 'fy_profile_index_path',
+                    'cosmic_path', 'cosmic_profile_index_path',
+                    'iri_proxy_path', 'sw_path',
                     'giro_hmf2_path', 'giro_nmf2_path', 'save_dir'],
         '数据规格': ['total_hours', 'start_date_str', 'bin_size_hours'],
         '物理参数': ['alt_range'],
         '时序参数': ['seq_len', 'tau_kp_init', 'tau_solar_init'],
-        'SIREN 架构': ['basis_dim', 'siren_hidden', 'siren_layers', 'omega_0',
+        'SIREN 架构': ['basis_dim', 'enkf_n_members', 'enkf_pert_hidden',
+                       'enkf_anomaly_parameterization', 'enkf_scale_init',
+                       'enkf_scale_condition_max', 'density_basis_semantics',
+                       'analysis_state_semantics', 'context_semantics',
+                       'mode_basis_semantics',
+                       'siren_hidden', 'siren_layers', 'omega_0',
                        'omega_low', 'omega_high'],
         'SW 编码器': ['sw_hidden_dim', 'sw_lstm_layers', 'sw_out_dim'],
-        '训练超参数': ['batch_size', 'lr', 'weight_decay', 'epochs', 'device',
-                       'num_workers', 'use_memmap'],
-        '损失权重': ['w_obs', 'w_bkg_low', 'w_bkg_high',
-                    'w_profile_align', 'physics_loss_freq'],
-        '不确定性': ['use_uncertainty', 'uncertainty_warmup_epochs'],
-        '其他': ['save_interval', 'early_stopping', 'ne_patience',
-                 'grad_clip', 'use_amp'],
+        '训练超参数': ['batch_size', 'lr', 'weight_decay', 'background_epochs',
+                       'analysis_epochs', 'seed', 'analysis_seed', 'device',
+                       'num_workers', 'use_memmap', 'train_profile_fraction',
+                       'profile_subset_manifest'],
+        '损失权重': ['huber_delta', 'w_iri', 'w_increment',
+                    'w_vertical_background', 'w_time_background',
+                    'w_vertical_analysis', 'w_time_analysis',
+                    'analysis_loss_active_only',
+                    'analysis_exact_mode_loss',
+                    'use_covariance_moment_loss',
+                    'use_empirical_covariance_loss',
+                    'covariance_gradient_target',
+                    'covariance_calibration_batches',
+                    'use_observation_gram_loss',
+                    'gram_gradient_target',
+                    'gram_calibration_batches',
+                    'use_direction_loss',
+                    'direction_gradient_target',
+                    'direction_calibration_batches'],
+        '同化控制': ['background_residual_cap',
+                    'r_fy_init', 'r_cosmic_init', 'r_mode',
+                    'use_distance_localization',
+                    'representativeness_kernel_path',
+                    'representativeness_floor',
+                    'r_calibration_batches', 'r_sigma_min', 'r_sigma_max',
+                    'r_min_profiles', 'r_shrinkage_profiles',
+                    'background_seed_ckpt', 'source_dropout',
+                    'source_mode_schedule'],
+        '其他': ['grad_clip', 'use_amp'],
     }
 
     for cat, keys in categories.items():

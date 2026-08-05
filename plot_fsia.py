@@ -13,7 +13,10 @@ FSIA-INR 独立绘图脚本
 
 import os
 import sys
+import matplotlib
 import torch
+
+matplotlib.use('Agg')
 
 # ─────────────────────────────────────────────
 # 路径设置
@@ -28,8 +31,8 @@ for _p in [_SCRIPT_DIR, _INR_MODULES]:
 # ==================== 配置 ====================
 # ─────────────────────────────────────────────
 CONFIG = {
-    # ---- 检查点路径（None = 自动推断 checkpoints_fsia/run6/best_fsia_model.pth）----
-    'checkpoint_path': r"D:\code11\IRI01\IRI03\INR1-1\FSIA_INR18\checkpoints_fsia\run40\best_fsia_model.pth",
+    # ---- 检查点路径（None = 自动推断 run66-etkf-loss）----
+    'checkpoint_path': None,
 
     # ---- 输出目录（None = 检查点所在目录下的 plots/ 子目录）----
     'save_dir': None,
@@ -55,8 +58,8 @@ CONFIG = {
     'vis_batch': 2048,
 
     # ---- 绘图开关 ----
-    'plot_global_slice':   False,   # 全球纬经度切片
-    'plot_hmf2_nmf2_map':  False,   # F2 峰高 + 峰值密度分布图（按日分画布）
+    'plot_global_slice':   True,   # 全球纬经度切片
+    'plot_hmf2_nmf2_map':  True,   # F2 峰高 + 峰值密度分布图（按日分画布）
     'plot_edp_profile':    True,   # 垂直 EDP 廓线
 }
 # ─────────────────────────────────────────────
@@ -66,7 +69,8 @@ def _resolve_paths(config):
     """解析检查点路径和输出目录，填充 None 值。"""
     if config['checkpoint_path'] is None:
         config['checkpoint_path'] = os.path.join(
-            _SCRIPT_DIR, 'checkpoints_fsia', 'run6', 'best_fsia_model.pth'
+            _SCRIPT_DIR, 'checkpoints_fsia', 'run66-etkf-loss',
+            'best_fsia_model.pth'
         )
     if config['save_dir'] is None:
         config['save_dir'] = os.path.join(
@@ -93,7 +97,11 @@ def _load_model(config, mdia_cfg, device):
     iri_proxy = _build_iri_proxy(mdia_cfg, device)
     from inr_modules.mdia.fsia_model import FSIA_INR_Model
     model = FSIA_INR_Model(iri_proxy=iri_proxy, config=mdia_cfg).to(device)
-    model.load_state_dict(torch.load(ckpt, map_location=device))
+    state = torch.load(ckpt, map_location=device, weights_only=True)
+    model.load_state_dict(state, strict=True)
+    if not all(torch.isfinite(value).all() for value in state.values()
+               if torch.is_tensor(value)):
+        raise ValueError('FSIA checkpoint contains non-finite values')
     model.eval()
     print(f'[plot] FSIA-INR 模型已加载: {ckpt}')
     print(f'       τ_kp = {model.sw_encoder.tau_kp.item():.2f} h   '
@@ -122,7 +130,6 @@ def _build_iri_peak_manager(mdia_cfg, device):
             mgr = IRIPeakManager(
                 hmf2_path=hmf2_path,
                 nmf2_path=nmf2_path,
-                total_hours=mdia_cfg.get('total_hours', 720.0),
                 device=device,
             )
             print(f'[plot] IRIPeakManager 加载完成')
@@ -181,6 +188,11 @@ def main():
     model           = _load_model(CONFIG, mdia_cfg, device)
     sw_manager      = _load_sw_manager(mdia_cfg, device)
     iri_peak_manager = _build_iri_peak_manager(mdia_cfg, device)
+    from inr_modules.data_managers.FY_dataloader import (
+        FYNeighborhoodIndex, COSMICNeighborhoodIndex)
+    fy_nb_index = FYNeighborhoodIndex(mdia_cfg['fy_path'], mdia_cfg)
+    cosmic_nb_index = COSMICNeighborhoodIndex(
+        mdia_cfg['cosmic_path'], mdia_cfg)
 
     from inr_modules.mdia.visualization_mdia import (
         plot_global_slice,
@@ -210,6 +222,8 @@ def main():
                     save_dir=save_dir,
                     alt_levels=alt_levels, model_name=model_name,
                     iri_peak_manager=iri_peak_manager,
+                    fy_nb_index=fy_nb_index,
+                    cosmic_nb_index=cosmic_nb_index,
                 )
                 done += 1
 
@@ -221,6 +235,8 @@ def main():
                 save_dir=save_dir,
                 label=f'day{vis_day:02d}', model_name=model_name,
                 iri_peak_manager=iri_peak_manager,
+                fy_nb_index=fy_nb_index,
+                cosmic_nb_index=cosmic_nb_index,
             )
             done += 1
 
@@ -243,6 +259,8 @@ def main():
                 save_dir=save_dir, config=mdia_cfg, model_name=model_name,
                 iri_peak_manager=iri_peak_manager,
                 isr_record=jic_record,
+                fy_nb_index=fy_nb_index,
+                cosmic_nb_index=cosmic_nb_index,
             )
             done += 1
 

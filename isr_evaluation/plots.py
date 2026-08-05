@@ -2,7 +2,7 @@
 ISR 验证可视化模块
 
 生成三类图表：
-  1. plot_time_altitude_comparison — ISR / IRI / MDIA / MDIA-ISR误差 / IRI-ISR误差 五列时间-高度图
+  1. plot_time_altitude_comparison — ISR / Raw IRI / Background / Analysis / 两类误差六列图
   2. plot_nmf2_scatter             — NmF2 散点图（Pearson CC 标注）
   3. save_metrics_report           — 指标汇总文本报告
 """
@@ -11,6 +11,7 @@ import os
 import numpy as np
 import matplotlib
 import matplotlib.font_manager as _fm
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 
@@ -49,20 +50,24 @@ def _safe_log10_range(ne_m3_2d, default_lo=8.0, default_hi=12.5):
 
 # ==================== 时间-高度对比图 ====================
 
-def plot_time_altitude_comparison(day_record, ne_iri_log10, model_log10_2d, save_path):
+def plot_time_altitude_comparison(day_record, ne_iri_log10,
+                                  background_log10_2d, model_log10_2d,
+                                  save_path):
     """
-    绘制五列时间-高度对比图：
+    绘制六列时间-高度对比图：
         Col 1: ISR 观测 (log10 Ne)
-        Col 2: IRI 代理（基线）
-        Col 3: MDIA-INR 预测
-        Col 4: MDIA-INR - ISR 误差 (log10 单位, bwr)
-        Col 5: IRI - ISR 误差 (log10 单位, bwr)  ← 新增，与 Col4 同色标，便于直接对比
+        Col 2: Raw IRI
+        Col 3: FNDA Background (M00)
+        Col 4: FSIA-INR Analysis (M11)
+        Col 5: Analysis - ISR 误差 (log10 单位, bwr)
+        Col 6: Raw IRI - ISR 误差 (log10 单位, bwr)
 
     Args:
         day_record:      DayRecord dict，含 'ne_2d' (m⁻³), 'alt_1d', 'ts_1d',
                          'station', 'date_str', 'plot_segs'
-        ne_iri_log10:    [n_alt, n_time] float32 — IRI 代理 log10(Ne)
-        model_log10_2d:  [n_alt, n_time] float32 — MDIA-INR log10(Ne)
+        ne_iri_log10:    [n_alt, n_time] float32 — Raw IRI log10(Ne)
+        background_log10_2d: [n_alt, n_time] float32 — FNDA Background
+        model_log10_2d:  [n_alt, n_time] float32 — FSIA-INR M11
         save_path:       输出 PNG 完整路径
     """
     import pandas as pd
@@ -83,7 +88,7 @@ def plot_time_altitude_comparison(day_record, ne_iri_log10, model_log10_2d, save
 
     # Ne 色标范围
     lo, hi = _safe_log10_range(ne_2d)
-    for arr in [ne_iri_log10, model_log10_2d]:
+    for arr in [ne_iri_log10, background_log10_2d, model_log10_2d]:
         fin = arr[np.isfinite(arr)]
         if len(fin):
             lo = min(lo, float(np.percentile(fin, 2)))
@@ -92,7 +97,7 @@ def plot_time_altitude_comparison(day_record, ne_iri_log10, model_log10_2d, save
     if hi - lo < 0.3:
         mid = (lo + hi) / 2;  lo, hi = mid - 0.15, mid + 0.15
 
-    # 误差色标范围：取 MDIA-ISR 和 IRI-ISR 两者 95th 分位的较大值，保证两列同轴可比
+    # 误差色标范围：取 Analysis-ISR 和 IRI-ISR 的共同 95th 分位。
     mdia_err_full = model_log10_2d - isr_log10_full
     iri_err_full  = ne_iri_log10   - isr_log10_full
     all_err       = np.concatenate([mdia_err_full[np.isfinite(mdia_err_full)],
@@ -102,13 +107,13 @@ def plot_time_altitude_comparison(day_record, ne_iri_log10, model_log10_2d, save
     # 时间戳 → 列索引映射
     ts_dict = {int(round(float(t))): i for i, t in enumerate(ts_1d)}
 
-    fig, axes = plt.subplots(1, 5, figsize=(28, 6), sharey=True)
+    fig, axes = plt.subplots(1, 6, figsize=(33, 6), sharey=True)
     alt_lo, alt_hi = float(alt_1d.min()), float(alt_1d.max())
 
-    ne_mesh_ref   = None   # Ne 色标参考（Col 0–2 共用）
-    err_mesh_ref  = None   # 误差色标参考（Col 3–4 共用）
+    ne_mesh_ref   = None   # Ne 色标参考（Col 0–3 共用）
+    err_mesh_ref  = None   # 误差色标参考（Col 4–5 共用）
 
-    # ---- 五列按 segment 分段渲染，无拉伸、无填充 ----
+    # ---- 六列按 segment 分段渲染，无拉伸、无填充 ----
     for seg in plot_segs:
         seg_ts  = seg['ts']       # [n_t] Unix s
         seg_alt = seg['alt_km']   # [n_a] km
@@ -130,6 +135,7 @@ def plot_time_altitude_comparison(day_record, ne_iri_log10, model_log10_2d, save
                                ).astype(np.float32)
 
         ne_iri_sub  = ne_iri_log10  [np.ix_(alt_idx, ts_idx_v)]
+        ne_bkg_sub = background_log10_2d[np.ix_(alt_idx, ts_idx_v)]
         ne_pred_sub = model_log10_2d[np.ix_(alt_idx, ts_idx_v)]
         mdia_err    = ne_pred_sub - log_isr   # MDIA - ISR
         iri_err     = ne_iri_sub  - log_isr   # IRI  - ISR
@@ -141,10 +147,11 @@ def plot_time_altitude_comparison(day_record, ne_iri_log10, model_log10_2d, save
         m = _pm(axes[0], log_isr,     'plasma', lo,       hi)
         if ne_mesh_ref is None:  ne_mesh_ref  = m
         _pm(axes[1], ne_iri_sub,  'plasma', lo,       hi)
-        _pm(axes[2], ne_pred_sub, 'plasma', lo,       hi)
-        m = _pm(axes[3], mdia_err, 'bwr', -err_max, err_max)
+        _pm(axes[2], ne_bkg_sub, 'plasma', lo, hi)
+        _pm(axes[3], ne_pred_sub, 'plasma', lo,       hi)
+        m = _pm(axes[4], mdia_err, 'bwr', -err_max, err_max)
         if err_mesh_ref is None: err_mesh_ref = m
-        _pm(axes[4], iri_err,  'bwr', -err_max, err_max)
+        _pm(axes[5], iri_err,  'bwr', -err_max, err_max)
 
     # 回退：无 plot_segs 时用合并网格
     if ne_mesh_ref is None:
@@ -153,11 +160,13 @@ def plot_time_altitude_comparison(day_record, ne_iri_log10, model_log10_2d, save
                                           cmap='plasma', shading='auto', vmin=lo, vmax=hi)
         axes[1].pcolormesh(t_dt, alt_1d, ne_iri_log10,   cmap='plasma',
                            shading='auto', vmin=lo, vmax=hi)
-        axes[2].pcolormesh(t_dt, alt_1d, model_log10_2d, cmap='plasma',
+        axes[2].pcolormesh(t_dt, alt_1d, background_log10_2d, cmap='plasma',
                            shading='auto', vmin=lo, vmax=hi)
-        err_mesh_ref = axes[3].pcolormesh(t_dt, alt_1d, mdia_err_full, cmap='bwr',
+        axes[3].pcolormesh(t_dt, alt_1d, model_log10_2d, cmap='plasma',
+                           shading='auto', vmin=lo, vmax=hi)
+        err_mesh_ref = axes[4].pcolormesh(t_dt, alt_1d, mdia_err_full, cmap='bwr',
                                           shading='auto', vmin=-err_max, vmax=err_max)
-        axes[4].pcolormesh(t_dt, alt_1d, iri_err_full,  cmap='bwr',
+        axes[5].pcolormesh(t_dt, alt_1d, iri_err_full,  cmap='bwr',
                            shading='auto', vmin=-err_max, vmax=err_max)
 
     # Colorbars — 标签用 mathtext 避免 Unicode 渲染问题
@@ -167,8 +176,9 @@ def plot_time_altitude_comparison(day_record, ne_iri_log10, model_log10_2d, save
         (axes[0], ne_mesh_ref,  _ne_label),
         (axes[1], ne_mesh_ref,  _ne_label),
         (axes[2], ne_mesh_ref,  _ne_label),
-        (axes[3], err_mesh_ref, _err_label),
+        (axes[3], ne_mesh_ref,  _ne_label),
         (axes[4], err_mesh_ref, _err_label),
+        (axes[5], err_mesh_ref, _err_label),
     ]:
         if ref is not None:
             plt.colorbar(ref, ax=ax, label=label, pad=0.02, shrink=0.85)
@@ -176,9 +186,10 @@ def plot_time_altitude_comparison(day_record, ne_iri_log10, model_log10_2d, save
     # 轴修饰
     titles = [
         f'{station} ISR',
-        'IRI (Baseline)',
-        'MDIA-INR',
-        'MDIA - ISR Error',
+        'Raw IRI',
+        'FNDA Background',
+        'FSIA-INR M11',
+        'M11 - ISR Error',
         'IRI - ISR Error',
     ]
     for ax, title in zip(axes, titles):
@@ -233,7 +244,7 @@ def plot_nmf2_scatter(isr_nmf2_log10_all, model_nmf2_log10_all,
                 ha='center', fontsize=12)
 
     ax.set_xlabel(r'ISR  $\log_{10}$(NmF2)  [m$^{-3}$]', fontsize=11)
-    ax.set_ylabel(r'MDIA-INR  $\log_{10}$(NmF2)  [m$^{-3}$]', fontsize=11)
+    ax.set_ylabel(r'Prediction  $\log_{10}$(NmF2)  [m$^{-3}$]', fontsize=11)
     ax.set_title(f'{station}  NmF2 Scatter', fontsize=12, fontweight='bold')
     ax.set_aspect('equal', 'box')
     ax.legend(fontsize=10)
@@ -250,8 +261,8 @@ def plot_nmf2_scatter(isr_nmf2_log10_all, model_nmf2_log10_all,
 
 def plot_peak_lt_comparison(
     lt_all,
-    isr_hmf2, model_hmf2, iri_hmf2,
-    isr_nmf2, model_nmf2, iri_nmf2,
+    isr_hmf2, model_hmf2, background_hmf2, iri_hmf2,
+    isr_nmf2, model_nmf2, background_nmf2, iri_nmf2,
     station, model_name, save_path,
 ):
     """
@@ -260,7 +271,7 @@ def plot_peak_lt_comparison(
     上图（hmF2）: 横轴 LT 连续日期时间，纵轴高度 (km)
     下图（NmF2）: 横轴 LT 连续日期时间，纵轴 log10(NmF2)
 
-    三条曲线：ISR 观测（散点），IRI 基线（线），模型预测（线）。
+    四条曲线：ISR 观测、Raw IRI、FNDA Background、M11 Analysis。
     排序后按时间先后绘制，x 轴刻度同时显示日期和 LT 小时，让日内日间循环
     与日间变化在同一连续时间轴上清晰呈现。
 
@@ -283,22 +294,24 @@ def plot_peak_lt_comparison(
     lt_unix = np.asarray(lt_all,     dtype=np.float64)
     ih      = np.asarray(isr_hmf2,   dtype=np.float64)
     mh      = np.asarray(model_hmf2, dtype=np.float64)
+    bh      = np.asarray(background_hmf2, dtype=np.float64)
     rh      = np.asarray(iri_hmf2,   dtype=np.float64)
     in_     = np.asarray(isr_nmf2,   dtype=np.float64)
     mn      = np.asarray(model_nmf2, dtype=np.float64)
+    bn      = np.asarray(background_nmf2, dtype=np.float64)
     rn      = np.asarray(iri_nmf2,   dtype=np.float64)
 
     # 按时间排序（各天数据可能乱序拼接）
     sort_idx = np.argsort(lt_unix)
     lt_unix  = lt_unix[sort_idx]
-    ih, mh, rh   = ih[sort_idx], mh[sort_idx], rh[sort_idx]
-    in_, mn, rn  = in_[sort_idx], mn[sort_idx], rn[sort_idx]
+    ih, mh, bh, rh = ih[sort_idx], mh[sort_idx], bh[sort_idx], rh[sort_idx]
+    in_, mn, bn, rn = in_[sort_idx], mn[sort_idx], bn[sort_idx], rn[sort_idx]
 
     lt_dt = pd.to_datetime(lt_unix, unit='s')   # LT datetime array
 
     # 有效掩码
-    h_mask = np.isfinite(ih) & np.isfinite(mh) & np.isfinite(rh)
-    n_mask = np.isfinite(in_) & np.isfinite(mn) & np.isfinite(rn)
+    h_mask = np.isfinite(ih) & np.isfinite(mh) & np.isfinite(bh) & np.isfinite(rh)
+    n_mask = np.isfinite(in_) & np.isfinite(mn) & np.isfinite(bn) & np.isfinite(rn)
 
     fig, (ax_h, ax_n) = plt.subplots(2, 1, figsize=(16, 8), sharex=True)
 
@@ -307,7 +320,9 @@ def plot_peak_lt_comparison(
                  s=10, alpha=0.5, color='#1f77b4', linewidths=0,
                  label='ISR', zorder=3)
     ax_h.plot(lt_dt[h_mask], rh[h_mask],
-              color='#d62728', lw=1.2, ls='--', label='IRI', zorder=4)
+              color='black', lw=1.2, ls='--', label='Raw IRI', zorder=4)
+    ax_h.plot(lt_dt[h_mask], bh[h_mask],
+              color='gray', lw=1.2, ls=':', label='FNDA Background', zorder=4)
     ax_h.plot(lt_dt[h_mask], mh[h_mask],
               color='#2ca02c', lw=1.5, ls='-', label=model_name, zorder=5)
 
@@ -316,7 +331,9 @@ def plot_peak_lt_comparison(
                  s=10, alpha=0.5, color='#1f77b4', linewidths=0,
                  label='ISR', zorder=3)
     ax_n.plot(lt_dt[n_mask], rn[n_mask],
-              color='#d62728', lw=1.2, ls='--', label='IRI', zorder=4)
+              color='black', lw=1.2, ls='--', label='Raw IRI', zorder=4)
+    ax_n.plot(lt_dt[n_mask], bn[n_mask],
+              color='gray', lw=1.2, ls=':', label='FNDA Background', zorder=4)
     ax_n.plot(lt_dt[n_mask], mn[n_mask],
               color='#2ca02c', lw=1.5, ls='-', label=model_name, zorder=5)
 
@@ -371,49 +388,72 @@ def _fmt(v, fmt='.4f'):
 
 def save_metrics_report(station_reports, save_path):
     """
-    将多站点指标汇总写入文本报告（含 IRI 基线对比）。
+    将多站点指标汇总写入文本报告（Raw IRI / Background / Analysis）。
 
     每个 station_report dict 需含：
-        MDIA 指标: 'point_n/rmse/mae/r/bias', 'nmf2_n/mae/r/bias', 'hmf2_n/mae/bias'
-        IRI  基线: 'iri_point_n/rmse/mae/r/bias', 'iri_nmf2_n/mae/r/bias',
-                   'iri_hmf2_n/mae/bias'
+        Analysis 指标使用无前缀键；Background 使用 ``background_`` 前缀；
+        Raw IRI 使用 ``iri_`` 前缀。
     """
     lines = []
-    lines.append('=' * 72)
-    lines.append('MDIA-INR  ×  ISR 验证报告（含 IRI 基线对比）')
-    lines.append('=' * 72)
+    lines.append('=' * 94)
+    lines.append('FSIA-INR × ISR 验证报告（Raw IRI / FNDA Background / M11 Analysis）')
+    lines.append('=' * 94)
 
     for rep in station_reports:
         st = rep['station']
         lines.append(f'\n站点: {st}   有效天数: {rep["n_days"]}')
-        lines.append('-' * 60)
-        lines.append(f'  {"指标":<28} {"IRI 基线":>14}  {"MDIA-INR":>14}')
-        lines.append(f'  {"-"*28} {"-"*14}  {"-"*14}')
+        model_name = rep.get('model_name', 'FSIA-INR M11')
+        lines.append('-' * 82)
+        lines.append(
+            f'  {"指标":<28} {"Raw IRI":>14}  {"Background":>14}  {model_name:>14}')
+        lines.append(f'  {"-"*28} {"-"*14}  {"-"*14}  {"-"*14}')
 
-        def row(label, iri_val, mdia_val, fmt='.4f'):
+        def row(label, iri_val, background_val, analysis_val, fmt='.4f'):
             iv = _fmt(iri_val, fmt)
-            mv = _fmt(mdia_val, fmt)
-            lines.append(f'  {label:<28} {iv:>14}  {mv:>14}')
+            bv = _fmt(background_val, fmt)
+            av = _fmt(analysis_val, fmt)
+            lines.append(f'  {label:<28} {iv:>14}  {bv:>14}  {av:>14}')
 
-        lines.append(f'\n  【逐点统计】  IRI N={rep.get("iri_point_n",0)}  Model N={rep["point_n"]}')
-        row('RMSE (log10 Ne)',          rep.get('iri_point_rmse', np.nan), rep['point_rmse'])
-        row('MAE (log10 Ne)',           rep.get('iri_point_mae', np.nan),  rep['point_mae'])
-        row('Pearson R (log10)',        rep.get('iri_point_r',    np.nan), rep['point_r'])
-        row('CCC (log10)',              rep.get('iri_point_ccc',  np.nan), rep.get('point_ccc', np.nan))
-        row('Bias (log10 Ne)',          rep.get('iri_point_bias', np.nan), rep['point_bias'])
+        lines.append(
+            f'\n  【逐点统计】  IRI N={rep.get("iri_point_n", 0)}  '
+            f'Background N={rep.get("background_point_n", 0)}  '
+            f'Analysis N={rep["point_n"]}')
+        row('RMSE (log10 Ne)', rep.get('iri_point_rmse', np.nan),
+            rep.get('background_point_rmse', np.nan), rep['point_rmse'])
+        row('MAE (log10 Ne)', rep.get('iri_point_mae', np.nan),
+            rep.get('background_point_mae', np.nan), rep['point_mae'])
+        row('Pearson R (log10)', rep.get('iri_point_r', np.nan),
+            rep.get('background_point_r', np.nan), rep['point_r'])
+        row('CCC (log10)', rep.get('iri_point_ccc', np.nan),
+            rep.get('background_point_ccc', np.nan), rep.get('point_ccc', np.nan))
+        row('Bias (log10 Ne)', rep.get('iri_point_bias', np.nan),
+            rep.get('background_point_bias', np.nan), rep['point_bias'])
 
-        lines.append(f'\n  【NmF2 统计】  IRI N={rep.get("iri_nmf2_n",0)}  Model N={rep["nmf2_n"]}')
-        row('MAE (log10 NmF2)',         rep.get('iri_nmf2_mae', np.nan),  rep['nmf2_mae'])
-        row('Pearson R (log10 NmF2)',   rep.get('iri_nmf2_r',   np.nan), rep['nmf2_r'])
-        row('CCC (log10 NmF2)',         rep.get('iri_nmf2_ccc', np.nan), rep.get('nmf2_ccc', np.nan))
-        row('Bias (log10 NmF2)',        rep.get('iri_nmf2_bias', np.nan), rep['nmf2_bias'])
+        lines.append(
+            f'\n  【NmF2 统计】  IRI N={rep.get("iri_nmf2_n", 0)}  '
+            f'Background N={rep.get("background_nmf2_n", 0)}  '
+            f'Analysis N={rep["nmf2_n"]}')
+        row('MAE (log10 NmF2)', rep.get('iri_nmf2_mae', np.nan),
+            rep.get('background_nmf2_mae', np.nan), rep['nmf2_mae'])
+        row('Pearson R (log10 NmF2)', rep.get('iri_nmf2_r', np.nan),
+            rep.get('background_nmf2_r', np.nan), rep['nmf2_r'])
+        row('CCC (log10 NmF2)', rep.get('iri_nmf2_ccc', np.nan),
+            rep.get('background_nmf2_ccc', np.nan), rep.get('nmf2_ccc', np.nan))
+        row('Bias (log10 NmF2)', rep.get('iri_nmf2_bias', np.nan),
+            rep.get('background_nmf2_bias', np.nan), rep['nmf2_bias'])
 
-        lines.append(f'\n  【hmF2 统计】  IRI N={rep.get("iri_hmf2_n",0)}  Model N={rep["hmf2_n"]}')
-        row('MAE (km)',                 rep.get('iri_hmf2_mae',  np.nan), rep['hmf2_mae'],  '.2f')
-        row('CCC (km space)',           rep.get('iri_hmf2_ccc',  np.nan), rep.get('hmf2_ccc', np.nan))
-        row('Bias (km)',                rep.get('iri_hmf2_bias', np.nan), rep['hmf2_bias'], '+.2f')
+        lines.append(
+            f'\n  【hmF2 统计】  IRI N={rep.get("iri_hmf2_n", 0)}  '
+            f'Background N={rep.get("background_hmf2_n", 0)}  '
+            f'Analysis N={rep["hmf2_n"]}')
+        row('MAE (km)', rep.get('iri_hmf2_mae', np.nan),
+            rep.get('background_hmf2_mae', np.nan), rep['hmf2_mae'], '.2f')
+        row('CCC (km space)', rep.get('iri_hmf2_ccc', np.nan),
+            rep.get('background_hmf2_ccc', np.nan), rep.get('hmf2_ccc', np.nan))
+        row('Bias (km)', rep.get('iri_hmf2_bias', np.nan),
+            rep.get('background_hmf2_bias', np.nan), rep['hmf2_bias'], '+.2f')
 
-    lines.append('\n' + '=' * 72)
+    lines.append('\n' + '=' * 94)
 
     os.makedirs(os.path.dirname(save_path) or '.', exist_ok=True)
     with open(save_path, 'w', encoding='utf-8') as f:

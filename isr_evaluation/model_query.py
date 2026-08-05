@@ -7,6 +7,10 @@ MDIA-INR 模型查询模块
 
 import numpy as np
 import torch
+from inr_modules.mdia.sliding_dataset import (
+    attach_observation_background,
+    query_observation_payload,
+)
 
 # 地理坐标降级模式：不再使用 aacgmv2；coords 保持 [M, 4]（Lat_geo, Lon_geo, Alt, Time）
 
@@ -41,8 +45,7 @@ def query_model_grid(model, sw_manager, day_record, start_unix, device,
         cosmic_nb_index:  COSMICNeighborhoodIndex 或 None
 
     Returns:
-        ne_pred_log10: [n_alt, n_time] float32 — FSIA-INR log10(Ne) 预测
-        ne_iri_log10:  [n_alt, n_time] float32 — IRI 代理背景 log10(Ne)（基线对比用）
+        analysis, background, raw_iri: three [n_alt, n_time] log10(Ne) grids.
         NaN where ne_2d is NaN or coordinates are invalid.
     """
     model.eval()
@@ -81,10 +84,11 @@ def query_model_grid(model, sw_manager, day_record, start_unix, device,
     )
 
     ne_pred_log10 = np.full((n_alt, n_time), np.nan, dtype=np.float32)
-    ne_iri_log10  = np.full((n_alt, n_time), np.nan, dtype=np.float32)
+    ne_bkg_log10 = np.full((n_alt, n_time), np.nan, dtype=np.float32)
+    ne_iri_log10 = np.full((n_alt, n_time), np.nan, dtype=np.float32)
 
     if not valid_mask.any():
-        return ne_pred_log10, ne_iri_log10
+        return ne_pred_log10, ne_bkg_log10, ne_iri_log10
 
     # 展平有效点
     lat_flat = lat_2d[valid_mask].astype(np.float32)
@@ -98,7 +102,8 @@ def query_model_grid(model, sw_manager, day_record, start_unix, device,
     M = len(coords_np)
 
     pred_flat = np.empty(M, dtype=np.float32)
-    iri_flat  = np.empty(M, dtype=np.float32)
+    bkg_flat = np.empty(M, dtype=np.float32)
+    iri_flat = np.empty(M, dtype=np.float32)
     fy_covered = 0
     cosmic_covered = 0
 
@@ -116,29 +121,34 @@ def query_model_grid(model, sw_manager, day_record, start_unix, device,
 
             model_kwargs = {'iri_peak': iri_peak}
             if fy_nb_index is not None:
-                feats, present = fy_nb_index.query_batch_np(coords_np[start:end])
-                fy_covered += int(np.count_nonzero(present > 0.5))
-                model_kwargs.update(
-                    neighbors_feats=torch.from_numpy(feats).to(device),
-                    has_obs=torch.from_numpy(present).to(device))
+                observations = query_observation_payload(
+                    fy_nb_index, chunk, device)
+                fy_covered += int(
+                    observations['valid_mask'].any(dim=1).sum().item())
+                model_kwargs['observations_fy'] = attach_observation_background(
+                    observations, model, sw_manager, iri_peak_manager)
             if cosmic_nb_index is not None:
-                feats, present = cosmic_nb_index.query_batch_np(coords_np[start:end])
-                cosmic_covered += int(np.count_nonzero(present > 0.5))
-                model_kwargs.update(
-                    neighbors_feats_cosmic=torch.from_numpy(feats).to(device),
-                    has_obs_cosmic=torch.from_numpy(present).to(device))
+                observations = query_observation_payload(
+                    cosmic_nb_index, chunk, device)
+                cosmic_covered += int(
+                    observations['valid_mask'].any(dim=1).sum().item())
+                model_kwargs['observations_cosmic'] = (
+                    attach_observation_background(
+                        observations, model, sw_manager, iri_peak_manager))
 
             ne_fused, _, _, _, extras = model(chunk, sw_seq, **model_kwargs)
             pred_flat[start:end] = ne_fused.reshape(-1).cpu().numpy()
-            iri_flat[start:end]  = extras['ne_bkg'].reshape(-1).cpu().numpy()
+            bkg_flat[start:end] = extras['ne_bkg'].reshape(-1).cpu().numpy()
+            iri_flat[start:end] = extras['ne_iri'].reshape(-1).cpu().numpy()
 
     if fy_nb_index is not None or cosmic_nb_index is not None:
         print(f'    邻域覆盖: FY={fy_covered}/{M} ({fy_covered/M:.2%}), '
               f'COSMIC={cosmic_covered}/{M} ({cosmic_covered/M:.2%})')
 
     ne_pred_log10[valid_mask] = pred_flat
-    ne_iri_log10[valid_mask]  = iri_flat
-    return ne_pred_log10, ne_iri_log10
+    ne_bkg_log10[valid_mask] = bkg_flat
+    ne_iri_log10[valid_mask] = iri_flat
+    return ne_pred_log10, ne_bkg_log10, ne_iri_log10
 
 
 def extract_model_nmf2_hmf2(ne_log10_grid, alt_1d, f2_alt_min=150.0):

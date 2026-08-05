@@ -22,6 +22,105 @@ except ImportError:
     from mdia_model import _compute_dip_features
 
 
+def _query_ensemble_anomalies(extras):
+    query_anomalies = extras.get('query_anomalies')
+    if query_anomalies is None:
+        query_anomalies = torch.einsum(
+            'bd,bnd->bn',
+            extras['query_basis'],
+            extras['latent_anomalies'],
+        )
+    return query_anomalies
+
+
+def _source_ensemble_terms(extras, source):
+    covariance = extras.get(f'ensemble_covariance_{source}')
+    source_rhs = extras.get(f'ensemble_rhs_{source}')
+    if covariance is None or source_rhs is None:
+        obs_anomalies = extras[f'obs_anomalies_{source}']
+        precision = extras[f'precision_{source}']
+        innovation = extras[f'innov_{source}']
+        covariance = torch.einsum(
+            'bmn,bm,bmk->bnk',
+            obs_anomalies,
+            precision,
+            obs_anomalies,
+        )
+        source_rhs = torch.einsum(
+            'bmn,bm,bm->bn',
+            obs_anomalies,
+            precision,
+            innovation,
+        )
+    return covariance, source_rhs
+
+
+def solve_density_mode(extras, sources, observation_variance=None):
+    """Solve one physical-density ETKF mode from a joint forward pass."""
+    sources = tuple(sources)
+    if len(set(sources)) != len(sources) or any(
+            source not in ('FY', 'COSMIC') for source in sources):
+        raise ValueError(f'invalid ETKF sources: {sources}')
+    query_anomalies = _query_ensemble_anomalies(extras)
+    batch, members = query_anomalies.shape
+    system = (
+        max(members - 1, 1)
+        * torch.eye(
+            members,
+            device=query_anomalies.device,
+            dtype=query_anomalies.dtype,
+        ).expand(batch, -1, -1)
+    )
+    rhs = query_anomalies.new_zeros(batch, members)
+    for source in sources:
+        covariance, source_rhs = _source_ensemble_terms(extras, source)
+        system = system + covariance
+        rhs = rhs + source_rhs
+    chol = torch.linalg.cholesky(system)
+    weights = torch.cholesky_solve(
+        rhs.unsqueeze(-1), chol).squeeze(-1)
+    increment = torch.einsum('bn,bn->b', query_anomalies, weights)
+    if observation_variance is None:
+        return increment
+    solved_query = torch.cholesky_solve(
+        query_anomalies.unsqueeze(-1), chol).squeeze(-1)
+    variance = (
+        torch.einsum('bn,bn->b', query_anomalies, solved_query)
+        + observation_variance)
+    return increment, variance
+
+
+def solve_density_modes(extras):
+    """Solve M10/M01 together and reuse the forward-pass M11 solution."""
+    query_anomalies = _query_ensemble_anomalies(extras)
+    batch, members = query_anomalies.shape
+    base = (
+        max(members - 1, 1)
+        * torch.eye(
+            members,
+            device=query_anomalies.device,
+            dtype=query_anomalies.dtype,
+        ).expand(batch, -1, -1)
+    )
+    fy_covariance, fy_rhs = _source_ensemble_terms(extras, 'FY')
+    cosmic_covariance, cosmic_rhs = _source_ensemble_terms(extras, 'COSMIC')
+    systems = torch.stack(
+        (base + fy_covariance, base + cosmic_covariance), dim=1)
+    rhs = torch.stack((fy_rhs, cosmic_rhs), dim=1)
+    weights = torch.cholesky_solve(
+        rhs.unsqueeze(-1), torch.linalg.cholesky(systems)).squeeze(-1)
+    increments = torch.einsum('bn,bmn->bm', query_anomalies, weights)
+    result = {
+        'M10': increments[:, 0],
+        'M01': increments[:, 1],
+    }
+    joint = extras.get('ne_residual')
+    result['M11'] = (
+        joint.squeeze(-1) if joint is not None
+        else solve_density_mode(extras, ('FY', 'COSMIC')))
+    return result
+
+
 # ======================== Solar Zenith Angle 计算（run25：替代 LT）========================
 
 # Sep 1 day-of-year（非闰年/2024 闰年差 1，可忽略）— 与训练数据集起始日对齐
@@ -73,6 +172,12 @@ def _compute_solar_features(lat_deg, lon_deg, rel_hour):
     return cos_SZA, sin_doy, cos_doy
 
 
+def _compute_local_time_features(lon_deg, rel_hour):
+    """Continuous local-solar-time phase shared by every endpoint type."""
+    phase = (rel_hour + lon_deg / 15.0) * (math.pi / 12.0)
+    return torch.sin(phase), torch.cos(phase)
+
+
 # ======================== NeuralETKFLayer 辅助函数 ========================
 
 def _build_kalman_b_input(h_sw, lat_n, cos_SZA, sin_doy, cos_doy, sin_I):
@@ -87,103 +192,109 @@ def _build_kalman_b_input(h_sw, lat_n, cos_SZA, sin_doy, cos_doy, sin_I):
     ], dim=-1)                                                                  # [B, b_net_in=69]
 
 
-def _build_kalman_r_fy_input(alt_n, delta_alt, cos_SZA, sin_doy, cos_doy, lat_n_abs, h_sw):
-    """Build the shared FY/COSMIC gain-calibration input."""
-    return torch.cat([
-        alt_n.unsqueeze(-1),
-        delta_alt.unsqueeze(-1),
-        cos_SZA.unsqueeze(-1),
-        sin_doy.unsqueeze(-1),
-        cos_doy.unsqueeze(-1),
-        lat_n_abs.unsqueeze(-1),
-        h_sw,
-    ], dim=-1)                                                                  # [B, r_fy_net_in=70]
 # ======================== NeuralETKFLayer (run28) ========================
 
 class NeuralETKFLayer(nn.Module):
-    """Ensemble-space FY/COSMIC update over the encoded IRI state.
+    """Low-dimensional ETKF with a physical log10Ne observation operator."""
 
-    Perturbation networks generate a centered ensemble. Independent global
-    observation operators form FY and COSMIC innovations; source masks are
-    applied separately before the two member-weight updates are combined.
-    """
-
-    def __init__(self, d_model: int = 64, b_net_in: int = 69, r_fy_net_in: int = 70,
+    def __init__(self, d_model: int = 64, b_net_in: int = 69,
                  n_members: int = 8, pert_hidden: int = 64,
-                 n_rank_h: int = 8):
+                 r_fy: float = 0.04, r_cosmic: float = 0.04,
+                 anomaly_parameterization: str = 'legacy_independent',
+                 scale_init: float = 1.1,
+                 scale_condition_max: float = 3.0,
+                 coordinate_local_symmetric: bool = False,
+                 coefficient_space: bool = False):
         super().__init__()
+        if d_model < 1 or n_members < 2 or pert_hidden < 1:
+            raise ValueError(
+                'd_model and pert_hidden must be positive; n_members must be >= 2')
+        if anomaly_parameterization not in (
+                'legacy_independent', 'orthogonal_factor'):
+            raise ValueError(
+                'anomaly_parameterization must be legacy_independent or '
+                'orthogonal_factor')
+        if (anomaly_parameterization == 'orthogonal_factor'
+                and n_members - 1 > d_model):
+            raise ValueError('enkf_n_members - 1 must not exceed d_model')
+        if (coordinate_local_symmetric
+                and anomaly_parameterization != 'orthogonal_factor'):
+            raise ValueError(
+                'coordinate-local symmetric basis requires orthogonal_factor')
+        if coefficient_space and d_model != n_members - 1:
+            raise ValueError(
+                'coefficient-space anomalies require d_model == n_members - 1')
+        if scale_init <= 0 or scale_condition_max <= 1:
+            raise ValueError(
+                'scale_init must be positive and scale_condition_max must exceed 1')
         self.d_model     = d_model
         self.n_members   = n_members
         self.b_net_in    = b_net_in
-        self.r_fy_net_in = r_fy_net_in
         self.pert_hidden = pert_hidden
+        self.anomaly_parameterization = anomaly_parameterization
+        self.scale_init = float(scale_init)
+        self.scale_condition_max = float(scale_condition_max)
+        self.coordinate_local_symmetric = bool(coordinate_local_symmetric)
+        self.coefficient_space = bool(coefficient_space)
 
-        # ---- N 个并行 PerturbationNet（向量化 Parameter[N, in, out]）----
-        # 输入: b_net_in（同 MHDK B_net 输入）= h_sw + lat_n + cos_SZA + sin_doy + cos_doy + sin_I
-        self.P_w1 = nn.Parameter(torch.empty(n_members, b_net_in, pert_hidden))
-        self.P_b1 = nn.Parameter(torch.empty(n_members, pert_hidden))
-        self.P_w2 = nn.Parameter(torch.empty(n_members, pert_hidden, d_model))
-        self.P_b2 = nn.Parameter(torch.empty(n_members, d_model))
+        if anomaly_parameterization == 'legacy_independent':
+            # Preserve v7 state-dict keys for strict read-only compatibility.
+            self.P_w1 = nn.Parameter(
+                torch.empty(n_members, b_net_in, pert_hidden))
+            self.P_b1 = nn.Parameter(torch.empty(n_members, pert_hidden))
+            self.P_w2 = nn.Parameter(
+                torch.empty(n_members, pert_hidden, d_model))
+            self.P_b2 = nn.Parameter(torch.empty(n_members, d_model))
+            self.log_inflation = nn.Parameter(torch.zeros(()))
+        else:
+            rank = n_members - 1
+            self.register_buffer(
+                'ensemble_coefficients', self._helmert_coefficients(n_members))
+            self.register_buffer(
+                'state_basis',
+                (torch.eye(rank, dtype=torch.float64)
+                 if coefficient_space else self._dct_basis(d_model, rank)))
+            self.covariance_scale_net = nn.Sequential(
+                nn.Linear(b_net_in, pert_hidden),
+                nn.SiLU(),
+                nn.Linear(pert_hidden, rank),
+            )
+            nn.init.zeros_(self.covariance_scale_net[-1].weight)
+            nn.init.zeros_(self.covariance_scale_net[-1].bias)
 
-        # Frozen inference calibration. Its output is detached below, so these
-        # weights cannot receive gradients in the current architecture.
-        self.R_FY_net = nn.Sequential(
-            nn.Linear(r_fy_net_in, 64), nn.SiLU(), nn.Linear(64, d_model))
-        self.R_FY_net.requires_grad_(False)
+        self.register_buffer('r_fy', torch.tensor(float(r_fy)))
+        self.register_buffer('r_cosmic', torch.tensor(float(r_cosmic)))
 
-        # ---- FY observation operator (global H, zero-init) ----
-        self.H_FY_w   = nn.Parameter(torch.zeros(d_model, d_model))
-
-        # run65 checkpoint compatibility only. These SALR-H factors were all
-        # zero-initialized, so their product had identically zero gradients.
-        # Keep the state keys for strict loading, but exclude them from training.
-        _salr_cond = 17
-        self.n_rank_h  = n_rank_h
-        self.H_FY_u    = nn.Parameter(
-            torch.zeros(n_rank_h, d_model), requires_grad=False)
-        self.H_FY_v    = nn.Parameter(
-            torch.zeros(n_rank_h, d_model), requires_grad=False)
-        self.H_FY_a    = nn.Linear(_salr_cond, n_rank_h, bias=True)
-        nn.init.zeros_(self.H_FY_a.weight)
-        nn.init.zeros_(self.H_FY_a.bias)
-        self.H_FY_a.requires_grad_(False)
-
-        # ---- run64: COSMIC observation channel (replaces vert channel) ----
-        # H_COSMIC_w zero-init -> COSMIC channel inactive at start -> IRI baseline
-        self.H_COSMIC_w  = nn.Parameter(torch.zeros(d_model, d_model))
-        self.H_COSMIC_u  = nn.Parameter(
-            torch.zeros(n_rank_h, d_model), requires_grad=False)
-        self.H_COSMIC_v  = nn.Parameter(
-            torch.zeros(n_rank_h, d_model), requires_grad=False)
-        self.H_COSMIC_a  = nn.Linear(_salr_cond, n_rank_h, bias=True)
-        nn.init.zeros_(self.H_COSMIC_a.weight)
-        nn.init.zeros_(self.H_COSMIC_a.bias)
-        self.H_COSMIC_a.requires_grad_(False)
-        # Independent frozen COSMIC inference calibration.
-        self.R_COSMIC_net = nn.Sequential(
-            nn.Linear(r_fy_net_in, 64), nn.SiLU(), nn.Linear(64, d_model))
-        self.R_COSMIC_net.requires_grad_(False)
-        self.log_r_ref_COSMIC = nn.Parameter(torch.zeros(()))
-
-        # ---- Inflation（可学习标量；exp 保证 > 0，初始 = 1.0）----
-        self.log_inflation = nn.Parameter(torch.zeros(()))
-
-        # ---- run59: H 学习参考 R（解耦 H 梯度与物理先验）----
-        # softplus(0)+0.1 ≈ 0.79；r_ref 可学习 → 自动校准基准增益
-        self.log_r_ref_FY = nn.Parameter(torch.zeros(()))   # r_ref_FY = softplus + 0.1
-
-        # ---- 输出归一化 ----
-        self.norm = nn.LayerNorm(d_model)
-
-        # 监控量（外部读取）
         self.last_member_weights  = None
         self.last_inflation_scale = None
 
         self._reset_kalman_params()
 
+    @staticmethod
+    def _helmert_coefficients(n_members):
+        rank = n_members - 1
+        coefficients = torch.zeros(rank, n_members, dtype=torch.float64)
+        for row in range(rank):
+            denominator = math.sqrt((row + 1) * (row + 2))
+            coefficients[row, :row + 1] = 1.0 / denominator
+            coefficients[row, row + 1] = -(row + 1) / denominator
+        return coefficients * math.sqrt(rank)
+
+    @staticmethod
+    def _dct_basis(d_model, rank):
+        positions = torch.arange(d_model, dtype=torch.float64).unsqueeze(1)
+        modes = torch.arange(rank, dtype=torch.float64).unsqueeze(0)
+        basis = torch.cos(math.pi * (positions + 0.5) * modes / d_model)
+        basis[:, 0] *= 1.0 / math.sqrt(d_model)
+        if rank > 1:
+            basis[:, 1:] *= math.sqrt(2.0 / d_model)
+        return basis
+
     def _reset_kalman_params(self):
         """PerturbationNet 用 nn.Linear 默认风格 uniform 初始化（per-member fan_in）。
-        H_FY_w / H_COSMIC_w 已在 __init__ 中零初始化。"""
+        """
+        if self.anomaly_parameterization != 'legacy_independent':
+            return
         for w, b, fan_in in [
             (self.P_w1, self.P_b1, self.b_net_in),
             (self.P_w2, self.P_b2, self.pert_hidden),
@@ -195,152 +306,223 @@ class NeuralETKFLayer(nn.Module):
     # ---------- 向量化扰动生成 ----------
     def _eval_perturbations(self, b_input):
         """N 个并行扰动 → ensemble 扰动 [B, N, d]"""
+        if self.anomaly_parameterization == 'orthogonal_factor':
+            if self.coordinate_local_symmetric:
+                scales = b_input.new_full(
+                    (b_input.shape[0], self.n_members - 1), self.scale_init)
+            else:
+                logits = self.covariance_scale_net(b_input)
+                half_log_condition = 0.5 * math.log(self.scale_condition_max)
+                scales = self.scale_init * torch.exp(
+                    half_log_condition * torch.tanh(logits))
+            state_basis = self.state_basis.to(
+                device=b_input.device, dtype=b_input.dtype)
+            coefficients = self.ensemble_coefficients.to(
+                device=b_input.device, dtype=b_input.dtype)
+            factors = state_basis.unsqueeze(0) * scales.unsqueeze(1)
+            return (
+                torch.einsum(
+                    'bdr,rn->bnd', factors, coefficients),
+                scales,
+            )
         h = torch.einsum('bi,nio->bno', b_input, self.P_w1) + self.P_b1.unsqueeze(0)
         h = F.silu(h)
         delta = torch.einsum('bni,nio->bno', h, self.P_w2) + self.P_b2.unsqueeze(0)
-        return delta                                                            # [B, N, d]
+        return delta, None                                                       # [B, N, d]
 
-    def _eval_R_FY(self, r_input):
-        """Return the fixed FY gain-calibration field."""
-        return F.softplus(self.R_FY_net(r_input))                               # [B, d]
+    def observation_factor_coordinates(self, phi_obs, factor_scales=None):
+        """Project density-basis rows into the independent ETKF factors.
 
-    def _eval_R_COSMIC(self, r_input):
-        """Return the fixed COSMIC gain-calibration field."""
-        return F.softplus(self.R_COSMIC_net(r_input))                           # [B, d]
+        For the orthogonal-factor parameterization this returns ``F`` such that
+        ``phi_obs @ X == F @ ensemble_coefficients``.  Keeping this relation in
+        one method prevents the training-only Gram diagnostic from silently
+        using a different state geometry than the production ETKF.
+        """
+        if self.anomaly_parameterization != 'orthogonal_factor':
+            raise ValueError(
+                'observation factor coordinates require orthogonal_factor')
+        if phi_obs.ndim != 3 or phi_obs.shape[-1] != self.d_model:
+            raise ValueError(
+                f'phi_obs must have shape [B, M, {self.d_model}]')
+        rank = self.n_members - 1
+        basis = self.state_basis.to(device=phi_obs.device, dtype=phi_obs.dtype)
+        factors = torch.einsum('bmd,dr->bmr', phi_obs, basis)
+        if factor_scales is None:
+            scales = phi_obs.new_full((phi_obs.shape[0], rank), self.scale_init)
+        else:
+            if factor_scales.shape != (phi_obs.shape[0], rank):
+                raise ValueError('factor_scales shape does not match phi_obs')
+            scales = factor_scales.to(device=phi_obs.device, dtype=phi_obs.dtype)
+        return factors * scales.unsqueeze(1)
 
-    def forward(self, f_iri, h_obs_FY, h_sw,
-                lat_n, cos_SZA, sin_doy, cos_doy, sin_I, alt_n, delta_alt_n,
-                has_obs=None, h_obs_COSMIC=None, has_obs_cosmic=None):
+    def set_observation_variances(
+            self, r_fy, r_cosmic, r_fy_table=None, r_cosmic_table=None):
+        del r_fy_table, r_cosmic_table
+        values = torch.as_tensor([r_fy, r_cosmic], dtype=self.r_fy.dtype)
+        if not torch.isfinite(values).all() or torch.any(values <= 0):
+            raise ValueError('observation variances must be finite and positive')
+        self.r_fy.fill_(float(r_fy))
+        self.r_cosmic.fill_(float(r_cosmic))
+
+    @staticmethod
+    def _localization_precision(rho_squared):
+        radius = rho_squared.clamp(0.0, 1.0).sqrt()
+        return (1.0 - 3.0 * radius.square() + 2.0 * radius.pow(3)).clamp_min(0.0)
+
+    @staticmethod
+    def _empty_observations(reference, batch):
+        return {
+            'value': reference.new_zeros(batch, 0),
+            'background': reference.new_zeros(batch, 0),
+            'valid_mask': torch.zeros(
+                batch, 0, device=reference.device, dtype=torch.bool),
+            'rho_squared': reference.new_zeros(batch, 0),
+        }
+
+    def _source_terms(self, X, phi_obs, observations, variance):
+        innovation = observations['value'] - observations['background']
+        valid = observations['valid_mask'].to(dtype=X.dtype)
+        localization = self._localization_precision(
+            observations['rho_squared'])
+        representativeness = observations.get(
+            'representativeness_weight',
+            torch.ones_like(observations['rho_squared']))
+        precision = (
+            valid * localization * representativeness
+            / variance.clamp_min(1e-12))
+        obs_anomalies = torch.einsum('bmd,bnd->bmn', phi_obs, X)
+        covariance = torch.einsum(
+            'bmn,bm,bmk->bnk', obs_anomalies, precision, obs_anomalies)
+        rhs = torch.einsum(
+            'bmn,bm,bm->bn', obs_anomalies, precision, innovation)
+        return covariance, rhs, innovation, obs_anomalies, precision
+
+    def forward(self, z_background, h_sw, phi_query, sources,
+                lat_n, cos_SZA, sin_doy, cos_doy, sin_I):
         b_in = _build_kalman_b_input(h_sw, lat_n, cos_SZA, sin_doy, cos_doy, sin_I)
-        r_in = _build_kalman_r_fy_input(alt_n, delta_alt_n,
-                                         cos_SZA, sin_doy, cos_doy, lat_n.abs(), h_sw)
-
-        # ---- Step 1: ensemble perturbations + centering + inflation ----
-        delta      = self._eval_perturbations(b_in)
-        delta_mean = delta.mean(dim=1, keepdim=True)
-        X          = delta - delta_mean
-        inflation  = torch.exp(self.log_inflation)
-        X_inf      = X * torch.sqrt(inflation)
-
-        # ---- Step 2: frozen source-specific gain calibration ----
-        r_fy = self._eval_R_FY(r_in)
-        use_cosmic = (h_obs_COSMIC is not None)
-        if use_cosmic:
-            r_cosmic = self._eval_R_COSMIC(r_in)
+        anomalies, factor_scales = self._eval_perturbations(b_in)
+        if self.anomaly_parameterization == 'legacy_independent':
+            anomalies = anomalies - anomalies.mean(dim=1, keepdim=True)
+            inflation = torch.exp(self.log_inflation).clamp(0.8, 1.5)
         else:
-            r_cosmic = torch.zeros_like(r_fy)
+            inflation = anomalies.new_ones(())
+        X = anomalies * torch.sqrt(inflation)
+        batch, members, _ = X.shape
+        empty = self._empty_observations(X, batch)
+        fy_obs, fy_phi = sources.get('FY', (empty, X.new_zeros(batch, 0, self.d_model)))
+        cosmic_obs, cosmic_phi = sources.get(
+            'COSMIC', (empty, X.new_zeros(batch, 0, self.d_model)))
+        fy_terms = self._source_terms(X, fy_phi, fy_obs, self.r_fy)
+        cosmic_terms = self._source_terms(
+            X, cosmic_phi, cosmic_obs, self.r_cosmic)
+        eye = torch.eye(members, device=X.device, dtype=X.dtype).expand(
+            batch, members, members)
+        system = (
+            max(members - 1, 1) * eye + fy_terms[0] + cosmic_terms[0])
+        chol = torch.linalg.cholesky(system)
+        weights_fy = torch.cholesky_solve(
+            fy_terms[1].unsqueeze(-1), chol).squeeze(-1)
+        weights_cosmic = torch.cholesky_solve(
+            cosmic_terms[1].unsqueeze(-1), chol).squeeze(-1)
+        weights = weights_fy + weights_cosmic
+        latent_increment = torch.einsum('bn,bnd->bd', weights, X)
+        z_analysis = z_background + latent_increment
+        query_anomalies = torch.einsum('bd,bnd->bn', phi_query, X)
+        delta_fy = torch.einsum('bn,bn->b', query_anomalies, weights_fy)
+        delta_cosmic = torch.einsum(
+            'bn,bn->b', query_anomalies, weights_cosmic)
 
-        # ---- Step 3: global observation projection ----
-        HX_FY     = torch.einsum('bnd,do->bno', X_inf, self.H_FY_w)
-        HX_COSMIC = torch.einsum('bnd,do->bno', X_inf, self.H_COSMIC_w)
+        eigenvalues, eigenvectors = torch.linalg.eigh(system)
+        transform = torch.einsum(
+            'bnk,bk,bmk->bnm',
+            eigenvectors,
+            torch.sqrt(
+                X.new_tensor(float(max(members - 1, 1)))
+                / eigenvalues.clamp_min(1e-12)),
+            eigenvectors,
+        )
+        analysis_anomalies = torch.einsum('bnm,bmd->bnd', transform, X)
 
-        eps = 1e-6
-        r_ref_FY     = F.softplus(self.log_r_ref_FY)    + 0.1
-        r_ref_COSMIC = F.softplus(self.log_r_ref_COSMIC) + 0.1
+        gain = []
+        cross_covariance = []
+        for terms in (fy_terms, cosmic_terms):
+            weighted_y = terms[3].transpose(1, 2) * terms[4].unsqueeze(1)
+            solved = torch.cholesky_solve(weighted_y, chol)
+            gain.append(torch.einsum('bn,bnm->bm', query_anomalies, solved))
+            cross_covariance.append(torch.einsum(
+                'bn,bmn->bm', query_anomalies, terms[3])
+                / max(members - 1, 1))
 
-        HXR_FY     = HX_FY     / (r_ref_FY     + eps)
-        HXR_COSMIC = HX_COSMIC / (r_ref_COSMIC + eps)
-
-        N   = self.n_members
-        I_N = torch.eye(N, device=X.device, dtype=X.dtype).unsqueeze(0)
-        M_FY     = torch.einsum('bnd,bmd->bnm', HXR_FY,     HX_FY    ) / max(N - 1, 1)
-        M_COSMIC = torch.einsum('bnd,bmd->bnm', HXR_COSMIC, HX_COSMIC) / max(N - 1, 1)
-        T_FY     = torch.linalg.inv(I_N + M_FY)
-        T_COSMIC = torch.linalg.inv(I_N + M_COSMIC)
-
-        # ---- Step 4: innovations + weights + posterior ----
-        innov_FY = h_obs_FY - torch.einsum('bd,do->bo', f_iri, self.H_FY_w)
-        w_FY_pre  = torch.einsum('bnd,bd->bn', HXR_FY, innov_FY)
-        w_FY_base = torch.einsum('bnm,bm->bn', T_FY, w_FY_pre)
-
-        if use_cosmic:
-            innov_COSMIC = h_obs_COSMIC - torch.einsum('bd,do->bo', f_iri, self.H_COSMIC_w)
-            w_COSMIC_pre  = torch.einsum('bnd,bd->bn', HXR_COSMIC, innov_COSMIC)
-            w_COSMIC_base = torch.einsum('bnm,bm->bn', T_COSMIC, w_COSMIC_pre)
-        else:
-            innov_COSMIC  = torch.zeros_like(innov_FY)
-            w_COSMIC_base = torch.zeros(X.shape[0], N, device=X.device, dtype=X.dtype)
-
-        # Inference gain suppression. Detach preserves run65 behavior and makes
-        # the calibration networks fixed rather than trainable.
-        phy_scale_FY = (r_ref_FY / (r_fy.detach() + eps)).clamp(0.0, 1.0).mean(-1)
-        w_FY   = w_FY_base * phy_scale_FY.unsqueeze(-1)
-
-        if use_cosmic:
-            phy_scale_COSMIC = (r_ref_COSMIC / (r_cosmic.detach() + eps)).clamp(0.0, 1.0).mean(-1)
-            w_COSMIC = w_COSMIC_base * phy_scale_COSMIC.unsqueeze(-1)
-        else:
-            w_COSMIC = w_COSMIC_base
-
-        # run63: mask update when no observations present
-        if has_obs is not None:
-            w_FY = w_FY * has_obs.unsqueeze(-1)
-        if has_obs_cosmic is not None and use_cosmic:
-            w_COSMIC = w_COSMIC * has_obs_cosmic.unsqueeze(-1)
-
-        w_total    = w_FY + w_COSMIC
-        update     = torch.einsum('bn,bnd->bd', w_total, X_inf)
-        h_analysis = self.norm(f_iri + delta_mean.squeeze(1) + update)
-
-        # ---- monitoring quantities ----
-        ens_var      = X.pow(2).sum(dim=1) / max(N - 1, 1)
-        K_eff_FY     = ens_var / (ens_var + r_fy     + eps)
-        K_eff_COSMIC = ens_var / (ens_var + r_cosmic  + eps)
-
-        w_abs = w_total.abs()
-        member_weights = w_abs / (w_abs.sum(dim=-1, keepdim=True) + eps)
+        w_abs = weights.abs()
+        member_weights = w_abs / (w_abs.sum(dim=-1, keepdim=True) + 1e-6)
         self.last_member_weights  = member_weights
         self.last_inflation_scale = inflation.detach()
-
-        return (h_analysis, K_eff_FY, K_eff_COSMIC,
-                ens_var, r_fy, innov_FY, innov_COSMIC)
-
-
-# ======================== MultiScaleAdaptiveGate ========================
-
-class MultiScaleAdaptiveGate(nn.Module):
-    """Multiply a learned regime gate by a profile-height prior gate."""
-
-    def __init__(self, in_dim: int = 130, basis_dim: int = 64,
-                 h_scale: float = 100.0):
-        super().__init__()
-        self.h_scale = h_scale
-
-        self.gate_net = nn.Sequential(
-            nn.Linear(in_dim, 32), nn.SiLU(), nn.Linear(32, 1))
-        nn.init.zeros_(self.gate_net[-1].weight)
-        nn.init.constant_(self.gate_net[-1].bias, math.log(0.95 / 0.05))  # ≈2.944
-
-        self.gate_phys_net = nn.Sequential(
-            nn.Linear(basis_dim + 3, 32), nn.SiLU(), nn.Linear(32, 6))
-        nn.init.zeros_(self.gate_phys_net[-1].weight)
-        nn.init.zeros_(self.gate_phys_net[-1].bias)
-
-        self.register_buffer('w_prior',
-            torch.tensor([2.5, -1.5, -0.3]))
-        self.register_buffer('log_sigma_prior',
-            torch.tensor([math.log(0.8), math.log(0.5), math.log(1.2)]))
-        self.register_buffer('centers',
-            torch.tensor([0.0, -1.5, 2.0]))
-
-    def forward(self, h_fused, h_sw, alt_km, hmF2_det, h_profile,
-                log_var_det, ne_delta_raw_abs,
-                cos_SZA, sin_doy, cos_doy, regime_desc):
-        """Return total, learned, and profile-height gates, each shaped [B, 1]."""
-        gate_data = torch.sigmoid(self.gate_net(torch.cat(
-            [h_fused, h_sw, log_var_det, ne_delta_raw_abs, regime_desc], dim=-1)))  # [B, 1]
-
-        gate_phys_input = torch.cat([h_profile, cos_SZA, sin_doy, cos_doy], dim=-1)  # [B, 67]
-        dp    = self.gate_phys_net(gate_phys_input)                # [B, 6]
-        w     = self.w_prior     + dp[:, :3]                       # [B, 3]
-        sigma = torch.exp(self.log_sigma_prior + dp[:, 3:])        # [B, 3] > 0
-
-        delta = ((alt_km - hmF2_det) / self.h_scale).unsqueeze(-1) # [B, 1]
-        gauss = torch.exp(-((delta - self.centers) / sigma) ** 2)  # [B, 3]
-        gate_phys = torch.sigmoid(
-            (gauss * w).sum(dim=-1, keepdim=True))                 # [B, 1]
-
-        return gate_data * gate_phys, gate_data, gate_phys
+        if factor_scales is None:
+            singular_values = torch.linalg.svdvals(X)
+        else:
+            singular_values = torch.cat([
+                math.sqrt(max(members - 1, 1)) * torch.sort(
+                    factor_scales, dim=-1, descending=True).values,
+                X.new_zeros(batch, 1),
+            ], dim=-1)
+        singular_energy = singular_values.square()
+        singular_probability = singular_energy / singular_energy.sum(
+            dim=-1, keepdim=True).clamp_min(1e-12)
+        effective_rank = torch.exp(-torch.sum(
+            singular_probability * torch.log(
+                singular_probability.clamp_min(1e-12)), dim=-1))
+        positive_singular = singular_values[:, :max(members - 1, 1)]
+        anomaly_condition = (
+            positive_singular[:, 0]
+            / positive_singular[:, -1].clamp_min(1e-12))
+        if factor_scales is None:
+            scale_saturation = X.new_zeros(batch)
+        else:
+            lower = self.scale_init / math.sqrt(self.scale_condition_max)
+            upper = self.scale_init * math.sqrt(self.scale_condition_max)
+            scale_saturation = (
+                (factor_scales <= lower * 1.01)
+                | (factor_scales >= upper * 0.99)
+            ).to(X.dtype).mean(dim=-1)
+        return {
+            'z_analysis': z_analysis,
+            'latent_increment': latent_increment,
+            'latent_anomalies': X,
+            'analysis_anomalies': analysis_anomalies,
+            'transform': transform,
+            'weights_FY': weights_fy,
+            'weights_COSMIC': weights_cosmic,
+            'innovation_FY': fy_terms[2],
+            'innovation_COSMIC': cosmic_terms[2],
+            'obs_anomalies_FY': fy_terms[3],
+            'obs_anomalies_COSMIC': cosmic_terms[3],
+            'precision_FY': fy_terms[4],
+            'precision_COSMIC': cosmic_terms[4],
+            'representativeness_FY': fy_obs.get(
+                'representativeness_weight',
+                torch.ones_like(fy_obs['rho_squared'])),
+            'representativeness_COSMIC': cosmic_obs.get(
+                'representativeness_weight',
+                torch.ones_like(cosmic_obs['rho_squared'])),
+            'ensemble_covariance_FY': fy_terms[0],
+            'ensemble_covariance_COSMIC': cosmic_terms[0],
+            'ensemble_rhs_FY': fy_terms[1],
+            'ensemble_rhs_COSMIC': cosmic_terms[1],
+            'gain_FY': gain[0],
+            'gain_COSMIC': gain[1],
+            'cross_covariance_FY': cross_covariance[0],
+            'cross_covariance_COSMIC': cross_covariance[1],
+            'delta_FY': delta_fy,
+            'delta_COSMIC': delta_cosmic,
+            'query_anomalies': query_anomalies,
+            'system': system,
+            'inflation': inflation,
+            'factor_scales': factor_scales,
+            'anomaly_singular_values': singular_values,
+            'anomaly_effective_rank': effective_rank,
+            'anomaly_condition': anomaly_condition,
+            'scale_boundary_saturation': scale_saturation,
+        }
 
 
 # ======================== SpectralSWBranch ========================
@@ -363,56 +545,6 @@ class SpectralSWBranch(nn.Module):
         return (weights * Z_f).sum(dim=1)                     # [B, d]
 
 
-# ======================== FYObsEncoder ========================
-
-class FYObsEncoder(nn.Module):
-    """Encode K local 10-D profile samples; return zero when unobserved."""
-    def __init__(self, feat_dim: int = 10, d_model: int = 64,
-                 n_heads: int = 4):
-        super().__init__()
-        self.d_model = d_model
-        self.input_proj = nn.Linear(feat_dim, d_model)
-        self.attn = nn.MultiheadAttention(
-            embed_dim=d_model, num_heads=n_heads, batch_first=True)
-        self.query = nn.Parameter(torch.zeros(1, 1, d_model))
-        self.norm  = nn.LayerNorm(d_model)
-        # 零初始化：训练初期 h_FY ≈ 0 → ETKF update ≈ 0 → IRI baseline 起步
-        nn.init.zeros_(self.input_proj.weight)
-        nn.init.zeros_(self.input_proj.bias)
-
-    def forward(self, neighbors_feats, has_obs):
-        """
-        Args:
-            neighbors_feats: [B, K, 10]
-            has_obs:         [B] float32, 1.0 if has FY neighbors else 0.0
-        Returns:
-            h_FY: [B, d_model], zeros where has_obs=0
-        """
-        B, K, _ = neighbors_feats.shape
-        # 检测有效 FY 样本（has_obs>0）
-        valid_mask = (has_obs > 0.5)   # [B] bool
-        if not valid_mask.any():
-            return torch.zeros(B, self.d_model,
-                               device=neighbors_feats.device,
-                               dtype=neighbors_feats.dtype)
-
-        # 仅对有效样本计算注意力（节省计算）
-        valid_idx = valid_mask.nonzero(as_tuple=True)[0]  # [V]
-        nb_valid  = neighbors_feats[valid_idx]             # [V, K, feat_dim]
-
-        keys = F.silu(self.input_proj(nb_valid))          # [V, K, d]
-        q    = self.query.expand(len(valid_idx), -1, -1)  # [V, 1, d]
-        out, _ = self.attn(q, keys, keys)                  # [V, 1, d]
-        h_valid = self.norm(out.squeeze(1))               # [V, d]
-
-        # 写回结果，has_obs=0 的位置保持 0
-        h_FY = torch.zeros(B, self.d_model,
-                           device=neighbors_feats.device,
-                           dtype=neighbors_feats.dtype)
-        h_FY[valid_idx] = h_valid
-        return h_FY
-
-
 # ======================== 主模型 ========================
 
 class FSIA_INR_Model(nn.Module):
@@ -426,10 +558,13 @@ class FSIA_INR_Model(nn.Module):
 
         basis_dim       = config.get('basis_dim', 64)
         sw_out_dim      = config.get('sw_out_dim', 64)
+        self.sw_out_dim = int(sw_out_dim)
         sw_hidden_dim   = config.get('sw_hidden_dim', 32)
         sw_lstm_layers  = config.get('sw_lstm_layers', 2)
         tau_kp_init     = config.get('tau_kp_init', 8.0)
         tau_solar_init  = config.get('tau_solar_init', 72.0)
+        if int(basis_dim) < 1:
+            raise ValueError('basis_dim must be positive')
 
         # IRI proxy 末层隐层维度（与代理网络架构匹配：[4,128,128,128,128,1]）
         iri_hidden_dim = 128
@@ -445,12 +580,6 @@ class FSIA_INR_Model(nn.Module):
             nn.SiLU(),
             nn.Linear(128, basis_dim),
         )
-        # The weight is a frozen run65 checkpoint key; the input is always zero.
-        self.proj_frame_offset = nn.Linear(1, basis_dim)
-        self.proj_frame_offset.weight.requires_grad_(False)
-        # IRI 结构重建头：监督 h_iri_aligned 保留 IRI 场信息
-        self.iri_recon_head = nn.Linear(basis_dim, 1)
-
         # ==================== [B] 双尺度 SW 编码器（含多窗口统计）====================
         self.sw_encoder = DualScaleSWEncoder(
             seq_len=self.seq_len,
@@ -476,83 +605,103 @@ class FSIA_INR_Model(nn.Module):
             nn.init.zeros_(self.sw_gate[-1].weight)
             nn.init.constant_(self.sw_gate[-1].bias, sw_gate_bias_init)
 
-        # ==================== [C] FYObsEncoder（run61 核心：替代 h_spatial）====================
-        # FY 邻域观测 → h_FY [B, basis_dim]
-        # 无 FY 覆盖时 h_FY=0 → ETKF innovation=0 → update=0 → IRI baseline
-        self.fy_obs_encoder = FYObsEncoder(
-            feat_dim=10,
-            d_model=basis_dim,
-            n_heads=config.get('fy_enc_heads', 4),
-        )
-
-        # ==================== [C+] COSMICObsEncoder（run64：第三数据源）====================
-        self.cosmic_obs_encoder = FYObsEncoder(
-            feat_dim=10,
-            d_model=basis_dim,
-            n_heads=config.get('fy_enc_heads', 4),
-        )
-
-        # ==================== [G] NeuralETKFLayer（run64：COSMIC 替代 vert 通道）====================
         enkf_n_members   = int(config.get('enkf_n_members', 8))
         enkf_pert_hidden = int(config.get('enkf_pert_hidden', 64))
-        enkf_n_rank_h    = int(config.get('enkf_n_rank_h', 8))
+        self.analysis_state_semantics = config.get(
+            'analysis_state_semantics', 'legacy_feature_increment')
+        if self.analysis_state_semantics not in (
+                'legacy_feature_increment', 'query_local_increment_coefficients'):
+            raise ValueError(
+                'analysis_state_semantics must be legacy_feature_increment or '
+                'query_local_increment_coefficients')
+        self.context_semantics = config.get(
+            'context_semantics', 'query_conditioning')
+        self.mode_basis_semantics = config.get(
+            'mode_basis_semantics', 'learned_density_basis')
+        self.physical_mode_dictionary = config.get(
+            'physical_mode_dictionary', 'm2r_residual_legendre')
+        self.allow_failed_query_local_shadow = bool(
+            config.get('allow_failed_query_local_shadow', False))
+        self.uses_physical_modes = (
+            self.analysis_state_semantics == 'query_local_increment_coefficients')
+        if self.uses_physical_modes:
+            if enkf_n_members != 8:
+                raise ValueError('M2-R physical coefficient state requires N8')
+            if self.context_semantics != 'endpoint_conditioning_only':
+                raise ValueError(
+                    'M2-R context must use endpoint_conditioning_only semantics')
+            if self.mode_basis_semantics != 'reference_whitened_physical_modes':
+                raise ValueError(
+                    'M2-R requires reference_whitened_physical_modes')
+            if self.physical_mode_dictionary not in (
+                    'm2r_residual_legendre', 'query_hmf2_legendre',
+                    'endpoint_hmf2_legendre', 'background_adaptive_fixed'):
+                raise ValueError('unknown physical_mode_dictionary')
+            if (self.physical_mode_dictionary != 'm2r_residual_legendre'
+                    and not self.allow_failed_query_local_shadow):
+                raise ValueError(
+                    'V0/V1/V2 query-local dictionaries failed RSR-3 and are '
+                    'available only to the independent audit shadow')
+        self.density_basis_semantics = config.get(
+            'density_basis_semantics', 'query_conditioned')
+        if self.density_basis_semantics not in (
+                'query_conditioned', 'coordinate_local_symmetric',
+                'endpoint_context_symmetric'):
+            raise ValueError(
+                'density_basis_semantics must be query_conditioned, '
+                'coordinate_local_symmetric, or endpoint_context_symmetric')
         self.kalman_layer = NeuralETKFLayer(
-            d_model=basis_dim,
-            b_net_in=sw_out_dim + 5,
-            r_fy_net_in=sw_out_dim + 6,
+            d_model=(enkf_n_members - 1 if self.uses_physical_modes else basis_dim),
+            b_net_in=(basis_dim + sw_out_dim + 5
+                      if self.uses_physical_modes else sw_out_dim + 5),
             n_members=enkf_n_members,
             pert_hidden=enkf_pert_hidden,
-            n_rank_h=enkf_n_rank_h,
+            r_fy=config.get('r_fy_init', 0.04),
+            r_cosmic=config.get('r_cosmic_init', 0.04),
+            anomaly_parameterization=config.get(
+                'enkf_anomaly_parameterization', 'legacy_independent'),
+            scale_init=config.get('enkf_scale_init', 1.1),
+            scale_condition_max=config.get(
+                'enkf_scale_condition_max', 3.0),
+            coordinate_local_symmetric=(self.density_basis_semantics in (
+                'coordinate_local_symmetric',
+                'endpoint_context_symmetric')) and not self.uses_physical_modes,
+            coefficient_space=self.uses_physical_modes,
         )
         self.enkf_n_members = enkf_n_members
+        self.background_state_dim = basis_dim
 
-        # ==================== [H] FusionDecoder (run52: FiLM-Conditioned) ====================
-        # run52 改动：regime 信号改用 FiLM 乘法路径调制 h_decode，而非 concat 加法路径。
-        # 动机：run51 中 regime 4D / (64+6)D = 8.6%，被 h_decode 主导无法翻转修正符号；
-        #       FiLM 通过 γ⊙h_decode + β 乘法控制每个通道，使 cos_SZA/ne_bkg_n 可有效
-        #       压制或翻转夜间/IRI-高估场景的正向修正，修复密度图左上角拖尾。
-        #
-        # regime_film_net: (ne_bkg_n[1], cos_SZA[1], kp_eff[1], f107_eff[1]) = 4D
-        #                  → Linear(4→32) → SiLU → Linear(32→128) → γ[64], β[64]
-        # FiLM 残差形式: h_decode_mod = (1 + γ) ⊙ h_decode + β
-        #   零初始化输出层 → γ=0, β=0 → h_decode_mod = h_decode（起步退化保证）
-        # fusion_decoder: cat(h_decode_mod[64], alt_n[1], delta_alt_n[1]) = 66D → 64 → 1
-        #   零初始化输出层 → Ne_delta_raw=0 → Ne_fused=Ne_bkg（IRI baseline 起步）
-        self.regime_film_net = nn.Sequential(
-            nn.Linear(4, 32),
-            nn.SiLU(),
-            nn.Linear(32, basis_dim * 2),   # → γ[64] ‖ β[64]
-        )
-        self.fusion_decoder = nn.Sequential(
-            nn.Linear(basis_dim + 2, 64),   # 66D: h_decode_mod[64] + alt_n + delta_alt_n
+        self.background_residual_cap = float(
+            config.get('background_residual_cap', 0.5))
+        self.fy_dlon_window = float(config.get('fy_nb_dlon', 15.0))
+        self.cosmic_dlon_window = float(
+            config.get('cosmic_nb_dlon', 15.0))
+        self.fy_dlat_window = float(config.get('fy_nb_dlat', 5.0))
+        self.fy_dt_window = float(config.get('fy_nb_dt', 1.5))
+        self.cosmic_dlat_window = float(config.get('cosmic_nb_dlat', 5.0))
+        self.cosmic_dt_window = float(config.get('cosmic_nb_dt', 1.5))
+        self.background_decoder = nn.Sequential(
+            nn.Linear(basis_dim + sw_out_dim + 2, 64),
             nn.SiLU(),
             nn.Linear(64, 1),
         )
 
-        # ==================== [H+] Channel-wise Residual Fusion (CRF) ====================
-        # run64: proj_pre 输入 192D（f_iri[64]+h_FY[64]+h_COSMIC[64]）
-        self.proj_pre  = nn.Linear(basis_dim * 3, basis_dim)
-        self.crf_alpha = nn.Parameter(torch.full((basis_dim,), 5.0))
-
-        # ==================== 动态同化增益门控 (MultiScaleAdaptiveGate) ====================
-        gate_h_scale    = config.get('gate_h_scale', 100.0)
-        gate_regime_dim = int(config.get('gate_regime_dim', 6))   # run51: 4→6 (+cos_SZA, lat_n)
-        self.gate_regime_dim = gate_regime_dim
-        self.assim_gate = MultiScaleAdaptiveGate(
-            in_dim=basis_dim + sw_out_dim + 2 + gate_regime_dim,   # 128 + 2 + 6 = 136
-            basis_dim=basis_dim,
-            h_scale=gate_h_scale,
-        )
-
-        # ==================== [F] 不确定性估计头 ====================
-        self.uncertainty_head = nn.Sequential(
-            nn.Linear(basis_dim + sw_out_dim, 64),
-            nn.SiLU(),
-            nn.Linear(64, 1),
-        )
+        # Shared physical observation operator.  It is nonlinear in continuous
+        # coordinates/context, but affine in the low-dimensional ETKF state.
+        basis_in_dim = basis_dim + sw_out_dim + 12
+        if not self.uses_physical_modes:
+            self.density_basis_decoder = nn.Sequential(
+                nn.Linear(basis_in_dim, 64),
+                nn.SiLU(),
+                nn.Linear(64, basis_dim),
+            )
+        else:
+            self.mode_residual_cap = float(config.get('mode_residual_cap', 0.25))
+            mode_in_dim = 2 * (basis_dim + sw_out_dim) + 12
+            self.mode_residual = nn.Sequential(
+                nn.Linear(mode_in_dim, 64), nn.SiLU(), nn.Linear(64, 7))
 
         self._initialize_weights()
-        self._initialize_cosmic_bootstrap()
 
     # ------------------------------------------------------------------ #
 
@@ -566,411 +715,703 @@ class FSIA_INR_Model(nn.Module):
             ne_bkg, h_iri = self.iri_proxy(coords_iri, return_features=True)
         return ne_bkg, h_iri   # [B,1], [B,128]
 
-    def forward(self, coords, sw_seq, precomputed_h_sw=None,
-                iri_peak=None, neighbors_feats=None, has_obs=None,
-                neighbors_feats_cosmic=None, has_obs_cosmic=None):
-        """
-        前向传播（run61：FYObsEncoder 替代 DualFreqSpatialNet）
-
-        增量范式: Ne_fused = Ne_bkg + tanh(FusionDecoder(h_decode_mod, alt_n, δh_n)) × gate
-
-        Args:
-            coords:           [Batch, 4] 或 [Batch, 5] — (Lat_geo, Lon_geo, Alt, Time[, Lat_aacgm])
-            sw_seq:           [Batch, Seq, 2] — (Kp_norm, F10.7_norm)
-            precomputed_h_sw: [Batch, sw_out_dim] 可选优化
-            iri_peak:         [Batch, 2] 可选 — [hmF2_IRI_km, NmF2_IRI_log10]，None → fallback (300, 11.5)
-            neighbors_feats:  [Batch, K, 9] FY 邻域特征（可选）
-            has_obs:          [Batch] float32，1.0 若有 FY 邻居（可选）
-
-        Returns:
-            Ne_fused:      [Batch, 1] — 最终预测
-            log_var:       [Batch, 1] — 不确定性对数方差
-            ne_placeholder:[Batch, 1] — 零占位（向后兼容第3位返回）
-            Ne_delta:      [Batch, 1] — FusionDecoder 增量
-            extras:        dict
-        """
-        lat_geo = coords[:, 0]
-        lon_geo = coords[:, 1]
-        alt     = coords[:, 2]
-        time    = coords[:, 3]
-        B = coords.shape[0]
-
-        # ---- 1. 坐标归一化 ----
-        lat_n = lat_geo / 90.0
-        alt_n = 2.0 * (alt - self.alt_min) / (self.alt_max - self.alt_min) - 1.0
-
-        # ---- 2. 周期编码（太阳天顶角/季节）----
-        cos_SZA, sin_doy, cos_doy = _compute_solar_features(lat_geo, lon_geo, time)
-
-        # ---- 3. IGRF 偶极子倾角特征 ----
-        sin_I, _ = _compute_dip_features(lat_geo, lon_geo)
-
-        # ---- 4. SW 编码 ----
-        if precomputed_h_sw is not None:
-            h_sw_time = precomputed_h_sw
-            kp_eff    = sw_seq[:, -1, 0]
-            f107_eff  = sw_seq[:, -1, 1]
-        else:
-            h_sw_time, kp_eff, f107_eff = self.sw_encoder(sw_seq)
-
-        # ---- 4b. SW 频域分支（run40）----
-        if self.use_sw_freq:
-            h_sw_freq = self.sw_freq_branch(sw_seq)                          # [B, 64]
-            sw_gate_in = torch.cat([
-                h_sw_time,
-                alt_n.unsqueeze(-1),
-                sin_I.abs().unsqueeze(-1),
-                cos_SZA.unsqueeze(-1),
-                sin_doy.unsqueeze(-1),
-                cos_doy.unsqueeze(-1),
-            ], dim=-1)                                                        # [B, 69]
-            sw_g = torch.sigmoid(self.sw_gate(sw_gate_in))                   # [B, 64]
-            h_sw = sw_g * h_sw_freq + (1.0 - sw_g) * h_sw_time               # [B, 64]
-        else:
-            h_sw_freq = None
-            sw_g      = None
-            h_sw      = h_sw_time
-
-        # ---- IRI peak structural reference (direct passthrough) ----
-        if iri_peak is not None:
-            _iri_peak = iri_peak
-        else:
-            _iri_peak = torch.stack([
-                torch.full((B,), 300.0, device=coords.device),
-                torch.full((B,), 11.5,  device=coords.device),
+    def _density_basis(self, query_coords, target_coords, target_background,
+                       z_background, h_sw, target_z_background=None,
+                       target_h_sw=None):
+        """Evaluate the shared continuous basis at physical target coordinates."""
+        batch, count, _ = target_coords.shape
+        query = query_coords[:, None, :4]
+        lat = target_coords[..., 0]
+        lon = target_coords[..., 1]
+        alt = target_coords[..., 2]
+        time = target_coords[..., 3]
+        cos_sza, sin_doy, cos_doy = _compute_solar_features(
+            lat.reshape(-1), lon.reshape(-1), time.reshape(-1))
+        cos_sza = cos_sza.reshape(batch, count)
+        sin_doy = sin_doy.reshape(batch, count)
+        cos_doy = cos_doy.reshape(batch, count)
+        local_descriptors = [
+            (target_background - 10.5) / 1.5,
+            lat / 90.0,
+            torch.sin(torch.deg2rad(lon)),
+            torch.cos(torch.deg2rad(lon)),
+            2.0 * (alt - self.alt_min) / (self.alt_max - self.alt_min) - 1.0,
+            cos_sza,
+            sin_doy,
+            cos_doy,
+        ]
+        if self.density_basis_semantics in (
+                'coordinate_local_symmetric',
+                'endpoint_context_symmetric'):
+            descriptors = torch.stack([
+                *local_descriptors,
+                *[torch.zeros_like(lat) for _ in range(4)],
             ], dim=-1)
-        hmF2_IRI_km = _iri_peak[:, 0]                                    # [B]
-        NmF2_IRI_n  = (_iri_peak[:, 1] - 11.0) / 2.0                    # [B] 归一化
-
-        # No trainable peak head: keep the IRI hmF2/NmF2 references unchanged.
-        hmF2_fused = hmF2_IRI_km.clone()
-        NmF2_fused = _iri_peak[:, 1].clone()
-        peak_params = {'hmF2': hmF2_fused, 'NmF2': NmF2_fused}
-
-        delta_alt_iri = (alt - hmF2_IRI_km.detach()) / 190.0             # [B]
-
-        # ---- Step A: IRI proxy（完全冻结，no_grad 提取 3D 结构隐状态）----
-        ne_bkg, h_iri = self.get_background_with_features(lat_geo, lon_geo, alt, time)
-
-        # ---- Step A2: IRI 峰对齐特征 ----
-        h_iri_aligned = self.iri_align_net(torch.cat([
-            h_iri,
-            delta_alt_iri.unsqueeze(-1),
-            NmF2_IRI_n.unsqueeze(-1),
-        ], dim=-1))                                                    # [B, 64]
-
-        # ---- Step C: 结构坐标（run61: hmF2_fused=hmF2_IRI → frame_offset=0 恒成立）----
-        hmF2_det    = hmF2_fused.detach()                             # [B]
-        delta_alt_n = (alt - hmF2_det) / 190.0                        # [B]
-        # hmF2 is passed through from IRI, so frame_offset is identically zero.
-        # Use the learned bias directly and skip the dead matrix multiply.
-        f_iri = h_iri_aligned + self.proj_frame_offset.bias            # [B, 64]
-
-        # ---- Step 5b: FY 邻域观测编码（run61 核心）----
-        if neighbors_feats is not None:
-            h_FY = self.fy_obs_encoder(neighbors_feats, has_obs)      # [B, basis_dim]
+            if self.density_basis_semantics == 'endpoint_context_symmetric':
+                if target_z_background is None or target_h_sw is None:
+                    raise ValueError(
+                        'endpoint-context basis requires target endpoint context')
+                context = torch.cat(
+                    [target_z_background, target_h_sw], dim=-1)
+            else:
+                context = target_coords.new_zeros(
+                    batch, count, z_background.shape[-1] + h_sw.shape[-1])
         else:
-            h_FY = torch.zeros(B, self.kalman_layer.d_model,
-                               device=coords.device, dtype=h_sw.dtype)
-            if has_obs is None:
-                has_obs = torch.zeros(B, device=coords.device, dtype=h_sw.dtype)
+            dlon = torch.remainder(
+                lon - query[..., 1] + 180.0, 360.0) - 180.0
+            descriptors = torch.stack([
+                *local_descriptors,
+                (lat - query[..., 0]) / 5.0,
+                dlon / 15.0,
+                (time - query[..., 3]) / 1.5,
+                (alt - query[..., 2]) / 190.0,
+            ], dim=-1)
+            context = torch.cat([z_background, h_sw], dim=-1)
+            context = context[:, None, :].expand(-1, count, -1)
+        return self.density_basis_decoder(
+            torch.cat([context, descriptors], dim=-1)) / math.sqrt(
+                self.kalman_layer.d_model)
 
-        # ---- Step 5c: COSMIC 邻域观测编码（run64）----
-        if neighbors_feats_cosmic is not None:
-            h_COSMIC = self.cosmic_obs_encoder(neighbors_feats_cosmic, has_obs_cosmic)
+    def encode_background(self, coords, sw_seq, precomputed_h_sw=None,
+                          iri_peak=None):
+        """Single source of truth for the frozen/trained Background field."""
+        lat, lon, alt, time = (coords[:, index] for index in range(4))
+        batch = coords.shape[0]
+        lat_n = lat / 90.0
+        alt_n = 2.0 * (alt - self.alt_min) / (self.alt_max - self.alt_min) - 1.0
+        cos_sza, sin_doy, cos_doy = _compute_solar_features(lat, lon, time)
+        sin_i, _ = _compute_dip_features(lat, lon)
+        if precomputed_h_sw is None:
+            h_sw_time, kp_eff, f107_eff = self.sw_encoder(sw_seq)
         else:
-            h_COSMIC = torch.zeros(B, self.kalman_layer.d_model,
-                                   device=coords.device, dtype=h_sw.dtype)
-            if has_obs_cosmic is None:
-                has_obs_cosmic = torch.zeros(B, device=coords.device, dtype=h_sw.dtype)
+            h_sw_time = precomputed_h_sw
+            kp_eff, f107_eff = sw_seq[:, -1, 0], sw_seq[:, -1, 1]
+        if self.use_sw_freq:
+            h_sw_freq = self.sw_freq_branch(sw_seq)
+            sw_gate_in = torch.cat([
+                h_sw_time, alt_n.unsqueeze(-1), sin_i.abs().unsqueeze(-1),
+                cos_sza.unsqueeze(-1), sin_doy.unsqueeze(-1),
+                cos_doy.unsqueeze(-1),
+            ], dim=-1)
+            sw_gate = torch.sigmoid(self.sw_gate(sw_gate_in))
+            h_sw = sw_gate * h_sw_freq + (1.0 - sw_gate) * h_sw_time
+        else:
+            h_sw_freq, sw_gate, h_sw = None, None, h_sw_time
+        if iri_peak is None:
+            iri_peak = torch.stack([
+                torch.full((batch,), 300.0, device=coords.device),
+                torch.full((batch,), 11.5, device=coords.device),
+            ], dim=-1)
+        hmf2, nmf2 = iri_peak[:, 0], iri_peak[:, 1]
+        delta_alt = (alt - hmf2.detach()) / 190.0
+        ne_iri, h_iri = self.get_background_with_features(lat, lon, alt, time)
+        z_background = self.iri_align_net(torch.cat([
+            h_iri, delta_alt.unsqueeze(-1),
+            ((nmf2 - 11.0) / 2.0).unsqueeze(-1),
+        ], dim=-1))
+        background_residual = self.background_residual_cap * torch.tanh(
+            self.background_decoder(torch.cat([
+                z_background, h_sw, alt_n.unsqueeze(-1),
+                delta_alt.unsqueeze(-1),
+            ], dim=-1)))
+        return {
+            'ne_bkg': ne_iri + background_residual,
+            'ne_iri': ne_iri,
+            'background_residual': background_residual,
+            'z_background': z_background,
+            'h_sw': h_sw,
+            'h_sw_freq': h_sw_freq,
+            'sw_gate': sw_gate,
+            'lat_n': lat_n,
+            'alt_n': alt_n,
+            'cos_sza': cos_sza,
+            'sin_doy': sin_doy,
+            'cos_doy': cos_doy,
+            'sin_i': sin_i,
+            'kp_eff': kp_eff,
+            'f107_eff': f107_eff,
+            'iri_peak': iri_peak,
+            'delta_alt': delta_alt,
+        }
 
-        # ---- 9. NeuralETKFLayer: 神经化集合卡尔曼同化（run64：FY + COSMIC 双源）----
-        (h_analysis, K_FY, K_COSMIC,
-         b_val, r_fy, innov_FY, innov_COSMIC) = self.kalman_layer(
-            f_iri, h_FY, h_sw,
-            lat_n, cos_SZA, sin_doy, cos_doy, sin_I,
-            alt_n, delta_alt_n,
-            has_obs=has_obs,
-            h_obs_COSMIC=h_COSMIC,
-            has_obs_cosmic=has_obs_cosmic,
-        )
+    def encode_endpoint_context(self, coords, sw_seq, iri_peak=None):
+        """Build one source-neutral physical context for query/obs/reference."""
+        center = self.encode_background(coords, sw_seq, iri_peak=iri_peak)
+        step = 10.0
 
-        # ---- CRF：三路 token（f_iri + h_FY + h_COSMIC）→ h_pre（run64: 192D）----
-        h_pre     = self.proj_pre(torch.cat([f_iri, h_FY, h_COSMIC], dim=-1))  # [B, 64]
-        crf_alpha = torch.sigmoid(self.crf_alpha)                      # [64] ∈(0,1)
-        h_decode  = crf_alpha * h_analysis + (1.0 - crf_alpha) * h_pre # [B, 64]
+        def at_offset(offset):
+            shifted = coords.clone()
+            shifted[:, 2] = (coords[:, 2] + offset).clamp(
+                self.alt_min, self.alt_max)
+            return self.encode_background(
+                shifted, sw_seq, iri_peak=iri_peak)['ne_bkg'].flatten()
 
-        # ---- FiLM-Conditioned Fusion Decoder（run52）----
-        ne_bkg_n = ne_bkg.detach() / 12.0 - 1.0
-        film_in  = torch.stack([
-            ne_bkg_n.squeeze(-1),
-            cos_SZA,
-            kp_eff,
-            f107_eff,
-        ], dim=-1)                                                      # [B, 4]
-        film_out = self.regime_film_net(film_in)                       # [B, 128]
-        gamma, beta = film_out[:, :64], film_out[:, 64:]
-        h_decode_mod = (1.0 + gamma) * h_decode + beta                 # [B, 64]
+        minus, plus = at_offset(-step), at_offset(step)
+        minus2, plus2 = at_offset(-2 * step), at_offset(2 * step)
+        value = center['ne_bkg'].flatten()
+        lower = coords[:, 2] < self.alt_min + step
+        upper = coords[:, 2] > self.alt_max - step
+        derivative = (plus - minus) / (2 * step)
+        derivative = torch.where(lower, (plus - value) / step, derivative)
+        derivative = torch.where(upper, (value - minus) / step, derivative)
+        second = (plus - 2 * value + minus) / step ** 2
+        second = torch.where(
+            lower, (value - 2 * plus + plus2) / step ** 2, second)
+        second = torch.where(
+            upper, (value - 2 * minus + minus2) / step ** 2, second)
+        sin_lst, cos_lst = _compute_local_time_features(
+            coords[:, 1], coords[:, 3])
+        return {
+            **center,
+            'basis_hmf2': center['iri_peak'][:, 0],
+            'basis_nmf2': center['iri_peak'][:, 1],
+            'basis_delta_alt': center['delta_alt'],
+            'basis_cos_sza': center['cos_sza'],
+            'basis_sin_lst': sin_lst,
+            'basis_cos_lst': cos_lst,
+            'basis_background_dh': derivative.detach(),
+            'basis_background_d2h': second.detach(),
+        }
 
-        fusion_in    = torch.cat([
-            h_decode_mod,
-            alt_n.unsqueeze(-1),
-            delta_alt_n.unsqueeze(-1),
-        ], dim=-1)                                                      # [B, 66]
-        Ne_delta_raw = self.fusion_decoder(fusion_in)
+    def _physical_mode_raw(self, unit_center, unit_hmf2, target_coords,
+                           query_z=None, query_h_sw=None, target_z=None,
+                           target_h_sw=None, target_background=None,
+                           target_endpoint=None):
+        """Seven fixed continuous log-density increment modes for M2-R R1."""
+        lat, lon, alt, time = (target_coords[..., index] for index in range(4))
+        dlat = (lat - unit_center[:, None, 0]) / self.fy_dlat_window
+        dlon = torch.remainder(
+            lon - unit_center[:, None, 1] + 180.0, 360.0) - 180.0
+        dlon = dlon / self.fy_dlon_window
+        dt = (time - unit_center[:, None, 3]) / self.fy_dt_window
+        height = (alt - unit_hmf2[:, None]) / 190.0
+        if self.physical_mode_dictionary in (
+                'endpoint_hmf2_legendre', 'background_adaptive_fixed'):
+            if target_endpoint is None:
+                raise ValueError(
+                    'endpoint physical modes require explicit endpoint context')
+            height = target_endpoint['basis_delta_alt']
+        cos_sza, _, _ = _compute_solar_features(
+            lat.reshape(-1), lon.reshape(-1), time.reshape(-1))
+        cos_sza = cos_sza.reshape_as(lat)
+        center_sza, _, _ = _compute_solar_features(
+            unit_center[:, 0], unit_center[:, 1], unit_center[:, 3])
+        center_sin_lst, center_cos_lst = _compute_local_time_features(
+            unit_center[:, 1], unit_center[:, 3])
+        time_mode = (torch.sin(0.5 * math.pi * dt)
+                     + 0.25 * (cos_sza - center_sza[:, None]))
+        if target_endpoint is not None:
+            lst_delta = (
+                target_endpoint['basis_sin_lst'] * center_cos_lst[:, None]
+                - target_endpoint['basis_cos_lst'] * center_sin_lst[:, None])
+            time_mode = time_mode + 0.25 * lst_delta
+        if self.physical_mode_dictionary == 'background_adaptive_fixed':
+            derivative = 190.0 * target_endpoint['basis_background_dh']
+            u = ((alt - 180.0) / 120.0).clamp(0.0, 1.0)
+            low = 1.0 - 3.0 * u.square() + 2.0 * u.pow(3)
+            fixed = torch.stack([
+                torch.ones_like(height), -derivative, height * derivative,
+                low, torch.sin(0.5 * math.pi * dlat),
+                torch.sin(0.5 * math.pi * dlon),
+                time_mode,
+            ], dim=-1)
+        else:
+            fixed = torch.stack([
+                torch.ones_like(height),
+                height,
+                0.5 * (3.0 * height.square() - 1.0),
+                0.5 * (5.0 * height.pow(3) - 3.0 * height),
+                torch.sin(0.5 * math.pi * dlat),
+                torch.sin(0.5 * math.pi * dlon),
+                time_mode,
+            ], dim=-1)
+        if (query_z is None or
+                self.physical_mode_dictionary != 'm2r_residual_legendre'):
+            return fixed
+        count = target_coords.shape[1]
+        if target_z is None:
+            target_z = query_z[:, None, :].expand(-1, count, -1)
+        if target_h_sw is None:
+            target_h_sw = query_h_sw[:, None, :].expand(-1, count, -1)
+        if target_background is None:
+            target_background = target_coords.new_zeros(target_coords.shape[:2])
+        query_context = torch.cat([query_z, query_h_sw], dim=-1)
+        query_context = query_context[:, None, :].expand(-1, count, -1)
+        descriptors = torch.stack([
+            (target_background - 10.5) / 1.5,
+            lat / 90.0,
+            torch.sin(torch.deg2rad(lon)),
+            torch.cos(torch.deg2rad(lon)),
+            2.0 * (alt - self.alt_min) / (self.alt_max - self.alt_min) - 1.0,
+            cos_sza,
+            torch.sin(torch.deg2rad(15.0 * torch.remainder(time, 24.0))),
+            torch.cos(torch.deg2rad(15.0 * torch.remainder(time, 24.0))),
+            dlat, dlon, dt, height,
+        ], dim=-1)
+        residual = self.mode_residual(torch.cat([
+            query_context, target_z, target_h_sw, descriptors], dim=-1))
+        return fixed + self.mode_residual_cap * torch.tanh(residual)
 
-        # ---- 不确定性估计 ----
-        unc_in  = torch.cat([h_analysis, h_sw], dim=-1)
-        log_var = torch.clamp(self.uncertainty_head(unc_in), -10.0, 10.0)
+    def _physical_reference_coords(self, unit_center):
+        """Deterministic quadrature coordinates for each query-local problem."""
+        dtype, device = unit_center.dtype, unit_center.device
+        axis = torch.tensor([-1.0, 0.0, 1.0], device=device, dtype=dtype)
+        alt = torch.linspace(
+            self.alt_min, self.alt_max, 5, device=device, dtype=dtype)
+        h, y, x, t = torch.meshgrid(alt, axis, axis, axis, indexing='ij')
+        offsets = torch.stack([y, x, h, t], dim=-1).reshape(-1, 4)
+        reference = unit_center[:, None, :4] + offsets[None] * unit_center.new_tensor([
+            self.fy_dlat_window, self.fy_dlon_window, 0.0,
+            self.fy_dt_window])
+        reference[..., 0].clamp_(-90.0, 90.0)
+        reference[..., 1] = torch.remainder(reference[..., 1] + 180.0, 360.0) - 180.0
+        reference[..., 2] = offsets[None, ..., 2]
+        return reference
 
-        # ---- Gate（数据驱动 × 物理先验）----
-        regime_desc = torch.stack([
-            alt_n,
-            sin_I.abs(),
-            kp_eff,
-            f107_eff,
-            cos_SZA,
-            lat_n,
-        ], dim=-1)                                                      # [B, 6]
+    def _physical_mode_transform(self, unit_center, unit_hmf2,
+                                 query_z=None, query_h_sw=None,
+                                 query_background=None, reference_z=None,
+                                 reference_h_sw=None,
+                                 reference_background=None,
+                                 reference_endpoint=None):
+        """Reference-grid Cholesky gauge; independent of observations."""
+        dtype, device = unit_center.dtype, unit_center.device
+        reference = self._physical_reference_coords(unit_center)
+        raw = self._physical_mode_raw(
+            unit_center, unit_hmf2, reference, query_z, query_h_sw,
+            reference_z, reference_h_sw,
+            (reference_background if reference_background is not None else
+             (query_background[:, None].expand(-1, reference.shape[1])
+              if query_background is not None else None)),
+            reference_endpoint)
+        gram = torch.einsum('uri,urj->uij', raw, raw) / raw.shape[1]
+        eigenvalues = torch.linalg.eigvalsh(gram)
+        chol = torch.linalg.cholesky(gram)
+        modes = torch.linalg.solve_triangular(
+            chol, raw.transpose(1, 2), upper=False).transpose(1, 2)
+        normalized_gram = torch.einsum(
+            'uri,urj->uij', modes, modes) / modes.shape[1]
+        correction = torch.linalg.cholesky(normalized_gram)
+        modes = torch.linalg.solve_triangular(
+            correction, modes.transpose(1, 2), upper=False).transpose(1, 2)
+        chol = torch.bmm(chol, correction)
+        normalized_gram = torch.einsum(
+            'uri,urj->uij', modes, modes) / modes.shape[1]
+        return modes, chol, {
+            'mode_reference_gram_error': (
+                normalized_gram - torch.eye(
+                    7, device=device, dtype=dtype)).abs().amax(dim=(1, 2)),
+            'raw_mode_gram_min_eigenvalue': eigenvalues[:, 0],
+            'raw_mode_gram_condition': (
+                eigenvalues[:, -1] / eigenvalues[:, 0].clamp_min(1e-12)),
+        }
 
-        # run61: gate_phys_net 接收 h_FY（替代原 h_spatial）
-        gate, gate_data, gate_phys = self.assim_gate(
-            h_analysis, h_sw, alt, hmF2_det, h_FY,
-            log_var_det=log_var.detach(),
-            ne_delta_raw_abs=Ne_delta_raw.detach().abs(),
-            cos_SZA=cos_SZA.unsqueeze(-1),
-            sin_doy=sin_doy.unsqueeze(-1),
-            cos_doy=cos_doy.unsqueeze(-1),
-            regime_desc=regime_desc,
-        )
-        Ne_delta = torch.tanh(Ne_delta_raw) * gate                     # [B, 1]
+    @staticmethod
+    def _apply_mode_transform(raw, chol):
+        return torch.linalg.solve_triangular(
+            chol, raw.transpose(1, 2), upper=False).transpose(1, 2)
 
-        # ---- 最终输出 ----
+    @staticmethod
+    def _spectrum(matrix):
+        singular = torch.linalg.svdvals(matrix)
+        if singular.shape[-1] == 0:
+            empty = matrix.new_zeros(matrix.shape[0])
+            return singular, empty, empty
+        energy = singular.square()
+        probability = energy / energy.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+        effective_rank = torch.exp(-torch.sum(
+            probability * torch.log(probability.clamp_min(1e-12)), dim=-1))
+        first_energy = probability[..., 0]
+        return singular, effective_rank, first_energy
+
+    def _physical_mode_forward(self, coords, background, observations_fy,
+                               observations_cosmic, reference_context=None):
+        """M2-R query-local coefficient ETKF over the existing M2-O neighbors."""
+        batch = len(coords)
+        center = coords[:, :4]
+        hmf2 = background['iri_peak'][:, 0]
+        endpoint_modes = self.physical_mode_dictionary in (
+            'endpoint_hmf2_legendre', 'background_adaptive_fixed')
+        if endpoint_modes and reference_context is None:
+            raise ValueError('physical reference endpoint context is required')
+        query_endpoint = {
+            key: value[:, None] for key, value in background.items()
+            if key.startswith('basis_') and value.ndim == 1}
+        reference_modes, chol, mode_diagnostics = self._physical_mode_transform(
+            center, hmf2, background['z_background'], background['h_sw'],
+            background['ne_bkg'].flatten(),
+            reference_z=(None if reference_context is None else
+                         reference_context['basis_z_background']),
+            reference_h_sw=(None if reference_context is None else
+                            reference_context['basis_h_sw']),
+            reference_background=(None if reference_context is None else
+                                  reference_context['background']),
+            reference_endpoint=reference_context)
+        query_modes = self._apply_mode_transform(
+            self._physical_mode_raw(
+                center, hmf2, coords[:, None, :4],
+                background['z_background'], background['h_sw'],
+                background['z_background'][:, None, :],
+                background['h_sw'][:, None, :], background['ne_bkg'],
+                query_endpoint if endpoint_modes else None),
+            chol).squeeze(1)
+
+        def prepare(observations):
+            if observations is None:
+                return ({
+                    'coords': coords.new_zeros(batch, 0, 4),
+                    'value': coords.new_zeros(batch, 0),
+                    'background': coords.new_zeros(batch, 0),
+                    'valid_mask': torch.zeros(
+                        batch, 0, device=coords.device, dtype=torch.bool),
+                    'rho_squared': coords.new_zeros(batch, 0),
+                }, coords.new_zeros(batch, 0, 7))
+            required = {
+                'coords', 'value', 'background', 'valid_mask', 'rho_squared',
+                'basis_z_background', 'basis_h_sw'}
+            if endpoint_modes:
+                required.update((
+                    'basis_hmf2', 'basis_nmf2', 'basis_delta_alt',
+                    'basis_cos_sza', 'basis_sin_lst', 'basis_cos_lst',
+                    'basis_background_dh', 'basis_background_d2h'))
+            missing = required.difference(observations)
+            if missing:
+                raise ValueError(
+                    f'M2-R observation payload missing fields: {sorted(missing)}')
+            valid = observations['valid_mask']
+            count = valid.shape[1]
+            prepared = dict(observations)
+            prepared['coords'] = torch.where(
+                valid.unsqueeze(-1), observations['coords'],
+                coords[:, None, :4].expand(-1, count, -1))
+            prepared['background'] = torch.where(
+                valid, observations['background'],
+                background['ne_bkg'].expand(-1, count))
+            prepared['value'] = torch.where(
+                valid, observations['value'], prepared['background'])
+            prepared['rho_squared'] = torch.where(
+                valid, observations['rho_squared'],
+                torch.ones_like(observations['rho_squared']))
+            if 'representativeness_weight' in observations:
+                prepared['representativeness_weight'] = torch.where(
+                    valid, observations['representativeness_weight'],
+                    torch.ones_like(observations['representativeness_weight']))
+            modes = self._apply_mode_transform(
+                self._physical_mode_raw(
+                    center, hmf2, prepared['coords'],
+                    background['z_background'], background['h_sw'],
+                    prepared['basis_z_background'], prepared['basis_h_sw'],
+                    prepared['background'],
+                    prepared if endpoint_modes else None), chol)
+            return prepared, modes.masked_fill(~valid.unsqueeze(-1), 0.0)
+
+        fy_obs, fy_modes = prepare(observations_fy)
+        cosmic_obs, cosmic_modes = prepare(observations_cosmic)
+        coefficient_background = coords.new_zeros(batch, 7)
+        etkf = self.kalman_layer(
+            coefficient_background,
+            torch.cat([background['z_background'], background['h_sw']], dim=-1),
+            query_modes,
+            {'FY': (fy_obs, fy_modes), 'COSMIC': (cosmic_obs, cosmic_modes)},
+            background['lat_n'], background['cos_sza'], background['sin_doy'],
+            background['cos_doy'], background['sin_i'])
+        ne_delta = (etkf['delta_FY'] + etkf['delta_COSMIC']).unsqueeze(-1)
+        ne_fused = background['ne_bkg'] + ne_delta
+        reference_anomalies = torch.einsum(
+            'brc,bnc->brn', reference_modes, etkf['latent_anomalies'])
+        spectra = {}
+        for name, matrix in (
+                ('mode_reference', reference_modes),
+                ('reference_anomalies', reference_anomalies),
+                ('FY_observation_anomalies', etkf['obs_anomalies_FY'] *
+                 etkf['precision_FY'].sqrt().unsqueeze(-1)),
+                ('COSMIC_observation_anomalies', etkf['obs_anomalies_COSMIC'] *
+                 etkf['precision_COSMIC'].sqrt().unsqueeze(-1)),
+                ('joint_observation_anomalies', torch.cat([
+                    etkf['obs_anomalies_FY'] *
+                    etkf['precision_FY'].sqrt().unsqueeze(-1),
+                    etkf['obs_anomalies_COSMIC'] *
+                    etkf['precision_COSMIC'].sqrt().unsqueeze(-1),
+                ], dim=1))):
+            if not torch.isfinite(matrix).all():
+                raise FloatingPointError(f'non-finite M2-R spectrum input: {name}')
+            singular, effective_rank, first_energy = self._spectrum(matrix)
+            spectra[f'{name}_singular_values'] = singular
+            spectra[f'{name}_effective_rank'] = effective_rank
+            spectra[f'{name}_first_energy_fraction'] = first_energy
+
+        extras = {
+            'ne_bkg': background['ne_bkg'], 'ne_iri': background['ne_iri'],
+            'background_residual': background['background_residual'],
+            'ne_residual': ne_delta,
+            'h_iri_aligned': background['z_background'],
+            'hmF2_det': hmf2.detach(),
+            'peak_params': {'hmF2': hmf2, 'NmF2': background['iri_peak'][:, 1]},
+            'K_FY': etkf['gain_FY'], 'K_COSMIC': etkf['gain_COSMIC'],
+            'r_fy': self.kalman_layer.r_fy,
+            'r_cosmic': self.kalman_layer.r_cosmic,
+            'innov_FY': etkf['innovation_FY'],
+            'innov_COSMIC': etkf['innovation_COSMIC'],
+            'update_FY': etkf['delta_FY'].unsqueeze(-1),
+            'update_COSMIC': etkf['delta_COSMIC'].unsqueeze(-1),
+            'weights_FY': etkf['weights_FY'],
+            'weights_COSMIC': etkf['weights_COSMIC'],
+            'member_weights': self.kalman_layer.last_member_weights,
+            'inflation_scale': etkf['inflation'],
+            'r_ref_FY': self.kalman_layer.r_fy,
+            'r_ref_COSMIC': self.kalman_layer.r_cosmic,
+            'h_prior': coefficient_background,
+            'h_analysis': etkf['z_analysis'],
+            'basis_z_background': background['z_background'],
+            'basis_h_sw': background['h_sw'],
+            'latent_increment': etkf['latent_increment'],
+            'latent_anomalies': etkf['latent_anomalies'],
+            'analysis_anomalies': etkf['analysis_anomalies'],
+            'etkf_transform': etkf['transform'], 'system': etkf['system'],
+            'query_anomalies': etkf['query_anomalies'],
+            'query_basis': query_modes, 'basis_FY': fy_modes,
+            'basis_COSMIC': cosmic_modes,
+            'factor_scales': etkf['factor_scales'],
+            'anomaly_singular_values': etkf['anomaly_singular_values'],
+            'anomaly_effective_rank': etkf['anomaly_effective_rank'],
+            'anomaly_condition': etkf['anomaly_condition'],
+            'scale_boundary_saturation': etkf['scale_boundary_saturation'],
+            'coefficient_background_query': coefficient_background,
+            'coefficient_analysis_query': etkf['z_analysis'],
+            **mode_diagnostics, **spectra,
+        }
+        for source, payload in (('FY', fy_obs), ('COSMIC', cosmic_obs)):
+            extras.update({
+                f'obs_anomalies_{source}': etkf[f'obs_anomalies_{source}'],
+                f'precision_{source}': etkf[f'precision_{source}'],
+                f'representativeness_{source}': etkf[
+                    f'representativeness_{source}'],
+                f'ensemble_covariance_{source}': etkf[
+                    f'ensemble_covariance_{source}'],
+                f'ensemble_rhs_{source}': etkf[f'ensemble_rhs_{source}'],
+                f'cross_covariance_{source}': etkf[f'cross_covariance_{source}'],
+                f'observation_coords_{source}': payload['coords'],
+                f'observation_rho_squared_{source}': payload['rho_squared'],
+            })
+        return (ne_fused, torch.zeros_like(ne_fused),
+                torch.zeros_like(background['ne_bkg']), ne_delta, extras)
+
+    def forward(self, coords, sw_seq, precomputed_h_sw=None,
+                iri_peak=None, observations_fy=None,
+                observations_cosmic=None, analysis_unit_ids=None,
+                analysis_unit_context=None, physical_reference_context=None):
+        """Decode a joint low-dimensional ETKF analysis into physical log10Ne."""
+        B = coords.shape[0]
+        endpoint_modes = self.uses_physical_modes and self.physical_mode_dictionary in (
+            'endpoint_hmf2_legendre', 'background_adaptive_fixed')
+        background = (self.encode_endpoint_context(coords, sw_seq, iri_peak)
+                      if endpoint_modes else
+                      self.encode_background(
+                          coords, sw_seq, precomputed_h_sw, iri_peak))
+        ne_bkg = background['ne_bkg']
+        ne_iri = background['ne_iri']
+        background_residual = background['background_residual']
+        f_iri = background['z_background']
+        h_sw = background['h_sw']
+        lat_n = background['lat_n']
+        cos_SZA = background['cos_sza']
+        sin_doy = background['sin_doy']
+        cos_doy = background['cos_doy']
+        sin_I = background['sin_i']
+        _iri_peak = background['iri_peak']
+        hmF2_det = _iri_peak[:, 0].detach()
+        peak_params = {'hmF2': _iri_peak[:, 0], 'NmF2': _iri_peak[:, 1]}
+
+        if self.uses_physical_modes:
+            if analysis_unit_ids is not None or analysis_unit_context is not None:
+                raise ValueError(
+                    'M2-R query-local semantics do not accept analysis-unit inputs')
+            return self._physical_mode_forward(
+                coords, background, observations_fy, observations_cosmic,
+                physical_reference_context)
+
+        def prepare(observations):
+            if observations is None:
+                empty = {
+                    'coords': coords.new_zeros(B, 0, 4),
+                    'value': coords.new_zeros(B, 0),
+                    'background': coords.new_zeros(B, 0),
+                    'valid_mask': torch.zeros(
+                        B, 0, device=coords.device, dtype=torch.bool),
+                    'rho_squared': coords.new_zeros(B, 0),
+                }
+                return empty, coords.new_zeros(
+                    B, 0, self.kalman_layer.d_model)
+            required = {
+                'coords', 'value', 'background', 'valid_mask',
+                'rho_squared'}
+            if self.density_basis_semantics == 'endpoint_context_symmetric':
+                required.update(('basis_z_background', 'basis_h_sw'))
+            missing = required.difference(observations)
+            if missing:
+                raise ValueError(
+                    f'observation payload missing fields: {sorted(missing)}')
+            valid = observations['valid_mask']
+            count = valid.shape[1]
+            query_coords = coords[:, None, :4].expand(-1, count, -1)
+            query_background = ne_bkg.expand(-1, count)
+            prepared = dict(observations)
+            prepared['coords'] = torch.where(
+                valid.unsqueeze(-1), observations['coords'], query_coords)
+            prepared['background'] = torch.where(
+                valid, observations['background'], query_background)
+            prepared['value'] = torch.where(
+                valid, observations['value'], query_background)
+            prepared['rho_squared'] = torch.where(
+                valid, observations['rho_squared'],
+                torch.ones_like(observations['rho_squared']))
+            if 'representativeness_weight' in observations:
+                prepared['representativeness_weight'] = torch.where(
+                    valid, observations['representativeness_weight'],
+                    torch.ones_like(observations[
+                        'representativeness_weight']))
+            target_z_background = target_h_sw = None
+            if self.density_basis_semantics == 'endpoint_context_symmetric':
+                target_z_background = torch.where(
+                    valid.unsqueeze(-1), observations['basis_z_background'],
+                    f_iri[:, None, :].expand(-1, count, -1))
+                target_h_sw = torch.where(
+                    valid.unsqueeze(-1), observations['basis_h_sw'],
+                    h_sw[:, None, :].expand(-1, count, -1))
+            phi = self._density_basis(
+                coords, prepared['coords'], prepared['background'],
+                f_iri, h_sw, target_z_background, target_h_sw)
+            phi = phi.masked_fill(~valid.unsqueeze(-1), 0.0)
+            return prepared, phi
+
+        query_phi = self._density_basis(
+            coords, coords[:, None, :4], ne_bkg, f_iri, h_sw,
+            f_iri[:, None, :], h_sw[:, None, :]).squeeze(1)
+        fy_obs, phi_fy = prepare(observations_fy)
+        cosmic_obs, phi_cosmic = prepare(observations_cosmic)
+        etkf = self.kalman_layer(
+            f_iri, h_sw, query_phi,
+            {'FY': (fy_obs, phi_fy), 'COSMIC': (cosmic_obs, phi_cosmic)},
+            lat_n, cos_SZA, sin_doy, cos_doy, sin_I)
+        Ne_delta = (
+            etkf['delta_FY'] + etkf['delta_COSMIC']).unsqueeze(-1)
         Ne_fused = ne_bkg + Ne_delta
+        log_var = torch.zeros_like(Ne_fused)
         ne_placeholder = torch.zeros_like(ne_bkg)
 
         extras = {
             'ne_bkg':         ne_bkg,
+            'ne_iri':         ne_iri,
+            'background_residual': background_residual,
             'ne_residual':    Ne_delta,
-            'h_iri_aligned':  h_iri_aligned,
-            'gate':           gate,
-            'gate_data':      gate_data,
-            'gate_phys':      gate_phys,
+            'h_iri_aligned':  f_iri,
             'hmF2_det':       hmF2_det,
             'peak_params':    peak_params,
-            'K_FY':           K_FY,
-            'K_COSMIC':       K_COSMIC,
-            'b':              b_val,
-            'r_fy':           r_fy,
-            'innov_FY':       innov_FY,
-            'innov_COSMIC':   innov_COSMIC,
+            'K_FY':           etkf['gain_FY'],
+            'K_COSMIC':       etkf['gain_COSMIC'],
+            'r_fy':           self.kalman_layer.r_fy,
+            'r_cosmic':       self.kalman_layer.r_cosmic,
+            'innov_FY':       etkf['innovation_FY'],
+            'innov_COSMIC':   etkf['innovation_COSMIC'],
+            'update_FY':      etkf['delta_FY'].unsqueeze(-1),
+            'update_COSMIC':  etkf['delta_COSMIC'].unsqueeze(-1),
+            'weights_FY':     etkf['weights_FY'],
+            'weights_COSMIC': etkf['weights_COSMIC'],
             'member_weights':   getattr(self.kalman_layer, 'last_member_weights', None),
             'inflation_scale':  getattr(self.kalman_layer, 'last_inflation_scale', None),
-            'r_ref_FY':   F.softplus(self.kalman_layer.log_r_ref_FY)     + 0.1,
-            'r_ref_COSMIC': F.softplus(self.kalman_layer.log_r_ref_COSMIC) + 0.1,
-            'h_FY':           h_FY,
-            'h_COSMIC':       h_COSMIC,
+            'r_ref_FY':       self.kalman_layer.r_fy,
+            'r_ref_COSMIC':   self.kalman_layer.r_cosmic,
+            'h_prior':        f_iri,
+            'h_analysis':     etkf['z_analysis'],
+            'basis_z_background': f_iri,
+            'basis_h_sw': h_sw,
+            'latent_increment': etkf['latent_increment'],
+            'latent_anomalies': etkf['latent_anomalies'],
+            'analysis_anomalies': etkf['analysis_anomalies'],
+            'etkf_transform': etkf['transform'],
+            'obs_anomalies_FY': etkf['obs_anomalies_FY'],
+            'obs_anomalies_COSMIC': etkf['obs_anomalies_COSMIC'],
+            'precision_FY': etkf['precision_FY'],
+            'precision_COSMIC': etkf['precision_COSMIC'],
+            'representativeness_FY': etkf['representativeness_FY'],
+            'representativeness_COSMIC': etkf[
+                'representativeness_COSMIC'],
+            'ensemble_covariance_FY': etkf['ensemble_covariance_FY'],
+            'ensemble_covariance_COSMIC': etkf['ensemble_covariance_COSMIC'],
+            'ensemble_rhs_FY': etkf['ensemble_rhs_FY'],
+            'ensemble_rhs_COSMIC': etkf['ensemble_rhs_COSMIC'],
+            'cross_covariance_FY': etkf['cross_covariance_FY'],
+            'cross_covariance_COSMIC': etkf['cross_covariance_COSMIC'],
+            'observation_coords_FY': fy_obs['coords'],
+            'observation_coords_COSMIC': cosmic_obs['coords'],
+            'observation_rho_squared_FY': fy_obs['rho_squared'],
+            'observation_rho_squared_COSMIC': cosmic_obs['rho_squared'],
+            'query_coords': coords,
+            'query_basis': query_phi,
+            'query_anomalies': etkf['query_anomalies'],
+            'basis_FY': phi_fy,
+            'basis_COSMIC': phi_cosmic,
+            'factor_scales': etkf['factor_scales'],
+            'anomaly_singular_values': etkf['anomaly_singular_values'],
+            'anomaly_effective_rank': etkf['anomaly_effective_rank'],
+            'anomaly_condition': etkf['anomaly_condition'],
+            'scale_boundary_saturation': etkf['scale_boundary_saturation'],
         }
 
         return Ne_fused, log_var, ne_placeholder, Ne_delta, extras
 
     def _initialize_weights(self):
-        """关键层零初始化，确保训练初期退化为 IRI 先验（run61）"""
-        # regime_film_net 输出层零初始化：γ=0, β=0 → h_decode_mod = h_decode（恒等起步）
-        nn.init.zeros_(self.regime_film_net[-1].weight)
-        nn.init.zeros_(self.regime_film_net[-1].bias)
-        # FusionDecoder 输出层零初始化：Ne_delta 初始为 0
-        nn.init.zeros_(self.fusion_decoder[-1].weight)
-        nn.init.zeros_(self.fusion_decoder[-1].bias)
-        # iri_align_net 输出层零初始化：初期 h_iri_aligned≈0
+        """Initialize Background conservatively and keep ETKF gradients alive."""
+        if not self.uses_physical_modes:
+            nn.init.xavier_uniform_(
+                self.density_basis_decoder[-1].weight, gain=0.1)
+            nn.init.zeros_(self.density_basis_decoder[-1].bias)
+        else:
+            nn.init.zeros_(self.mode_residual[-1].weight)
+            nn.init.zeros_(self.mode_residual[-1].bias)
+        nn.init.zeros_(self.background_decoder[-1].weight)
+        nn.init.zeros_(self.background_decoder[-1].bias)
         nn.init.zeros_(self.iri_align_net[-1].weight)
         nn.init.zeros_(self.iri_align_net[-1].bias)
-        # proj_frame_offset 零初始化：初期 frame_offset 投影=0（run61: frame_offset=0 恒成立）
-        nn.init.zeros_(self.proj_frame_offset.weight)
-        nn.init.zeros_(self.proj_frame_offset.bias)
-        # iri_recon_head 零初始化：L_iri_struct 从零开始监督
-        nn.init.zeros_(self.iri_recon_head.weight)
-        nn.init.zeros_(self.iri_recon_head.bias)
-        # uncertainty_head 输出层零初始化：初期 log_var=0
-        nn.init.zeros_(self.uncertainty_head[-1].weight)
-        nn.init.zeros_(self.uncertainty_head[-1].bias)
-        # H_FY / H_COSMIC 零初始化（NeuralETKFLayer）：训练初期 update=0 → Ne_fused ≈ ne_bkg
-        nn.init.zeros_(self.kalman_layer.H_FY_w)
-        nn.init.zeros_(self.kalman_layer.H_COSMIC_w)
-        # CRF: proj_pre 零初始化 → 初期 h_pre=0 → h_decode ≈ sigmoid(5)·h_analysis ≈ 0.9933·h_analysis
-        nn.init.zeros_(self.proj_pre.weight)
-        nn.init.zeros_(self.proj_pre.bias)
-
-    def _initialize_cosmic_bootstrap(self):
-        """Break the all-zero COSMIC encoder/H/proj_pre gradient deadlock."""
-        self.cosmic_obs_encoder.input_proj.reset_parameters()
-        nn.init.xavier_uniform_(
-            self.proj_pre.weight[:, -self.kalman_layer.d_model:], gain=0.01)
 
 
-# ======================== 测试代码 ========================
 if __name__ == '__main__':
-    print('=' * 60)
-    print('FSIA-INR (FY/COSMIC local-profile assimilation)')
-    print('=' * 60)
-
     import sys, os
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
     from data_managers.irinc_neural_proxy import IRINeuralProxy
 
     config = {
-        'total_hours':     720.0,
-        'alt_range':       (120.0, 500.0),
-        'seq_len':         36,
-        'basis_dim':       64,
-        'sw_hidden_dim':   32,
-        'sw_lstm_layers':  2,
-        'sw_out_dim':      64,
-        'tau_kp_init':     8.0,
-        'tau_solar_init':  72.0,
-        # run28-B core
-        'enkf_n_members':  8,
-        'enkf_pert_hidden': 64,
-        'enkf_n_rank_h':   8,
-        'gate_h_scale':    100.0,
-        'gate_regime_dim': 6,
-        # run40: SW 频域分支
-        'use_sw_freq':         True,
-        'sw_gate_bias_init':  -1.0,
-        # run61: FYObsEncoder 超参数
-        'fy_enc_heads': 4,
-        'fy_nb_kmax':   64,
-        # run64: COSMIC
-        'cosmic_nb_k_prof': 8,
-        'cosmic_nb_n_alt':  8,
+        'alt_range': (120.0, 500.0), 'seq_len': 36, 'basis_dim': 64,
+        'sw_hidden_dim': 32, 'sw_lstm_layers': 2, 'sw_out_dim': 64,
+        'tau_kp_init': 8.0, 'tau_solar_init': 72.0,
+        'enkf_n_members': 8, 'enkf_pert_hidden': 64, 'use_sw_freq': True,
     }
-
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
     iri_proxy = IRINeuralProxy(layers=[4, 128, 128, 128, 128, 1]).to(device)
     model = FSIA_INR_Model(iri_proxy, config).to(device)
-
-    total_params     = sum(p.numel() for p in model.parameters())
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-
-    print(f'\n总参数量:    {total_params:,}')
-    print(f'可训练参数:  {trainable_params:,}')
-
-    print(f'\n核心模块（应全为 True）:')
-    print(f'  有 fy_obs_encoder:     {hasattr(model, "fy_obs_encoder")}  (FYObsEncoder)')
-    print(f'  有 cosmic_obs_encoder: {hasattr(model, "cosmic_obs_encoder")}  (COSMICObsEncoder)')
-    print(f'  有 kalman_layer:       {hasattr(model, "kalman_layer")}  (NeuralETKFLayer)')
-    print(f'  有 fusion_decoder:     {hasattr(model, "fusion_decoder")}')
-    print(f'  有 uncertainty_head:   {hasattr(model, "uncertainty_head")}')
-    print(f'  有 assim_gate:         {hasattr(model, "assim_gate")}  (MultiScaleAdaptiveGate)')
-    print(f'  有 proj_pre:           {hasattr(model, "proj_pre")}  (CRF 192D)')
-    print(f'  有 crf_alpha:          {hasattr(model, "crf_alpha")}  (CRF)')
-    print(f'  有 iri_align_net:      {hasattr(model, "iri_align_net")}')
-
-    # FYObsEncoder 验证
-    print(f'\nFYObsEncoder:')
-    enc = model.fy_obs_encoder
-    print(f'  input_proj: {enc.input_proj.in_features}→{enc.input_proj.out_features}  (应 10→64)')
-    print(f'  input_proj w max: {enc.input_proj.weight.abs().max().item():.2e}  (应=0, 零初始化)')
-
-    # COSMICObsEncoder 验证
-    print(f'\nCOSMICObsEncoder:')
-    cenc = model.cosmic_obs_encoder
-    print(f'  input_proj: {cenc.input_proj.in_features}→{cenc.input_proj.out_features}  (应 10→64)')
-    print(f'  input_proj w max: {cenc.input_proj.weight.abs().max().item():.2e}  (应>0, COSMIC 启动)')
-
-    # CRF 维度验证
-    print(f'\nCRF:')
-    print(f'  proj_pre 输入维度:   {model.proj_pre.in_features}  (应=192 = 64×3)')
-    print(f'  crf_alpha shape:    {tuple(model.crf_alpha.shape)}  (应=(64,))')
-    print(f'  sigmoid(crf_alpha): {torch.sigmoid(model.crf_alpha).mean().item():.4f}  (应≈0.9933)')
-
-    # NeuralETKFLayer 验证
-    print(f'\nNeuralETKFLayer:')
-    print(f'  enkf_n_members:       {model.enkf_n_members}  (应=8)')
-    print(f'  H_FY_w abs.max:       {model.kalman_layer.H_FY_w.abs().max().item():.2e}  (应=0)')
-    print(f'  H_COSMIC_w abs.max:   {model.kalman_layer.H_COSMIC_w.abs().max().item():.2e}  (应=0)')
-    print(f'  H_COSMIC_a 已冻结:    {not model.kalman_layer.H_COSMIC_a.weight.requires_grad}  (应=True)')
-    print(f'  有 R_COSMIC_net:      {hasattr(model.kalman_layer, "R_COSMIC_net")}  (应=True)')
-    print(f'  R_COSMIC_net 已冻结:  {not model.kalman_layer.R_COSMIC_net[0].weight.requires_grad}  (应=True)')
-
-    B = 64
-    K = 32
-    coords = torch.zeros(B, 4, device=device)
-    coords[:, 0] = torch.linspace(-60, 60, B)
-    coords[:, 1] = torch.linspace(-180, 180, B)
-    coords[:, 2] = torch.linspace(150, 450, B)
-    coords[:, 3] = torch.linspace(0, 720, B)
+    B = 8
+    coords = torch.tensor(
+        [[-12.0, -76.8, 250.0 + i, 48.0] for i in range(B)],
+        device=device)
     sw_seq = torch.randn(B, 36, 2, device=device)
-
-    iri_peak_test = torch.stack([
+    iri_peak = torch.stack([
         torch.full((B,), 300.0, device=device),
-        torch.full((B,), 11.5,  device=device)
+        torch.full((B,), 11.5, device=device),
     ], dim=-1)
-
-    # 测试 1: 无任何观测（退化为 IRI baseline）
-    Ne_fused_nobs, log_var, _, Ne_delta, extras_nobs = model(
-        coords, sw_seq, iri_peak=iri_peak_test)
-
-    print(f'\n=== 测试 1: 无观测（IRI baseline）===')
-    print(f'  Ne_fused shape:     {Ne_fused_nobs.shape}')
-    print(f'  |Ne_delta| max:     {Ne_delta.abs().max().item():.2e}  (应≈0)')
-    ne_diff_nobs = (Ne_fused_nobs - extras_nobs["ne_bkg"]).abs().max().item()
-    print(f'  |Ne_fused-ne_bkg|:  {ne_diff_nobs:.2e}  (应≈0)')
-
-    # 测试 2: 有 FY 邻居
-    neighbors_feats = torch.randn(B, K, 10, device=device)
-    has_obs = torch.ones(B, device=device)
-    Ne_fused_obs, _, _, Ne_delta_obs, extras_obs = model(
-        coords, sw_seq, iri_peak=iri_peak_test,
-        neighbors_feats=neighbors_feats, has_obs=has_obs)
-
-    print(f'\n=== 测试 2: 有 FY 邻居 ===')
-    print(f'  Ne_fused shape:     {Ne_fused_obs.shape}')
-    print(f'  h_FY shape:         {extras_obs["h_FY"].shape}  (应=[{B}, 64])')
-    print(f'  innov_FY norm:      {extras_obs["innov_FY"].norm(dim=-1).mean().item():.4f}')
-
-    # 测试 3: 有 COSMIC 邻居
-    nb_csm = torch.randn(B, K, 10, device=device)
-    has_csm = torch.ones(B, device=device)
-    Ne_fused_csm, _, _, _, extras_csm = model(
-        coords, sw_seq, iri_peak=iri_peak_test,
-        neighbors_feats=neighbors_feats, has_obs=has_obs,
-        neighbors_feats_cosmic=nb_csm, has_obs_cosmic=has_csm)
-    print(f'\n=== 测试 3: FY + COSMIC ===')
-    print(f'  Ne_fused shape:     {Ne_fused_csm.shape}')
-    print(f'  h_COSMIC shape:     {extras_csm["h_COSMIC"].shape}  (应=[{B}, 64])')
-    print(f'  K_COSMIC shape:     {extras_csm["K_COSMIC"].shape}')
-    print(f'  innov_COSMIC norm:  {extras_csm["innov_COSMIC"].norm(dim=-1).mean().item():.4f}')
-
-    # 测试 4: 混合（50% 有 FY 观测，50% 无）
-    has_obs_mixed = (torch.rand(B, device=device) > 0.5).float()
-    Ne_fused_mix, _, _, _, _ = model(
-        coords, sw_seq, iri_peak=iri_peak_test,
-        neighbors_feats=neighbors_feats, has_obs=has_obs_mixed)
-    print(f'\n=== 测试 4: 混合 FY 观测 ===')
-    print(f'  has_obs=1 数量:     {has_obs_mixed.sum().int().item()} / {B}')
-    print(f'  Ne_fused shape:     {Ne_fused_mix.shape}')
-
-    # 梯度测试（FY+COSMIC 联合）
+    m00, _, _, delta00, background = model(coords, sw_seq, iri_peak=iri_peak)
+    observation = {
+        'coords': coords[:, None, :],
+        'value': background['ne_bkg'].detach() + 0.1,
+        'background': background['ne_bkg'].detach(),
+        'valid_mask': torch.ones(B, 1, dtype=torch.bool, device=device),
+        'rho_squared': torch.zeros(B, 1, device=device),
+    }
+    m10, _, _, delta10, _ = model(
+        coords, sw_seq, iri_peak=iri_peak, observations_fy=observation)
     model.zero_grad()
-    loss = Ne_fused_csm.sum()
-    loss.backward()
-    iri_any_grad = any(p.grad is not None for p in model.iri_proxy.parameters())
-    print(f'\n=== 梯度测试 ===')
-    print(f'  IRI proxy 任意参数有梯度:   {iri_any_grad}  (应=False)')
-    print(f'  H_FY_w grad:               {model.kalman_layer.H_FY_w.grad is not None}')
-    print(f'  H_COSMIC_w grad:           {model.kalman_layer.H_COSMIC_w.grad is not None}')
-    print(f'  cosmic_obs_encoder grad:   {model.cosmic_obs_encoder.query.grad is not None}')
-
-    # gate 验证
-    gate = extras_csm.get('gate')
-    print(f'\n=== Gate ===')
-    if gate is not None:
-        print(f'  gate shape: {gate.shape}')
-        print(f'  gate range: [{gate.min().item():.4f}, {gate.max().item():.4f}]')
-
-    assert torch.isfinite(Ne_fused_csm).all()
-
-    print('\n所有测试通过!')
+    m10.sum().backward()
+    assert torch.equal(m00, background['ne_bkg'])
+    assert torch.equal(delta00, torch.zeros_like(delta00))
+    assert torch.isfinite(m10).all() and torch.isfinite(delta10).all()
+    assert model.density_basis_decoder[-1].weight.grad.abs().sum() > 0
+    print('FSIA density-observation ETKF self-test passed')

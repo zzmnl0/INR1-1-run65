@@ -1,6 +1,305 @@
 """Assemble FY targets, space-weather history, and local FY/COSMIC profiles."""
 
+import numpy as np
 import torch
+
+
+REPRESENTATIVENESS_SHAPE = (4, 3, 3, 3, 4)
+REPRESENTATIVENESS_SOURCE_PAIRS = {
+    ('FY', 'FY'): 0,
+    ('FY', 'COSMIC'): 1,
+    ('COSMIC', 'FY'): 2,
+    ('COSMIC', 'COSMIC'): 3,
+}
+
+
+def load_representativeness_kernel(path):
+    if not path:
+        return None
+    with np.load(path, allow_pickle=False) as cells:
+        cell_id = cells['cell_id']
+        stable = cells['stable']
+    expected = np.arange(np.prod(REPRESENTATIVENESS_SHAPE))
+    if (cell_id.shape != expected.shape
+            or not np.array_equal(cell_id, expected)
+            or stable.shape != expected.shape):
+        raise ValueError('representativeness cells have an incompatible schema')
+    return torch.from_numpy(
+        stable.reshape(REPRESENTATIVENESS_SHAPE).astype(np.float32))
+
+
+def load_empirical_covariance_targets(path):
+    """Load frozen train-only covariance targets used only by Analysis loss."""
+    if not path:
+        return None
+    with np.load(path, allow_pickle=False) as cells:
+        cell_id = cells['cell_id']
+        stable = cells['stable']
+        covariance = cells['covariance']
+    expected = np.arange(np.prod(REPRESENTATIVENESS_SHAPE))
+    if (cell_id.shape != expected.shape
+            or not np.array_equal(cell_id, expected)
+            or stable.shape != expected.shape
+            or covariance.shape != expected.shape
+            or not np.isfinite(covariance).all()):
+        raise ValueError('empirical covariance cells have an incompatible schema')
+    return {
+        'stable': torch.from_numpy(
+            stable.reshape(REPRESENTATIVENESS_SHAPE).astype(bool)),
+        'covariance': torch.from_numpy(
+            covariance.reshape(REPRESENTATIVENESS_SHAPE).astype(np.float32)),
+    }
+
+
+def empirical_covariance_token_targets(
+        query_coords, observation_coords, rho_squared, valid_mask,
+        target_source, observation_source, targets):
+    """Map physical query/observation pairs to frozen profile-blocked cells."""
+    pair = REPRESENTATIVENESS_SOURCE_PAIRS[
+        (target_source, observation_source)]
+    device = query_coords.device
+    dtype = query_coords.dtype
+    boundaries = query_coords.new_tensor([200.0, 300.0])
+    target_altitude = torch.bucketize(
+        query_coords[:, 2].contiguous(), boundaries, right=True)[:, None]
+    observation_altitude = torch.bucketize(
+        observation_coords[..., 2].contiguous(), boundaries, right=True)
+    target_lt = torch.remainder(
+        query_coords[:, 3] + query_coords[:, 1] / 15.0, 24.0)[:, None]
+    observation_lt = torch.remainder(
+        observation_coords[..., 3] + observation_coords[..., 1] / 15.0,
+        24.0)
+    target_day = (target_lt >= 6.0) & (target_lt < 18.0)
+    observation_day = (
+        (observation_lt >= 6.0) & (observation_lt < 18.0))
+    local_time_class = torch.where(
+        target_day & observation_day,
+        torch.ones_like(observation_altitude),
+        torch.where(
+            ~target_day & ~observation_day,
+            torch.zeros_like(observation_altitude),
+            torch.full_like(observation_altitude, 2)))
+    rho_bin = torch.clamp(
+        (torch.sqrt(torch.clamp(rho_squared, min=0.0)) * 4.0).long(),
+        max=3)
+    stable = targets['stable'].to(device=device)[
+        pair, target_altitude, observation_altitude, local_time_class, rho_bin]
+    covariance = targets['covariance'].to(device=device, dtype=dtype)[
+        pair, target_altitude, observation_altitude, local_time_class, rho_bin]
+    return covariance, valid_mask.bool() & stable
+
+
+def _smooth_day_probability(local_time):
+    def smoothstep(value):
+        value = value.clamp(0.0, 1.0)
+        return value.square() * (3.0 - 2.0 * value)
+
+    rise = smoothstep((local_time - 5.0) / 2.0)
+    fall = 1.0 - smoothstep((local_time - 17.0) / 2.0)
+    return rise * fall
+
+
+def _interpolation_brackets(values, centers):
+    upper = torch.bucketize(values.contiguous(), centers).clamp(
+        1, len(centers) - 1)
+    lower = upper - 1
+    fraction = ((values - centers[lower])
+                / (centers[upper] - centers[lower])).clamp(0.0, 1.0)
+    return lower, upper, 1.0 - fraction, fraction
+
+
+def attach_representativeness_weight(
+        payload, query_coords, target_source, observation_source, stable_grid,
+        floor=0.25):
+    """Attach a continuous frozen precision multiplier without changing masks."""
+    if payload is None or stable_grid is None:
+        return payload
+    if not 0.0 < floor <= 1.0:
+        raise ValueError('representativeness floor must be in (0, 1]')
+    pair = REPRESENTATIVENESS_SOURCE_PAIRS[
+        (target_source, observation_source)]
+    valid = payload['valid_mask'].bool()
+    query = query_coords[:, :4]
+    observation = torch.where(
+        valid.unsqueeze(-1), payload['coords'][..., :4], query[:, None, :])
+    dtype = payload['value'].dtype
+    device = payload['value'].device
+    grid = stable_grid.to(device=device, dtype=dtype)
+    grid = floor + (1.0 - floor) * grid[pair]
+
+    altitude_centers = query.new_tensor([160.0, 250.0, 400.0])
+    rho_centers = query.new_tensor([0.125, 0.375, 0.625, 0.875])
+    target_brackets = _interpolation_brackets(
+        query[:, 2:3], altitude_centers)
+    observation_brackets = _interpolation_brackets(
+        observation[..., 2], altitude_centers)
+    rho = torch.sqrt(torch.clamp(torch.where(
+        valid, payload['rho_squared'], 0.0), min=0.0))
+    rho_brackets = _interpolation_brackets(rho, rho_centers)
+
+    target_lt = torch.remainder(query[:, 3] + query[:, 1] / 15.0, 24.0)
+    observation_lt = torch.remainder(
+        observation[..., 3] + observation[..., 1] / 15.0, 24.0)
+    target_day = _smooth_day_probability(target_lt)[:, None]
+    observation_day = _smooth_day_probability(observation_lt)
+    local_time_weights = torch.stack([
+        (1.0 - target_day) * (1.0 - observation_day),
+        target_day * observation_day,
+        1.0 - (
+            (1.0 - target_day) * (1.0 - observation_day)
+            + target_day * observation_day),
+    ], dim=-1)
+
+    weight = torch.zeros_like(payload['rho_squared'])
+    for target_index, target_weight in zip(
+            target_brackets[:2], target_brackets[2:]):
+        for observation_index, observation_weight in zip(
+                observation_brackets[:2], observation_brackets[2:]):
+            for rho_index, rho_weight in zip(
+                    rho_brackets[:2], rho_brackets[2:]):
+                cell = grid[
+                    target_index, observation_index, :, rho_index]
+                weight = weight + (
+                    target_weight * observation_weight * rho_weight
+                    * (cell * local_time_weights).sum(dim=-1))
+    result = dict(payload)
+    result['representativeness_weight'] = torch.where(
+        valid, weight, torch.ones_like(weight))
+    return result
+
+
+def query_observation_payload(index, coords, device, exclude_profile_ids=None,
+                              allowed_profile_ids=None):
+    if index is None:
+        return None
+    kwargs = {'exclude_profile_ids': exclude_profile_ids}
+    if allowed_profile_ids is not None:
+        kwargs['allowed_profile_ids'] = allowed_profile_ids
+    payload = index.query_observation_batch(
+        coords.detach().cpu().numpy(), **kwargs)
+    return {
+        key: torch.from_numpy(value).to(device, non_blocking=True)
+        for key, value in payload.items()
+    }
+
+
+def attach_observation_background(
+        payload, model, sw_manager, iri_peak_manager=None, chunk_size=4096):
+    """Evaluate shared Background and optional endpoint context at valid tokens."""
+    if payload is None:
+        return None
+    valid = payload['valid_mask']
+    background = payload['value'].new_zeros(payload['value'].shape)
+    endpoint_context = getattr(
+        model, 'density_basis_semantics', None) == 'endpoint_context_symmetric'
+    physical_context = bool(
+        getattr(model, 'allow_failed_query_local_shadow', False))
+    if endpoint_context:
+        background_state_dim = getattr(
+            model, 'background_state_dim', model.kalman_layer.d_model)
+        basis_z_background = payload['value'].new_zeros(
+            *payload['value'].shape, background_state_dim)
+        basis_h_sw = payload['value'].new_zeros(
+            *payload['value'].shape, model.sw_out_dim)
+        if physical_context:
+            scalar_context = {
+                key: payload['value'].new_zeros(payload['value'].shape)
+                for key in (
+                    'basis_hmf2', 'basis_nmf2', 'basis_delta_alt',
+                    'basis_cos_sza', 'basis_sin_lst', 'basis_cos_lst',
+                    'basis_background_dh', 'basis_background_d2h')}
+    flat_coords = payload['coords'][valid]
+    valid_indices = valid.flatten().nonzero(as_tuple=True)[0]
+    flat_background = background.flatten()
+    if len(flat_coords):
+        unique_coords, inverse = torch.unique(
+            flat_coords, dim=0, sorted=False, return_inverse=True)
+    else:
+        unique_coords, inverse = flat_coords, torch.empty(
+            0, device=flat_coords.device, dtype=torch.long)
+    unique_background = background.new_empty(len(unique_coords))
+    if endpoint_context:
+        unique_z_background = basis_z_background.new_empty(
+            len(unique_coords), background_state_dim)
+        unique_h_sw = basis_h_sw.new_empty(
+            len(unique_coords), model.sw_out_dim)
+        if physical_context:
+            unique_scalar_context = {
+                key: value.new_empty(len(unique_coords))
+                for key, value in scalar_context.items()}
+    with torch.no_grad():
+        for start in range(0, len(unique_coords), chunk_size):
+            coords = unique_coords[start:start + chunk_size]
+            sw_seq = sw_manager.get_drivers_sequence(coords[:, 3])
+            peak = (iri_peak_manager.get_iri_peak(coords)
+                    if iri_peak_manager is not None else None)
+            encoded = (model.encode_endpoint_context(coords, sw_seq, peak)
+                       if physical_context else
+                       model.encode_background(coords, sw_seq, iri_peak=peak))
+            unique_background[start:start + len(coords)] = (
+                encoded['ne_bkg'].flatten())
+            if endpoint_context:
+                unique_z_background[start:start + len(coords)] = (
+                    encoded['z_background'])
+                unique_h_sw[start:start + len(coords)] = encoded['h_sw']
+                if physical_context:
+                    for key in scalar_context:
+                        unique_scalar_context[key][start:start + len(coords)] = (
+                            encoded[key])
+    flat_background[valid_indices] = unique_background[inverse]
+    result = dict(payload)
+    result['background'] = background
+    if endpoint_context:
+        basis_z_background.reshape(
+            -1, background_state_dim)[valid_indices] = (
+                unique_z_background[inverse])
+        basis_h_sw.reshape(-1, model.sw_out_dim)[valid_indices] = (
+            unique_h_sw[inverse])
+        result['basis_z_background'] = basis_z_background
+        result['basis_h_sw'] = basis_h_sw
+        if physical_context:
+            # Scalar fields were evaluated on unique coordinates; expand them
+            # through the same inverse map as Background.
+            for key in scalar_context:
+                scalar_context[key].flatten()[valid_indices] = (
+                    unique_scalar_context[key][inverse])
+                result[key] = scalar_context[key]
+    return result
+
+
+def build_failed_shadow_reference_context(
+        coords, model, sw_manager, iri_peak_manager, chunk_size=4096):
+    """Audit-only endpoint context for failed V1/V2 query-local shadows."""
+    if not getattr(model, 'allow_failed_query_local_shadow', False):
+        raise ValueError('reference context is restricted to failed audit shadows')
+    reference = model._physical_reference_coords(coords[:, :4])
+    batch, count, _ = reference.shape
+    flat = reference.reshape(-1, 4)
+    chunks = []
+    with torch.no_grad():
+        for start in range(0, len(flat), chunk_size):
+            endpoint = flat[start:start + chunk_size]
+            sw_seq = sw_manager.get_drivers_sequence(endpoint[:, 3])
+            peak = (iri_peak_manager.get_iri_peak(endpoint)
+                    if iri_peak_manager is not None else None)
+            chunks.append(model.encode_endpoint_context(endpoint, sw_seq, peak))
+    keys = (
+        'ne_bkg', 'z_background', 'h_sw', 'basis_hmf2', 'basis_nmf2',
+        'basis_delta_alt', 'basis_cos_sza', 'basis_sin_lst', 'basis_cos_lst',
+        'basis_background_dh', 'basis_background_d2h')
+    merged = {
+        key: torch.cat([chunk[key] for chunk in chunks], dim=0)
+        for key in keys}
+    return {
+        'coords': reference,
+        'background': merged['ne_bkg'].reshape(batch, count),
+        'basis_z_background': merged['z_background'].reshape(batch, count, -1),
+        'basis_h_sw': merged['h_sw'].reshape(batch, count, -1),
+        **{
+            key: merged[key].reshape(batch, count)
+            for key in keys if key.startswith('basis_') and key not in (
+                'basis_z_background', 'basis_h_sw')},
+    }
 
 
 class SlidingWindowBatchProcessor:
@@ -13,24 +312,25 @@ class SlidingWindowBatchProcessor:
 
     def __init__(self, sw_manager, device='cuda',
                  fy_nb_index=None, cosmic_nb_index=None,
-                 fy_precomputed=None, csm_precomputed=None):
+                 representativeness_kernel=None,
+                 representativeness_floor=0.25,
+                 empirical_covariance_targets=None):
         """
         Args:
             sw_manager:       SpaceWeatherManager 实例
             device:           计算设备
             fy_nb_index:      FYNeighborhoodIndex 实例（run61，可选）
             cosmic_nb_index:  COSMICNeighborhoodIndex 实例（run64，可选）
-            fy_precomputed:   precompute_all 返回的 FY 邻域预计算数据（run65 P2，可选）
-            csm_precomputed:  precompute_all 返回的 COSMIC 邻域预计算数据（run65 P2，可选）
         """
         self.sw_manager = sw_manager
         self.device = device
         self.fy_nb_index = fy_nb_index          # run61: FY 邻域索引
         self.cosmic_nb_index = cosmic_nb_index  # run64: COSMIC 邻域索引
-        self.fy_precomputed  = fy_precomputed   # run65 P2: 预计算 FY 邻域数据
-        self.csm_precomputed = csm_precomputed  # run65 P2: 预计算 COSMIC 邻域数据
+        self.representativeness_kernel = representativeness_kernel
+        self.representativeness_floor = float(representativeness_floor)
+        self.empirical_covariance_targets = empirical_covariance_targets
 
-    def process_batch(self, batch_item):
+    def process_batch(self, batch_item, query_neighbors=True):
         """
         Convert one FY batch and query the local FY/COSMIC profile indexes.
 
@@ -55,11 +355,16 @@ class SlidingWindowBatchProcessor:
         """
         # 解包元组（run65 P2：DataLoader 现返回 (data, ds_idx)）
         if isinstance(batch_item, (tuple, list)):
-            batch_data, batch_ds_idx = batch_item
-            batch_ds_idx_np = batch_ds_idx.numpy()
+            if len(batch_item) == 3:
+                batch_data, _, profile_ids = batch_item
+            else:
+                batch_data, _ = batch_item
+                profile_ids = torch.arange(len(batch_data), dtype=torch.long)
+            profile_ids_np = profile_ids.cpu().numpy()
         else:
             batch_data = batch_item
-            batch_ds_idx_np = None
+            profile_ids = torch.arange(len(batch_data), dtype=torch.long)
+            profile_ids_np = None
 
         batch_data = batch_data.to(self.device, non_blocking=True)
 
@@ -79,43 +384,20 @@ class SlidingWindowBatchProcessor:
         sw_seq = self.sw_manager.get_drivers_sequence(coords[:, 3])  # [Batch, Seq, 2]
 
         # run61/run65: FY 邻域观测查询（P2：优先用预计算数据）
-        if self.fy_nb_index is not None:
-            coords_np = coords.detach().cpu().numpy()
-            if (self.fy_precomputed is not None and batch_ds_idx_np is not None):
-                # P2: O(1) 索引，仅重算 Δalt delta 特征
-                nb_feats_np, has_obs_np = self.fy_nb_index.query_batch_precomputed(
-                    batch_ds_idx_np, coords_np[:, 2],
-                    self.fy_precomputed,
-                    coords_np[:, 0], coords_np[:, 1], coords_np[:, 3],
-                )
-            else:
-                # fallback: 在线剖面搜索
-                nb_feats_np, has_obs_np = self.fy_nb_index.query_batch_np(coords_np)
-            neighbors_feats = torch.from_numpy(nb_feats_np).to(self.device)
-            has_obs = torch.from_numpy(has_obs_np).to(self.device)
+        if query_neighbors and self.fy_nb_index is not None:
+            observations_fy = query_observation_payload(
+                self.fy_nb_index, coords, self.device,
+                exclude_profile_ids=profile_ids_np)
         else:
-            neighbors_feats = None
-            has_obs = None
+            observations_fy = None
 
         # run64/run65: COSMIC-2 邻域观测查询（P2：优先用预计算数据）
-        if self.cosmic_nb_index is not None:
-            coords_np_csm = coords.detach().cpu().numpy()
-            if (self.csm_precomputed is not None and batch_ds_idx_np is not None):
-                # P2: O(1) 索引
-                nb_csm_np, has_csm_np = self.cosmic_nb_index.query_batch_precomputed(
-                    batch_ds_idx_np, coords_np_csm[:, 2],
-                    self.csm_precomputed,
-                    coords_np_csm[:, 0], coords_np_csm[:, 1], coords_np_csm[:, 3],
-                )
-            else:
-                # fallback: 在线剖面搜索
-                nb_csm_np, has_csm_np = self.cosmic_nb_index.query_batch_np(coords_np_csm)
-            neighbors_feats_cosmic = torch.from_numpy(nb_csm_np).to(self.device)
-            has_obs_cosmic = torch.from_numpy(has_csm_np).to(self.device)
+        if query_neighbors and self.cosmic_nb_index is not None:
+            observations_cosmic = query_observation_payload(
+                self.cosmic_nb_index, coords, self.device)
         else:
-            neighbors_feats_cosmic = None
-            has_obs_cosmic = None
+            observations_cosmic = None
 
         return (coords, target_ne, sw_seq,
-                neighbors_feats, has_obs,
-                neighbors_feats_cosmic, has_obs_cosmic)
+                observations_fy, observations_cosmic,
+                profile_ids.to(self.device, non_blocking=True))
