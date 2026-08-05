@@ -56,7 +56,9 @@ A_{r,11}=7I+C_{r,\mathrm{FY}}+C_{r,\mathrm{COSMIC}},
 最终背景权重为 (1-\sum_r\beta_r(q)\)，分析增量为
 
 \[
-\delta_m(q)=y_q^{\mathsf T}\sum_r\beta_{m,r}(q)w_{m,r}.
+\\delta_m(q)=\\sum_r\\beta_{m,r}(q)\\,\\delta_{m,r}^{anchor},
+\\qquad
+\\delta_{m,r}^{anchor}=y_{m,r}^{anchor\\mathsf T}w_{m,r}.
 \]
 
 因此最后一个锚点离开 1800 km 或 1.5 h 支持域时，(λ_r\to0)，增量连续退回 M00。该结构只承诺场值 (C^0) 连续；Sparsemax 活动集切换处不宣称一阶导数连续，也不把插值输出标记为严格 query 处后验方差。

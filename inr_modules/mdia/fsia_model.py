@@ -15,7 +15,6 @@ try:
     from .mdia_model import _compute_dip_features
     from .m2u_anchor_etkf import (
         anchor_mixing_weights,
-        blend_anchor_increments,
         calibrate_temperature,
         flat_top_cover,
         state_distance_squared,
@@ -28,7 +27,7 @@ except ImportError:
     from ewma_sw_encoder import DualScaleSWEncoder
     from mdia_model import _compute_dip_features
     from m2u_anchor_etkf import (
-        anchor_mixing_weights, blend_anchor_increments,
+        anchor_mixing_weights,
         calibrate_temperature, flat_top_cover, state_distance_squared)
 
 
@@ -1331,6 +1330,15 @@ class FSIA_INR_Model(nn.Module):
         query_X, factor_scales = make_anomalies(
             background['z_background'], background['h_sw'], coords)
         query_anomalies = torch.einsum('bd,bnd->bn', query_phi, query_X)
+        if anchor_count:
+            anchor_self_phi = self._density_basis(
+                anchor_coords, anchor_coords[:, None, :],
+                anchor_background[:, None], anchor_z, anchor_h,
+                anchor_z[:, None, :], anchor_h[:, None, :]).squeeze(1)
+            anchor_self_anomalies = torch.einsum(
+                'ad,and->an', anchor_self_phi, anchor_X)
+        else:
+            anchor_self_anomalies = coords.new_zeros(0, members)
 
         def source_terms(source, catalog):
             if not valid_catalog(catalog):
@@ -1419,8 +1427,13 @@ class FSIA_INR_Model(nn.Module):
                 self.m2u_state_amplitude_scale,
                 float(tau), self.m2u_space_support_km,
                 self.m2u_time_support_h, anchor_mask=mask)
-            increment = blend_anchor_increments(
-                query_anomalies, result['beta'], weights)
+            # Strict core sharing uses each anchor's own decoded response;
+            # query HX remains available above for diagnostics.  This makes a
+            # no-observation query with identical eta/core membership receive
+            # the same ETKF response as its observed anchor.
+            anchor_response = torch.einsum(
+                'an,an->a', anchor_self_anomalies, weights)
+            increment = torch.einsum('ba,a->b', result['beta'], anchor_response)
             return (increment, result['beta'], result['background_weight'],
                     result['scores'])
 
