@@ -24,7 +24,10 @@ try:
         solve_density_modes,
     )
     from .physics_losses_mdia import profile_huber_loss, second_difference_loss
-    from .m2u_anchor_etkf import anchor_scores
+    from .m2u_anchor_etkf import (
+        anchor_scores, normalized_support_distance_squared,
+        pairwise_empirical_covariance_target,
+    )
     from .sliding_dataset import (
         SlidingWindowBatchProcessor,
         attach_representativeness_weight,
@@ -32,6 +35,7 @@ try:
         empirical_covariance_token_targets,
         load_empirical_covariance_targets,
         load_representativeness_kernel,
+        validate_m2u_statistics_report,
         query_observation_payload,
         build_m2u_anchor_directories,
     )
@@ -40,7 +44,10 @@ except ImportError:
     from config_mdia import get_config_mdia
     from fsia_model import FSIA_INR_Model, solve_density_modes
     from physics_losses_mdia import profile_huber_loss, second_difference_loss
-    from m2u_anchor_etkf import anchor_scores
+    from m2u_anchor_etkf import (
+        anchor_scores, normalized_support_distance_squared,
+        pairwise_empirical_covariance_target,
+    )
     from sliding_dataset import (
         SlidingWindowBatchProcessor,
         attach_representativeness_weight,
@@ -48,6 +55,7 @@ except ImportError:
         empirical_covariance_token_targets,
         load_empirical_covariance_targets,
         load_representativeness_kernel,
+        validate_m2u_statistics_report,
         query_observation_payload,
         build_m2u_anchor_directories,
     )
@@ -223,6 +231,10 @@ def _record_resolved_training_config(config, covariance_strata):
             'resolved_direction_weight'),
         'use_observation_gram_loss': bool(
             config.get('use_observation_gram_loss', False)),
+        'm2u_eta_calibration': config.get('m2u_eta_calibration'),
+        'm2u_statistics_identity': config.get('m2u_statistics_identity'),
+        'formal_candidate': not bool(
+            config.get('allow_unstable_m2u_shadow', False)),
         'gram_gradient_target': float(
             config.get('gram_gradient_target', 0.02)),
         'gram_calibration_batches': int(
@@ -277,6 +289,244 @@ def _m2u_score_gaps(scores):
     return gaps
 
 
+def _m2u_catalog_features(model, catalog):
+    coords = catalog['coords'].squeeze(0)
+    z = catalog['basis_z_background'].squeeze(0)
+    h = catalog['basis_h_sw'].squeeze(0)
+    keys = ('basis_hmf2', 'basis_nmf2', 'basis_delta_alt',
+            'basis_kp_eff', 'basis_f107_eff')
+    context = {key: catalog[key].squeeze(0) for key in keys
+               if key in catalog}
+    return coords, model._m2u_error_state_features(coords, z, h, context)
+
+
+def _m2u_catalog_context(catalog):
+    """Return the source-neutral endpoint context used by the eta encoder."""
+    if catalog is None:
+        return None
+    keys = ('basis_hmf2', 'basis_nmf2', 'basis_delta_alt',
+            'basis_kp_eff', 'basis_f107_eff')
+    return {key: catalog[key].squeeze(0) for key in keys if key in catalog}
+
+
+def _m2u_pretrain_error_state(
+        model, train_loader, cosmic_train_loader, batch_processor, config,
+        iri_peak_manager, allowed_profile_ids):
+    """Fit the frozen M2-U state embedding on train-only residual structure."""
+    if not model.uses_shared_anchor_response:
+        return None
+    rng = np.random.default_rng(42)
+    per_source = int(config.get('m2u_eta_pretrain_profiles_per_source', 256))
+    max_pairs = int(config.get('m2u_eta_pretrain_pairs', 100000))
+    if per_source < 1 or max_pairs < 1:
+        raise ValueError('M2-U eta pretraining limits must be positive')
+    loaders = {'FY': train_loader, 'COSMIC': cosmic_train_loader}
+    selected = {
+        source: np.asarray(allowed_profile_ids.get(source), dtype=np.int64)
+        for source in ('FY', 'COSMIC')}
+    selected = {
+        source: np.sort(values if len(values) <= per_source else
+                        rng.choice(values, per_source, replace=False))
+        for source, values in selected.items()}
+    features = []
+    left, right, labels = [], [], []
+    indices = {'FY': batch_processor.fy_nb_index,
+               'COSMIC': batch_processor.cosmic_nb_index}
+    with torch.no_grad():
+        for target_source, loader in loaders.items():
+            found = 0
+            for batch in loader:
+                data, _, profile_ids = batch
+                profile_ids_np = profile_ids.detach().cpu().numpy()
+                keep = np.isin(profile_ids_np, selected[target_source])
+                if not keep.any():
+                    continue
+                coords = data[keep, :4].to(next(model.parameters()).device)
+                fy, cosmic = build_m2u_anchor_directories(
+                    indices, coords, coords.device, model,
+                    batch_processor.sw_manager, iri_peak_manager,
+                    allowed_profile_ids=allowed_profile_ids,
+                    excluded_profile_ids={
+                        target_source: np.unique(profile_ids_np[keep])},
+                    space_km=model.m2u_space_support_km,
+                    time_h=model.m2u_time_support_h,
+                    build_observation_pools=False)
+                catalogs = [("FY", fy), ("COSMIC", cosmic)]
+                valid_catalogs = [(name, catalog) for name, catalog in catalogs
+                                  if catalog is not None
+                                  and catalog['coords'].shape[1] > 0]
+                for _, catalog in valid_catalogs:
+                    _, value = _m2u_catalog_features(model, catalog)
+                    features.append(value)
+                for target_name, target_catalog in valid_catalogs:
+                    target_coords, target_features = _m2u_catalog_features(
+                        model, target_catalog)
+                    target_is_fy = torch.full(
+                        (len(target_coords),), target_name == 'FY',
+                        device=target_coords.device, dtype=torch.bool)
+                    for obs_name, obs_catalog in valid_catalogs:
+                        obs_coords, obs_features = _m2u_catalog_features(
+                            model, obs_catalog)
+                        rho_squared = normalized_support_distance_squared(
+                            target_coords, obs_coords,
+                            model.m2u_space_support_km,
+                            model.m2u_time_support_h)
+                        covariance, stable = pairwise_empirical_covariance_target(
+                            target_coords, obs_coords, rho_squared, target_is_fy,
+                            obs_name, model.m2u_representativeness_kernel,
+                            model.m2u_empirical_covariance)
+                        target_r = (model.kalman_layer.r_fy
+                                    if target_name == 'FY'
+                                    else model.kalman_layer.r_cosmic)
+                        obs_r = (model.kalman_layer.r_fy
+                                  if obs_name == 'FY'
+                                  else model.kalman_layer.r_cosmic)
+                        correlation = covariance / torch.sqrt(
+                            target_r * obs_r).clamp_min(1e-12)
+                        reverse_is_fy = torch.full(
+                            (len(obs_coords),), obs_name == 'FY',
+                            device=obs_coords.device, dtype=torch.bool)
+                        reverse_covariance, reverse_stable = (
+                            pairwise_empirical_covariance_target(
+                                obs_coords, target_coords, rho_squared.T,
+                                reverse_is_fy, target_name,
+                                model.m2u_representativeness_kernel,
+                                model.m2u_empirical_covariance))
+                        reverse_corr = (reverse_covariance / torch.sqrt(
+                            obs_r * target_r).clamp_min(1e-12)).T
+                        fisher = 0.5 * (
+                            torch.atanh(correlation.clamp(-0.999999, 0.999999))
+                            + torch.atanh(reverse_corr.clamp(-0.999999, 0.999999)))
+                        correlation = torch.tanh(fisher).clamp(0.0, 1.0)
+                        stable = stable & reverse_stable.T
+                        valid = stable & (rho_squared < 1.0) & torch.isfinite(correlation)
+                        pairs = valid.nonzero(as_tuple=False)
+                        if len(pairs):
+                            remaining = max_pairs - sum(map(len, labels))
+                            if remaining <= 0:
+                                break
+                            if len(pairs) > remaining:
+                                order = torch.randperm(
+                                    len(pairs), device=pairs.device)[:remaining]
+                                pairs = pairs[order]
+                            left.append(target_features[pairs[:, 0]].cpu())
+                            right.append(obs_features[pairs[:, 1]].cpu())
+                            labels.append(correlation[
+                                pairs[:, 0], pairs[:, 1]].cpu())
+                        if len(labels) and sum(map(len, labels)) >= max_pairs:
+                            break
+                    if len(labels) and sum(map(len, labels)) >= max_pairs:
+                        break
+                found += len(coords)
+                if found >= per_source * 8 or (len(labels) and
+                                               sum(map(len, labels)) >= max_pairs):
+                    break
+    if not features:
+        raise RuntimeError('M2-U eta calibration found no train-only catalog features')
+    feature_pool = torch.cat(features, dim=0)
+    if feature_pool.shape[0] < 2:
+        raise RuntimeError('M2-U eta calibration needs at least two feature rows')
+    mean = feature_pool.mean(dim=0)
+    scale = feature_pool.std(dim=0, unbiased=False).clamp_min(1e-4)
+    model.m2u_eta_encoder.set_feature_standardization(mean, scale)
+    device = next(model.parameters()).device
+    shadow = bool((config.get('m2u_statistics_identity') or {}).get(
+        'shadow', False))
+    if shadow:
+        with torch.no_grad():
+            eta = model.m2u_eta_encoder(feature_pool.to(device))
+            covariance = torch.cov(eta.T)
+            eigen = torch.linalg.eigvalsh(covariance).clamp_min(0.0)
+            probability = eigen / eigen.sum().clamp_min(1e-12)
+            effective_rank = float(torch.exp(-torch.sum(
+                probability * torch.log(probability.clamp_min(1e-12)))).item())
+        minimum_rank = float(config.get('m2u_eta_pretrain_min_effective_rank', 8.0))
+        if effective_rank < minimum_rank:
+            raise RuntimeError(
+                f'M2-U shadow eta embedding collapsed: effective rank '
+                f'{effective_rank:.3f} < {minimum_rank:.3f}')
+        for parameter in model.m2u_eta_encoder.parameters():
+            parameter.requires_grad_(False)
+        report = {
+            'method': 'shadow_untrained_train_only_feature_state',
+            'selected_profiles': {source: values.tolist()
+                                  for source, values in selected.items()},
+            'pairs': 0,
+            'steps': 0,
+            'loss_initial': None,
+            'loss_final': None,
+            'effective_rank': effective_rank,
+            'feature_mean': mean.tolist(),
+            'feature_scale': scale.tolist(),
+        }
+        config['m2u_eta_calibration'] = report
+        return report
+    if not labels:
+        raise RuntimeError('M2-U eta pretraining found no stable train-only pairs')
+    left = torch.cat(left, dim=0)[:max_pairs]
+    right = torch.cat(right, dim=0)[:max_pairs]
+    labels = torch.cat(labels, dim=0)[:max_pairs]
+    left, right, labels = left.to(device), right.to(device), labels.to(device)
+    feature_pool = feature_pool.to(device)
+    optimizer = optim.AdamW(
+        model.m2u_eta_encoder.net.parameters(),
+        lr=float(config.get('m2u_eta_pretrain_lr', 1e-3)),
+        weight_decay=1e-4)
+    steps = int(config.get('m2u_eta_pretrain_steps', 500))
+    model.m2u_eta_encoder.train()
+    losses = []
+    for _ in range(steps):
+        batch_size = min(2048, len(labels))
+        sample = torch.randint(len(labels), (batch_size,), device=device)
+        eta_left = model.m2u_eta_encoder(left[sample])
+        eta_right = model.m2u_eta_encoder(right[sample])
+        distance = ((eta_left[:, :-1] - eta_right[:, :-1]).square().sum(-1)
+                    / model.m2u_state_direction_scale ** 2
+                    + (eta_left[:, -1] - eta_right[:, -1]).square()
+                    / model.m2u_state_amplitude_scale ** 2)
+        similarity = torch.exp(-0.5 * distance)
+        eta_pool = model.m2u_eta_encoder(feature_pool[:min(2048, len(feature_pool))])
+        covariance = torch.cov(eta_pool.T)
+        off_diag = covariance - torch.diag(torch.diagonal(covariance))
+        std_penalty = F.relu(0.5 - torch.sqrt(
+            torch.diagonal(covariance).clamp_min(1e-12))).square().mean()
+        loss = F.smooth_l1_loss(similarity, labels[sample]) + 0.01 * (
+            off_diag.square().mean() + std_penalty)
+        optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        optimizer.step()
+        losses.append(float(loss.detach().item()))
+    model.m2u_eta_encoder.eval()
+    with torch.no_grad():
+        eta = model.m2u_eta_encoder(feature_pool[:min(4096, len(feature_pool))])
+        covariance = torch.cov(eta.T)
+        eigen = torch.linalg.eigvalsh(covariance).clamp_min(0.0)
+        probability = eigen / eigen.sum().clamp_min(1e-12)
+        effective_rank = float(torch.exp(-torch.sum(
+            probability * torch.log(probability.clamp_min(1e-12)))).item())
+    minimum_rank = float(config.get('m2u_eta_pretrain_min_effective_rank', 8.0))
+    if effective_rank < minimum_rank:
+        raise RuntimeError(
+            f'M2-U eta embedding collapsed: effective rank {effective_rank:.3f} '
+            f'< {minimum_rank:.3f}')
+    for parameter in model.m2u_eta_encoder.parameters():
+        parameter.requires_grad_(False)
+    report = {
+        'method': 'train_only_symmetric_residual_correlation',
+        'selected_profiles': {source: values.tolist()
+                              for source, values in selected.items()},
+        'pairs': int(len(labels)),
+        'steps': steps,
+        'loss_initial': losses[0],
+        'loss_final': losses[-1],
+        'effective_rank': effective_rank,
+        'feature_mean': mean.tolist(),
+        'feature_scale': scale.tolist(),
+    }
+    config['m2u_eta_calibration'] = report
+    return report
+
+
 def _calibrate_m2u_temperatures(
         model, train_loader, cosmic_train_loader, batch_processor, config,
         iri_peak_manager, allowed_profile_ids):
@@ -317,7 +567,8 @@ def _calibrate_m2u_temperatures(
                 background = model.encode_background(
                     coords, sw_seq, iri_peak=peak)
                 query_eta = model._m2u_state_eta(
-                    background['z_background'], background['h_sw'])
+                    background['z_background'], background['h_sw'], coords,
+                    background)
                 mode_catalogs = {
                     'M10': [fy], 'M01': [cosmic],
                     'M11': [fy, cosmic],
@@ -330,11 +581,19 @@ def _calibrate_m2u_temperatures(
                         continue
                     anchor_coords = torch.cat([
                         catalog['coords'].squeeze(0) for catalog in valid])
+                    anchor_context_parts = [
+                        _m2u_catalog_context(catalog) for catalog in valid]
+                    anchor_context = {
+                        key: torch.cat([part[key]
+                                        for part in anchor_context_parts], dim=0)
+                        for key in anchor_context_parts[0]
+                    } if anchor_context_parts else None
                     anchor_eta = model._m2u_state_eta(
                         torch.cat([catalog['basis_z_background'].squeeze(0)
                                    for catalog in valid]),
                         torch.cat([catalog['basis_h_sw'].squeeze(0)
-                                   for catalog in valid]))
+                                   for catalog in valid]),
+                        anchor_coords, anchor_context)
                     scores, _ = anchor_scores(
                         coords, anchor_coords, query_eta, anchor_eta,
                         model.m2u_state_direction_scale,
@@ -667,6 +926,19 @@ def observation_gram_whitening_loss(extras, profile_ids, kalman_layer,
     keeps padding and genuinely unsupported local windows from manufacturing a
     rank target.
     """
+    if extras.get('analysis_output_semantics') == (
+            'local_etkf_anchor_response_interpolation'):
+        losses, coverage = {}, {}
+        total = extras['ne_bkg'].sum() * 0.0
+        for mode, weight in _EXACT_MODE_WEIGHTS.items():
+            loss = extras[f'm2u_gram_loss_sum_{mode}']
+            valid = extras[f'm2u_gram_valid_{mode}']
+            denominator = valid.to(loss.dtype).sum().clamp_min(1.0)
+            value = loss.sum() / denominator
+            losses[mode] = value
+            coverage[mode] = valid.to(loss.dtype).mean()
+            total = total + weight * value
+        return (total, losses, coverage) if return_details else total
     if kalman_layer.anomaly_parameterization != 'orthogonal_factor':
         raise ValueError('observation Gram loss requires orthogonal_factor')
     rank = kalman_layer.n_members - 1
@@ -1920,6 +2192,12 @@ def _architecture_signature(config):
             'm2u_tau_M10': float(config.get('m2u_tau_M10', 1.0)),
             'm2u_tau_M01': float(config.get('m2u_tau_M01', 1.0)),
             'm2u_tau_M11': float(config.get('m2u_tau_M11', 1.0)),
+            'm2u_eta_dim': int(config.get('m2u_eta_dim', 16)),
+            'm2u_eta_input_dim': int(
+                config.get('basis_dim', 64)
+                + config.get('sw_out_dim', 64) + 15),
+            'm2u_error_state_semantics': 'frozen_train_only_correlation',
+            'm2u_hx_gram_semantics': 'anchor_precision_weighted_factor_gram',
         })
     return signature
 
@@ -2089,10 +2367,11 @@ def train_fsia(config=None):
         }
         if mismatched:
             raise ValueError(
-                f'observation Gram loss is restricted to M2-O: {mismatched}')
-        if config.get('analysis_state_semantics', 'legacy_feature_increment') != (
-                'legacy_feature_increment'):
-            raise ValueError('observation Gram loss cannot train M2-R states')
+                f'observation Gram loss configuration is incompatible: {mismatched}')
+        if config.get('analysis_state_semantics', 'legacy_feature_increment') not in (
+                'legacy_feature_increment', 'shared_anchor_response'):
+            raise ValueError(
+                'observation Gram loss requires M2-O or M2-U analysis semantics')
         if not 0.0 < float(config.get('gram_gradient_target', 0.02)) <= 1.0:
             raise ValueError('gram_gradient_target must be in (0, 1]')
         if int(config.get('gram_calibration_batches', 20)) < 1:
@@ -2107,7 +2386,7 @@ def train_fsia(config=None):
         raise ValueError('background_epochs and analysis_epochs must both be positive')
     architecture = _architecture_signature(config)
     if architecture['analysis_state_semantics'] == 'shared_anchor_response':
-        format_version = 9
+        format_version = 10
     else:
         format_version = (
             8 if architecture['enkf_anomaly_parameterization']
@@ -2216,10 +2495,43 @@ def train_fsia(config=None):
     representativeness_path = config.get('representativeness_kernel_path')
     representativeness_floor = float(
         config.get('representativeness_floor', 0.25))
+    m2u_statistics_identity = None
+    if analysis_semantics == 'shared_anchor_response':
+        expected_statistics_inputs = {
+            'fy_data': config.get('fy_path'),
+            'fy_index': config.get('fy_profile_index_path'),
+            'fy_qc_report': config.get('fy_qc_report_path'),
+            'cosmic_data': config.get('cosmic_path'),
+            'cosmic_index': config.get('cosmic_profile_index_path'),
+            'cosmic_qc_report': config.get('cosmic_qc_report_path'),
+            'background_checkpoint': config.get('background_seed_ckpt'),
+            'date_split_manifest': config.get('date_split_manifest'),
+        }
+        m2u_statistics_validation = validate_m2u_statistics_report(
+            representativeness_path,
+            expected=expected_statistics_inputs,
+            allow_shadow=bool(config.get('allow_unstable_m2u_shadow', False)),
+        )
+        statistics_report = m2u_statistics_validation.pop('report')
+        m2u_statistics_identity = {
+            **m2u_statistics_validation,
+            'npz_sha256': statistics_report.get('npz_sha256'),
+            'cross_source_gate': statistics_report.get('cross_source_gate'),
+            'split_mode': statistics_report.get('split_mode'),
+        }
+        config['m2u_statistics_identity'] = m2u_statistics_identity
+        if m2u_statistics_identity['shadow']:
+            config['use_empirical_covariance_loss'] = False
+            config['m2u_statistics_policy'] = 'shadow_unstable_cross_source'
+            config['save_dir'] = (
+                './checkpoints_fsia/'
+                'run66-m2u-shared-anchor-etkf-shadow-unstable-stats')
     representativeness_kernel = load_representativeness_kernel(
         representativeness_path)
     empirical_covariance_targets = (
-        load_empirical_covariance_targets(representativeness_path)
+        load_empirical_covariance_targets(
+            representativeness_path,
+            require_correlation=(analysis_semantics == 'shared_anchor_response'))
         if config.get('use_empirical_covariance_loss', False) else None)
     representativeness_identity = (
         {
@@ -2246,6 +2558,8 @@ def train_fsia(config=None):
         model.set_m2u_representativeness_kernel(
             representativeness_kernel,
             empirical_covariance_targets['covariance']
+            if empirical_covariance_targets is not None else None,
+            empirical_covariance_targets['correlation']
             if empirical_covariance_targets is not None else None)
     resume_state = None
     start_epoch = 0
@@ -2337,6 +2651,9 @@ def train_fsia(config=None):
                 for mode, value in loaded[
                         'm2u_temperature_calibration']['temperatures'].items():
                     config[f'm2u_tau_{mode}'] = float(value)
+            if loaded.get('m2u_eta_calibration') is not None:
+                config['m2u_eta_calibration'] = loaded[
+                    'm2u_eta_calibration']
             resume_state = loaded
             if loaded.get('torch_rng_state') is not None:
                 torch.set_rng_state(loaded['torch_rng_state'].cpu())
@@ -2382,6 +2699,11 @@ def train_fsia(config=None):
         _calibrate_fixed_r(
             model, train_loader, cosmic_train_loader, device,
             sw_manager, iri_peak_manager, batch_processor, config)
+        if (model.uses_shared_anchor_response
+                and 'm2u_eta_calibration' not in config):
+            _m2u_pretrain_error_state(
+                model, train_loader, cosmic_train_loader, batch_processor,
+                config, iri_peak_manager, allowed_profiles['train'])
         if (model.uses_shared_anchor_response
                 and 'm2u_temperature_calibration' not in config):
             _calibrate_m2u_temperatures(
@@ -2436,6 +2758,11 @@ def train_fsia(config=None):
             _calibrate_fixed_r(
                 model, train_loader, cosmic_train_loader, device,
                 sw_manager, iri_peak_manager, batch_processor, config)
+            if (model.uses_shared_anchor_response
+                    and 'm2u_eta_calibration' not in config):
+                _m2u_pretrain_error_state(
+                    model, train_loader, cosmic_train_loader, batch_processor,
+                    config, iri_peak_manager, allowed_profiles['train'])
             if (model.uses_shared_anchor_response
                     and 'm2u_temperature_calibration' not in config):
                 _calibrate_m2u_temperatures(
@@ -2586,6 +2913,10 @@ def train_fsia(config=None):
                 'gram_gradient_calibration'),
             'm2u_temperature_calibration': config.get(
                 'm2u_temperature_calibration'),
+            'm2u_eta_calibration': config.get('m2u_eta_calibration'),
+            'm2u_statistics_identity': m2u_statistics_identity,
+            'formal_candidate': not bool(
+                config.get('allow_unstable_m2u_shadow', False)),
             'stage': stage,
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),

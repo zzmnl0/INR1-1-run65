@@ -506,7 +506,7 @@ def _evaluate_source(
     if getattr(model, 'uses_physical_modes', False):
         raise ValueError(
             'query-local physical states are failed audit shadows; '
-            'development evaluation is restricted to M2-O')
+            'development evaluation is restricted to M2-O or M2-U production semantics')
     global_records = {mode: [] for mode in MODES}
     cell_records = {mode: defaultdict(list) for mode in MODES}
     attribution_records = {
@@ -519,7 +519,8 @@ def _evaluate_source(
     rank_records = defaultdict(list)
     m2u_records = {
         mode: {'core': [], 'active': [], 'increment': [], 'edge_increment': [],
-               'alpha_dispersion': [], 'anchor_count': []}
+               'alpha_dispersion': [], 'anchor_count': [], 'gram_valid': [],
+               'hx_rank': [], 'hx_condition': []}
         for mode in ('M10', 'M01', 'M11')}
     m2u_peak_memory_bytes = 0
     mode_seconds = {mode: 0.0 for mode in MODES}
@@ -529,6 +530,8 @@ def _evaluate_source(
     single_gain_formula_max_error = {
         source_name: 0.0 for source_name in ("FY", "COSMIC")
     }
+    core_pair_count = {mode: 0 for mode in ('M10', 'M01', 'M11')}
+    core_increment_max_error = {mode: 0.0 for mode in ('M10', 'M01', 'M11')}
     stable_filter_counts = {
         source_name: {
             "tokens": 0,
@@ -652,16 +655,26 @@ def _evaluate_source(
             if getattr(model, "uses_shared_anchor_response", False):
                 m2u_peak_memory_bytes = max(
                     m2u_peak_memory_bytes,
-                    int(joint_extras.get('m2u_peak_memory_bytes', 0)))
+                int(joint_extras.get('m2u_peak_memory_bytes', 0)))
                 for mode in ('M10', 'M01', 'M11'):
-                    core = joint_extras[
-                        f'shared_anchor_core_{mode}'].any(dim=-1)
+                    core_pairs = joint_extras[
+                        f'shared_anchor_core_{mode}']
+                    core = core_pairs.any(dim=-1)
                     active_count = joint_extras[
                         f'shared_anchor_active_count_{mode}']
                     alpha = joint_extras[f'shared_anchor_alpha_{mode}']
                     background_weight = joint_extras[
                         f'shared_anchor_background_weight_{mode}']
                     increment = joint_extras['mode_increments'][mode]
+                    response = joint_extras[
+                        f'shared_anchor_response_{mode}']
+                    if core_pairs.any():
+                        core_pair_count[mode] += int(core_pairs.sum().item())
+                        core_response_error = torch.abs(
+                            increment[:, None] - response[None, :])
+                        core_increment_max_error[mode] = max(
+                            core_increment_max_error[mode],
+                            float(torch.max(core_response_error[core_pairs]).item()))
                     m2u_records[mode]['core'].extend(
                         core.cpu().numpy().tolist())
                     m2u_records[mode]['active'].extend(
@@ -678,6 +691,12 @@ def _evaluate_source(
                             dispersion[active_count > 1].cpu().numpy().tolist())
                     m2u_records[mode]['anchor_count'].append(int(
                         joint_extras[f'shared_anchor_count_{mode}']))
+                    m2u_records[mode]['gram_valid'].extend(
+                        joint_extras[f'm2u_gram_valid_{mode}'].cpu().numpy().tolist())
+                    m2u_records[mode]['hx_rank'].extend(
+                        joint_extras[f'm2u_hx_effective_rank_{mode}'].cpu().numpy().tolist())
+                    m2u_records[mode]['hx_condition'].extend(
+                        joint_extras[f'm2u_hx_condition_{mode}'].cpu().numpy().tolist())
 
             target_np = target.cpu().numpy()
             coords_np = coords.cpu().numpy()
@@ -874,7 +893,20 @@ def _evaluate_source(
                 "M00_edge_max_abs_increment": (
                     max(records['edge_increment'])
                     if records['edge_increment'] else 0.0),
+                "M00_edge_relative_increment": (
+                    (max(records['edge_increment']) if records['edge_increment'] else 0.0)
+                    / max(float(np.sqrt(np.mean(np.square(records['increment'])))), 1e-3)),
                 "anchor_count_max": max(records['anchor_count'], default=0),
+                "gram_valid_fraction": _mean(records['gram_valid']),
+                "gram_valid_count": int(np.sum(records['gram_valid'])),
+                "hx_effective_rank_median": _finite(
+                    np.median(records['hx_rank']) if records['hx_rank'] else np.nan),
+                "hx_effective_rank_q05": _finite(
+                    np.quantile(records['hx_rank'], 0.05)
+                    if records['hx_rank'] else np.nan),
+                "hx_condition_q95": _finite(
+                    np.quantile(records['hx_condition'], 0.95)
+                    if records['hx_condition'] else np.nan),
             }
             for mode, records in m2u_records.items()
         } | {"peak_memory_bytes": m2u_peak_memory_bytes}
@@ -915,6 +947,21 @@ def _evaluate_source(
             ),
             "repeat_inference_max_abs_difference": repeat_inference_max_error,
             "repeat_inference_deterministic": repeat_inference_max_error == 0.0,
+            "core_pair_count": core_pair_count,
+            "core_pair_minimum": 1000,
+            "core_increment_max_abs_error": core_increment_max_error,
+            "core_increment_tolerance": 1e-6,
+            "core_response_passed": all(
+                core_pair_count[mode] >= 1000
+                and core_increment_max_error[mode] <= 1e-6
+                for mode in core_pair_count
+            ) if getattr(model, 'uses_shared_anchor_response', False) else True,
+            "M00_edge_continuity_passed": all(
+                ((max(records['edge_increment']) if records['edge_increment'] else 0.0)
+                 / max(float(np.sqrt(np.mean(np.square(records['increment'])))), 1e-3))
+                <= 0.005
+                for records in m2u_records.values()
+            ) if getattr(model, 'uses_shared_anchor_response', False) else True,
         },
         "cpu_seconds": {
             "total": time.perf_counter() - started,
@@ -1117,6 +1164,8 @@ def main():
         and result["invariants"]["joint_formula_passed"]
         and result["invariants"]["single_gain_formula_passed"]
         and result["invariants"]["repeat_inference_deterministic"]
+        and result["invariants"].get("core_response_passed", True)
+        and result["invariants"].get("M00_edge_continuity_passed", True)
         for result in report["sources"].values()
     )
     report["development_gates"] = _development_gate(

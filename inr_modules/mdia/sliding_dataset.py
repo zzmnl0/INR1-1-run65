@@ -1,5 +1,9 @@
 """Assemble FY targets, space-weather history, and local FY/COSMIC profiles."""
 
+import hashlib
+import json
+from pathlib import Path
+
 import numpy as np
 import torch
 
@@ -11,6 +15,76 @@ REPRESENTATIVENESS_SOURCE_PAIRS = {
     ('COSMIC', 'FY'): 2,
     ('COSMIC', 'COSMIC'): 3,
 }
+
+
+def _sha256_file(path):
+    digest = hashlib.sha256()
+    with Path(path).open('rb') as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def validate_m2u_statistics_report(path, expected=None, allow_shadow=False):
+    """Validate the frozen full train-only M2-U statistics identity."""
+    if not path:
+        raise FileNotFoundError('M2-U statistics path is empty')
+    npz_path = Path(path).resolve()
+    report_path = npz_path.with_name('empirical_covariance_report.json')
+    if not npz_path.is_file() or not report_path.is_file():
+        raise FileNotFoundError(
+            f'M2-U statistics require both {npz_path} and {report_path}')
+    with report_path.open(encoding='utf-8') as stream:
+        report = json.load(stream)
+    window = report.get('window', {})
+    if not isinstance(window, dict):
+        raise ValueError('M2-U statistics report window must be an object')
+    required = {
+        'mode': 'full',
+        'split_mode': 'date_blocked_train',
+    }
+    for key, value in required.items():
+        if report.get(key) != value:
+            raise ValueError(f'M2-U statistics report {key} != {value!r}')
+    if window.get('localization_semantics') != 'm2u':
+        raise ValueError('statistics report is not M2-U localization')
+    if (not np.isclose(window.get('hours', -1.0), 1.5)
+            or not np.isclose(window.get('space_km', -1.0), 1800.0)
+            or window.get('top_profiles') is not None
+            or window.get('points_per_profile') != 8):
+        raise ValueError('M2-U statistics window does not match production')
+    if report.get('npz_sha256') != _sha256_file(npz_path):
+        raise ValueError('M2-U statistics NPZ SHA256 does not match report')
+    gate = report.get('cross_source_gate', {})
+    if not isinstance(gate, dict):
+        raise ValueError('M2-U statistics cross_source_gate must be an object')
+    if not bool(gate.get('passed', False)) and not allow_shadow:
+        raise ValueError(
+            'M2-U cross-source statistics gate failed; formal training refused')
+    if expected:
+        identities = report.get('input_identity', {})
+        if not isinstance(identities, dict):
+            raise ValueError('M2-U statistics input_identity must be an object')
+        for name, expected_path in expected.items():
+            if expected_path is None:
+                continue
+            actual = identities.get(name, {})
+            if not isinstance(actual, dict):
+                raise ValueError(
+                    f'M2-U statistics identity for {name} must be an object')
+            resolved = str(Path(expected_path).resolve())
+            if actual.get('path') != resolved:
+                raise ValueError(
+                    f'M2-U statistics identity mismatch for {name}: '
+                    f'{actual.get("path")} != {resolved}')
+            if actual.get('sha256') != _sha256_file(resolved):
+                raise ValueError(f'M2-U statistics input changed: {name}')
+    return {
+        'path': str(npz_path),
+        'report_path': str(report_path),
+        'report': report,
+        'shadow': not bool(gate.get('passed', False)),
+    }
 
 
 def load_representativeness_kernel(path):
@@ -28,7 +102,7 @@ def load_representativeness_kernel(path):
         stable.reshape(REPRESENTATIVENESS_SHAPE).astype(np.float32))
 
 
-def load_empirical_covariance_targets(path):
+def load_empirical_covariance_targets(path, require_correlation=False):
     """Load frozen train-only covariance targets used only by Analysis loss."""
     if not path:
         return None
@@ -36,6 +110,7 @@ def load_empirical_covariance_targets(path):
         cell_id = cells['cell_id']
         stable = cells['stable']
         covariance = cells['covariance']
+        correlation = cells['correlation'] if 'correlation' in cells else None
     expected = np.arange(np.prod(REPRESENTATIVENESS_SHAPE))
     if (cell_id.shape != expected.shape
             or not np.array_equal(cell_id, expected)
@@ -43,11 +118,25 @@ def load_empirical_covariance_targets(path):
             or covariance.shape != expected.shape
             or not np.isfinite(covariance).all()):
         raise ValueError('empirical covariance cells have an incompatible schema')
+    if correlation is None:
+        if require_correlation:
+            raise ValueError(
+                'M2-U empirical covariance cells require a correlation array')
+        correlation = np.zeros_like(covariance, dtype=np.float32)
+    if (correlation.shape != expected.shape
+            or not np.isfinite(correlation[stable.astype(bool)]).all()
+            or np.any(correlation[stable.astype(bool)] < -1.0)
+            or np.any(correlation[stable.astype(bool)] > 1.0)):
+        raise ValueError('empirical covariance cells have an invalid correlation schema')
     return {
         'stable': torch.from_numpy(
             stable.reshape(REPRESENTATIVENESS_SHAPE).astype(bool)),
         'covariance': torch.from_numpy(
             covariance.reshape(REPRESENTATIVENESS_SHAPE).astype(np.float32)),
+        'correlation': torch.from_numpy(
+            np.nan_to_num(
+                correlation.reshape(REPRESENTATIVENESS_SHAPE),
+                nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)),
     }
 
 
@@ -242,6 +331,8 @@ def attach_observation_background(
     background = payload['value'].new_zeros(payload['value'].shape)
     endpoint_context = getattr(
         model, 'density_basis_semantics', None) == 'endpoint_context_symmetric'
+    use_endpoint_context = endpoint_context and hasattr(
+        model, 'encode_endpoint_context')
     physical_context = bool(
         getattr(model, 'allow_failed_query_local_shadow', False))
     if endpoint_context:
@@ -251,13 +342,13 @@ def attach_observation_background(
             *payload['value'].shape, background_state_dim)
         basis_h_sw = payload['value'].new_zeros(
             *payload['value'].shape, model.sw_out_dim)
-        if physical_context:
-            scalar_context = {
-                key: payload['value'].new_zeros(payload['value'].shape)
-                for key in (
-                    'basis_hmf2', 'basis_nmf2', 'basis_delta_alt',
-                    'basis_cos_sza', 'basis_sin_lst', 'basis_cos_lst',
-                    'basis_background_dh', 'basis_background_d2h')}
+        scalar_context = {
+            key: payload['value'].new_zeros(payload['value'].shape)
+            for key in (
+                'basis_hmf2', 'basis_nmf2', 'basis_delta_alt',
+                'basis_cos_sza', 'basis_sin_lst', 'basis_cos_lst',
+                'basis_background_dh', 'basis_background_d2h',
+                'basis_kp_eff', 'basis_f107_eff')}
     flat_coords = payload['coords'][valid]
     valid_indices = valid.flatten().nonzero(as_tuple=True)[0]
     flat_background = background.flatten()
@@ -273,10 +364,9 @@ def attach_observation_background(
             len(unique_coords), background_state_dim)
         unique_h_sw = basis_h_sw.new_empty(
             len(unique_coords), model.sw_out_dim)
-        if physical_context:
-            unique_scalar_context = {
-                key: value.new_empty(len(unique_coords))
-                for key, value in scalar_context.items()}
+        unique_scalar_context = {
+            key: value.new_zeros(len(unique_coords))
+            for key, value in scalar_context.items()}
     with torch.no_grad():
         for start in range(0, len(unique_coords), chunk_size):
             coords = unique_coords[start:start + chunk_size]
@@ -284,7 +374,7 @@ def attach_observation_background(
             peak = (iri_peak_manager.get_iri_peak(coords)
                     if iri_peak_manager is not None else None)
             encoded = (model.encode_endpoint_context(coords, sw_seq, peak)
-                       if physical_context else
+                       if use_endpoint_context else
                        model.encode_background(coords, sw_seq, iri_peak=peak))
             unique_background[start:start + len(coords)] = (
                 encoded['ne_bkg'].flatten())
@@ -292,10 +382,17 @@ def attach_observation_background(
                 unique_z_background[start:start + len(coords)] = (
                     encoded['z_background'])
                 unique_h_sw[start:start + len(coords)] = encoded['h_sw']
-                if physical_context:
-                    for key in scalar_context:
+                for key in scalar_context:
+                    source_key = key
+                    if source_key in encoded:
                         unique_scalar_context[key][start:start + len(coords)] = (
-                            encoded[key])
+                            encoded[source_key])
+                    elif key == 'basis_kp_eff' and 'kp_eff' in encoded:
+                        unique_scalar_context[key][start:start + len(coords)] = (
+                            encoded['kp_eff'])
+                    elif key == 'basis_f107_eff' and 'f107_eff' in encoded:
+                        unique_scalar_context[key][start:start + len(coords)] = (
+                            encoded['f107_eff'])
     flat_background[valid_indices] = unique_background[inverse]
     result = dict(payload)
     result['background'] = background
@@ -307,13 +404,12 @@ def attach_observation_background(
             unique_h_sw[inverse])
         result['basis_z_background'] = basis_z_background
         result['basis_h_sw'] = basis_h_sw
-        if physical_context:
-            # Scalar fields were evaluated on unique coordinates; expand them
-            # through the same inverse map as Background.
-            for key in scalar_context:
-                scalar_context[key].flatten()[valid_indices] = (
-                    unique_scalar_context[key][inverse])
-                result[key] = scalar_context[key]
+        # Scalar fields were evaluated on unique coordinates; expand them
+        # through the same inverse map as Background.
+        for key in scalar_context:
+            scalar_context[key].flatten()[valid_indices] = (
+                unique_scalar_context[key][inverse])
+            result[key] = scalar_context[key]
     return result
 
 

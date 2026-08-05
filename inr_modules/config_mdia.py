@@ -132,8 +132,8 @@ CONFIG_MDIA = {
     'use_empirical_covariance_loss': True,
     'covariance_gradient_target': 0.008139966,
     'covariance_calibration_batches': 20,
-    # M2-T: optional precision-weighted HX Gram whitening; off keeps M2-O exact.
-    'use_observation_gram_loss': False,
+    # M2-U/M2-O: precision-weighted HX Gram whitening in the active factor space.
+    'use_observation_gram_loss': True,
     'gram_gradient_target': 0.02,
     'gram_calibration_batches': 20,
     'use_direction_loss': False,
@@ -226,6 +226,13 @@ CONFIG_MDIA = {
     'm2u_tau_M10': 1.0,
     'm2u_tau_M01': 1.0,
     'm2u_tau_M11': 1.0,
+    'm2u_eta_dim': 16,
+    'm2u_eta_pretrain_profiles_per_source': 256,
+    'm2u_eta_pretrain_pairs': 100000,
+    'm2u_eta_pretrain_steps': 500,
+    'm2u_eta_pretrain_lr': 1e-3,
+    'm2u_eta_pretrain_min_effective_rank': 8.0,
+    'allow_unstable_m2u_shadow': False,
 
     # ==================== 断点续训 ====================
     'resume_ckpt': None,
@@ -292,10 +299,16 @@ def print_config_mdia():
                     'background_seed_ckpt', 'source_dropout',
                     'source_mode_schedule', 'm2u_space_support_km',
                     'm2u_time_support_h', 'm2u_state_floor',
+                    'm2u_state_direction_scale', 'm2u_state_amplitude_scale',
                     'm2u_anchor_chunk_size',
                     'm2u_temperature_calibration_batches',
                     'm2u_temperature_min_gaps',
-                    'm2u_tau_M10', 'm2u_tau_M01', 'm2u_tau_M11'],
+                    'm2u_tau_M10', 'm2u_tau_M01', 'm2u_tau_M11',
+                    'm2u_eta_dim', 'm2u_eta_pretrain_profiles_per_source',
+                    'm2u_eta_pretrain_pairs', 'm2u_eta_pretrain_steps',
+                    'm2u_eta_pretrain_lr',
+                    'm2u_eta_pretrain_min_effective_rank',
+                    'allow_unstable_m2u_shadow'],
         '其他': ['grad_clip', 'use_amp'],
     }
 

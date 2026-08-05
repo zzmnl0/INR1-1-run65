@@ -542,6 +542,45 @@ class NeuralETKFLayer(nn.Module):
         }
 
 
+# ======================== M2-U error-state embedding ========================
+
+
+class M2UErrorStateEncoder(nn.Module):
+    """Frozen-after-calibration embedding of background error context."""
+
+    def __init__(self, input_dim: int, eta_dim: int = 16):
+        super().__init__()
+        if eta_dim < 3:
+            raise ValueError('M2-U eta_dim must be at least three')
+        self.eta_dim = int(eta_dim)
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, 128), nn.SiLU(),
+            nn.Linear(128, 128), nn.SiLU(),
+            nn.Linear(128, eta_dim),
+        )
+        self.register_buffer('feature_mean', torch.zeros(input_dim))
+        self.register_buffer('feature_scale', torch.ones(input_dim))
+
+    def set_feature_standardization(self, mean, scale):
+        mean = torch.as_tensor(mean, dtype=self.feature_mean.dtype,
+                               device=self.feature_mean.device)
+        scale = torch.as_tensor(scale, dtype=self.feature_scale.dtype,
+                                device=self.feature_scale.device)
+        if mean.shape != self.feature_mean.shape or scale.shape != mean.shape:
+            raise ValueError('invalid M2-U eta feature standardization shape')
+        if not torch.isfinite(mean).all() or not torch.isfinite(scale).all():
+            raise ValueError('non-finite M2-U eta feature standardization')
+        self.feature_mean.copy_(mean)
+        self.feature_scale.copy_(scale.clamp_min(1e-6))
+
+    def forward(self, features):
+        standardized = (features - self.feature_mean) / self.feature_scale
+        raw = self.net(standardized)
+        direction = F.normalize(raw[..., :-1], dim=-1, eps=1e-6)
+        amplitude = torch.tanh(raw[..., -1:])
+        return torch.cat([direction, amplitude], dim=-1)
+
+
 # ======================== SpectralSWBranch ========================
 
 class SpectralSWBranch(nn.Module):
@@ -694,6 +733,11 @@ class FSIA_INR_Model(nn.Module):
         )
         self.enkf_n_members = enkf_n_members
         self.background_state_dim = basis_dim
+        self.m2u_eta_dim = int(config.get('m2u_eta_dim', 16))
+        self.m2u_eta_input_dim = basis_dim + sw_out_dim + 15
+        if self.uses_shared_anchor_response:
+            self.m2u_eta_encoder = M2UErrorStateEncoder(
+                self.m2u_eta_input_dim, self.m2u_eta_dim)
 
         # M2-U temperatures are train-only calibrated scalars.  They are stored
         # as buffers so checkpoint restore reproduces the exact anchor partition.
@@ -711,6 +755,9 @@ class FSIA_INR_Model(nn.Module):
                 torch.ones(4, 3, 3, 3, 4, dtype=torch.float32))
             self.register_buffer(
                 'm2u_empirical_covariance',
+                torch.zeros(4, 3, 3, 3, 4, dtype=torch.float32))
+            self.register_buffer(
+                'm2u_empirical_correlation',
                 torch.zeros(4, 3, 3, 3, 4, dtype=torch.float32))
             self.register_buffer(
                 'm2u_representativeness_ready',
@@ -1263,8 +1310,63 @@ class FSIA_INR_Model(nn.Module):
         return (ne_fused, torch.zeros_like(ne_fused),
                 torch.zeros_like(background['ne_bkg']), ne_delta, extras)
 
-    def _m2u_state_eta(self, z_background, h_sw):
-        """Continuous direction-plus-amplitude error-state embedding."""
+    def _m2u_error_state_features(self, coords, z_background, h_sw,
+                                  context=None):
+        """Build the trainable M2-U background error-state descriptor."""
+        lat, lon, alt, rel_time = (coords[..., index]
+                                    for index in range(4))
+        lat_n = lat / 90.0
+        alt_n = 2.0 * (alt - self.alt_min) / (self.alt_max - self.alt_min) - 1.0
+        lon_rad = torch.deg2rad(lon)
+        lt_rad = 2.0 * math.pi * torch.remainder(rel_time + lon / 15.0, 24.0) / 24.0
+        day_rad = 2.0 * math.pi * torch.remainder(rel_time, 24.0 * 365.25) / (24.0 * 365.25)
+        cos_sza, sin_doy, cos_doy = _compute_solar_features(lat, lon, rel_time)
+        sin_i, _ = _compute_dip_features(lat, lon)
+        if context is None:
+            hmf2 = torch.full_like(alt, 300.0)
+            nmf2 = torch.full_like(alt, 11.5)
+            kp_eff = torch.zeros_like(alt)
+            f107_eff = torch.full_like(alt, 100.0)
+            delta_alt = (alt - hmf2) / 190.0
+        else:
+            def context_value(name, default):
+                value = context.get(name) if isinstance(context, dict) else None
+                if value is None and isinstance(context, dict):
+                    alias = {
+                        'basis_hmf2': 'hmf2',
+                        'basis_nmf2': 'nmf2',
+                        'basis_delta_alt': 'delta_alt',
+                        'basis_kp_eff': 'kp_eff',
+                        'basis_f107_eff': 'f107_eff',
+                    }.get(name)
+                    if alias is not None:
+                        value = context.get(alias)
+                return default if value is None else value
+            iri_peak = context.get('iri_peak') if isinstance(context, dict) else None
+            hmf2_default = (iri_peak[..., 0] if iri_peak is not None
+                            else torch.full_like(alt, 300.0))
+            nmf2_default = (iri_peak[..., 1] if iri_peak is not None
+                            else torch.full_like(alt, 11.5))
+            hmf2 = context_value('basis_hmf2', hmf2_default)
+            nmf2 = context_value('basis_nmf2', nmf2_default)
+            kp_eff = context_value('basis_kp_eff', torch.zeros_like(alt))
+            f107_eff = context_value(
+                'basis_f107_eff', torch.full_like(alt, 100.0))
+            delta_alt = context_value('basis_delta_alt', (alt - hmf2) / 190.0)
+        physical = torch.stack([
+            lat_n, alt_n, torch.sin(lon_rad), torch.cos(lon_rad),
+            torch.sin(lt_rad), torch.cos(lt_rad), cos_sza, sin_doy,
+            cos_doy, sin_i, kp_eff / 9.0, (f107_eff - 100.0) / 100.0,
+            hmf2 / 400.0, (nmf2 - 11.0) / 2.0, delta_alt,
+        ], dim=-1)
+        return torch.cat([z_background, h_sw, physical], dim=-1)
+
+    def _m2u_state_eta(self, z_background, h_sw, coords=None, context=None):
+        """Continuous error-state embedding; legacy fallback is audit-only."""
+        if hasattr(self, 'm2u_eta_encoder') and coords is not None:
+            features = self._m2u_error_state_features(
+                coords, z_background, h_sw, context=context)
+            return self.m2u_eta_encoder(features)
         rank = min(self.enkf_n_members - 1, z_background.shape[-1])
         direction = F.normalize(z_background[..., :rank], dim=-1, eps=1e-6)
         amplitude = torch.linalg.vector_norm(h_sw, dim=-1, keepdim=True)
@@ -1280,7 +1382,7 @@ class FSIA_INR_Model(nn.Module):
         return dict(zip(names, values))
 
     def set_m2u_representativeness_kernel(
-            self, stable_grid, covariance_grid=None):
+            self, stable_grid, covariance_grid=None, correlation_grid=None):
         """Freeze the train-only anchor-token representativeness grid."""
         if not self.uses_shared_anchor_response:
             raise ValueError('M2-U representativeness requires shared anchors')
@@ -1300,6 +1402,16 @@ class FSIA_INR_Model(nn.Module):
                     or not torch.isfinite(covariance).all()):
                 raise ValueError('invalid M2-U empirical covariance grid')
             self.m2u_empirical_covariance.copy_(covariance)
+        if correlation_grid is not None:
+            correlation = torch.as_tensor(
+                correlation_grid, device=self.m2u_empirical_correlation.device,
+                dtype=self.m2u_empirical_correlation.dtype)
+            if (correlation.shape != self.m2u_empirical_correlation.shape
+                    or not torch.isfinite(correlation).all()
+                    or torch.any(correlation < -1.0)
+                    or torch.any(correlation > 1.0)):
+                raise ValueError('invalid M2-U empirical correlation grid')
+            self.m2u_empirical_correlation.copy_(correlation)
         self.m2u_representativeness_ready.fill_(True)
 
     def _shared_anchor_forward(self, coords, background, query_phi,
@@ -1331,7 +1443,10 @@ class FSIA_INR_Model(nn.Module):
                     coords.new_ones(anchor_count),
                     coords.new_zeros(anchor_count),
                     coords.new_zeros(anchor_count),
-                    coords.new_zeros(anchor_count))
+                    coords.new_zeros(anchor_count),
+                    coords.new_zeros(anchor_count, members - 1, members - 1),
+                    torch.zeros(anchor_count, device=coords.device,
+                                dtype=torch.long))
 
         if active:
             anchor_coords = torch.cat([
@@ -1373,14 +1488,16 @@ class FSIA_INR_Model(nn.Module):
             return anomalies * torch.sqrt(inflation), scales
 
         anchor_X_parts = []
+        anchor_scale_parts = []
         anchor_self_parts = []
         for _, catalog in active:
             part_coords = catalog['coords'].squeeze(0)
             part_z = catalog['basis_z_background'].squeeze(0)
             part_h = catalog['basis_h_sw'].squeeze(0)
             part_background = catalog['background'].squeeze(0)
-            part_X, _ = make_anomalies(part_z, part_h, part_coords)
+            part_X, part_scales = make_anomalies(part_z, part_h, part_coords)
             anchor_X_parts.append(part_X)
+            anchor_scale_parts.append(part_scales)
             part_phi = self._density_basis(
                 part_coords, part_coords[:, None, :],
                 part_background[:, None], part_z, part_h,
@@ -1389,12 +1506,24 @@ class FSIA_INR_Model(nn.Module):
                 'ad,and->an', part_phi, part_X))
         anchor_X = (torch.cat(anchor_X_parts, dim=0) if anchor_X_parts
                     else coords.new_zeros(0, members, state_dim))
+        anchor_scales = (torch.cat(anchor_scale_parts, dim=0)
+                         if anchor_scale_parts else
+                         coords.new_zeros(0, members - 1))
         query_X, factor_scales = make_anomalies(
             background['z_background'], background['h_sw'], coords)
         query_anomalies = torch.einsum('bd,bnd->bn', query_phi, query_X)
         anchor_self_anomalies = (
             torch.cat(anchor_self_parts, dim=0) if anchor_self_parts
             else coords.new_zeros(0, members))
+
+        def catalog_context(catalog):
+            if catalog is None:
+                return None
+            keys = (
+                'basis_hmf2', 'basis_nmf2', 'basis_delta_alt',
+                'basis_kp_eff', 'basis_f107_eff')
+            return {key: catalog[key].squeeze(0) for key in keys
+                    if key in catalog}
 
         def source_terms(source, catalog, pool_key, anchor_mask=None):
             pool = (catalog.get(pool_key, catalog)
@@ -1409,7 +1538,8 @@ class FSIA_INR_Model(nn.Module):
             obs_background = pool['background'].squeeze(0)
             obs_z = pool['basis_z_background'].squeeze(0)
             obs_h = pool['basis_h_sw'].squeeze(0)
-            obs_eta = self._m2u_state_eta(obs_z, obs_h)
+            obs_eta = self._m2u_state_eta(
+                obs_z, obs_h, obs_coords, catalog_context(pool))
             valid = pool['valid_mask'].squeeze(0).to(coords.dtype)
             innovation = obs_value - obs_background
             covariance = coords.new_zeros(anchor_count, members, members)
@@ -1419,6 +1549,10 @@ class FSIA_INR_Model(nn.Module):
             precision_mass = coords.new_zeros(anchor_count)
             covariance_loss_sum = coords.new_zeros(anchor_count)
             covariance_loss_count = coords.new_zeros(anchor_count)
+            gram = coords.new_zeros(
+                anchor_count, members - 1, members - 1)
+            gram_count = torch.zeros(
+                anchor_count, device=coords.device, dtype=torch.long)
             selected = (torch.arange(anchor_count, device=coords.device)
                         if anchor_mask is None
                         else anchor_mask.nonzero(as_tuple=True)[0])
@@ -1440,7 +1574,11 @@ class FSIA_INR_Model(nn.Module):
                     chunk_coords, obs_coords,
                     self.m2u_space_support_km, self.m2u_time_support_h)
                 distance = state_distance_squared(
-                    self._m2u_state_eta(chunk_z, chunk_h), obs_eta,
+                    self._m2u_state_eta(
+                        chunk_z, chunk_h, chunk_coords,
+                        {key: value.squeeze(0)[indices]
+                         for key, value in catalog_context(catalog).items()}
+                        if catalog is not None else None), obs_eta,
                     self.m2u_state_direction_scale,
                     self.m2u_state_amplitude_scale)
                 state_weight = self.m2u_state_floor + (
@@ -1461,12 +1599,18 @@ class FSIA_INR_Model(nn.Module):
                     else self.kalman_layer.r_cosmic).clamp_min(1e-12)
                 anomalies = torch.einsum(
                     'cjd,cnd->cjn', obs_phi, anchor_X[indices])
+                factors = self.kalman_layer.observation_factor_coordinates(
+                    obs_phi, anchor_scales[indices])
                 covariance[indices] = torch.einsum(
                     'cjn,cj,cjk->cnk', anomalies, precision,
                     anomalies)
                 rhs[indices] = torch.einsum(
                     'cjn,cj,j->cn', anomalies, precision,
                     innovation)
+                gram[indices] = torch.einsum(
+                    'cjr,cj,cjk->crk', factors, precision, factors)
+                gram_count[indices] = (precision > 0.0).sum(dim=-1).to(
+                    torch.long)
                 rep_sum[indices] = (rep * support).sum(dim=-1)
                 rep_count[indices] = support.sum(dim=-1)
                 precision_mass[indices] = precision.sum(dim=-1)
@@ -1496,7 +1640,8 @@ class FSIA_INR_Model(nn.Module):
                     coords.dtype).sum(dim=-1)
             rep_mean = rep_sum / rep_count.clamp_min(1.0)
             return (covariance, rhs, innovation, rep_mean, precision_mass,
-                    covariance_loss_sum, covariance_loss_count)
+                    covariance_loss_sum, covariance_loss_count, gram,
+                    gram_count)
 
         fy_terms = source_terms(
             'FY', anchor_observations_fy, 'self_observation_pool',
@@ -1533,16 +1678,49 @@ class FSIA_INR_Model(nn.Module):
             system_fy = system_cosmic = system_joint = base.unsqueeze(0)[:0]
             w_fy = w_cosmic = w_joint = coords.new_zeros(0, members)
 
+        def gram_stats(value, counts):
+            rank = members - 1
+            trace = torch.diagonal(value, dim1=-2, dim2=-1).sum(dim=-1)
+            finite = torch.isfinite(value).all(dim=-1).all(dim=-1)
+            eligible = (counts >= rank) & finite & (trace > 1e-12)
+            normalized = value / trace.clamp_min(1e-12).unsqueeze(-1).unsqueeze(-1)
+            identity = torch.eye(rank, device=value.device, dtype=value.dtype)
+            loss = (normalized - identity / rank).square().sum(dim=(-2, -1))
+            loss = torch.where(eligible, loss, torch.zeros_like(loss))
+            eigen = torch.linalg.eigvalsh(value).clamp_min(0.0)
+            probability = eigen / eigen.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+            effective_rank = torch.exp(-torch.sum(
+                probability * torch.log(probability.clamp_min(1e-12)), dim=-1))
+            positive = eigen[:, -1] / eigen[:, 0].clamp_min(1e-12)
+            condition = torch.sqrt(positive)
+            return loss, eligible, effective_rank, condition
+
+        fy_gram = fy_terms[7]
+        cosmic_gram = cosmic_terms[7]
+        joint_gram = fy_joint_terms[7] + cosmic_joint_terms[7]
+        fy_gram_loss, fy_gram_valid, fy_rank, fy_condition = gram_stats(
+            fy_gram, fy_terms[8])
+        cosmic_gram_loss, cosmic_gram_valid, cosmic_rank, cosmic_condition = (
+            gram_stats(cosmic_gram, cosmic_terms[8]))
+        joint_gram_loss, joint_gram_valid, joint_rank, joint_condition = (
+            gram_stats(joint_gram, fy_joint_terms[8] + cosmic_joint_terms[8]))
+
         query_eta = self._m2u_state_eta(
-            background['z_background'], background['h_sw'])
-        anchor_eta = self._m2u_state_eta(anchor_z, anchor_h)
+            background['z_background'], background['h_sw'], coords, background)
+        anchor_context_parts = [catalog_context(catalog) for _, catalog in active]
+        anchor_context = {
+            key: torch.cat([part[key] for part in anchor_context_parts], dim=0)
+            for key in anchor_context_parts[0]
+        } if anchor_context_parts else None
+        anchor_eta = self._m2u_state_eta(
+            anchor_z, anchor_h, anchor_coords, anchor_context)
 
         def mix(weights, tau, mask):
             if anchor_count == 0:
                 return (coords.new_zeros(batch), coords.new_zeros(batch, 0),
                         torch.ones(batch, device=coords.device, dtype=coords.dtype),
                         coords.new_zeros(batch, 0), coords.new_zeros(batch, 0),
-                        coords.new_zeros(batch, 0))
+                        coords.new_zeros(batch, 0), coords.new_zeros(0))
             result = anchor_mixing_weights(
                 coords[:, :4], anchor_coords, query_eta, anchor_eta,
                 self.m2u_state_direction_scale,
@@ -1557,15 +1735,16 @@ class FSIA_INR_Model(nn.Module):
                 'an,an->a', anchor_self_anomalies, weights)
             increment = torch.einsum('ba,a->b', result['beta'], anchor_response)
             return (increment, result['beta'], result['background_weight'],
-                    result['scores'], result['alpha'], result['cover'])
+                    result['scores'], result['alpha'], result['cover'],
+                    anchor_response)
 
-        delta_fy, beta_fy, bg_fy, scores_fy, alpha_fy, cover_fy = mix(
+        delta_fy, beta_fy, bg_fy, scores_fy, alpha_fy, cover_fy, response_fy = mix(
             w_fy, self.m2u_temperatures[0], anchor_source)
         (delta_cosmic, beta_cosmic, bg_cosmic, scores_cosmic,
-         alpha_cosmic, cover_cosmic) = mix(
+         alpha_cosmic, cover_cosmic, response_cosmic) = mix(
             w_cosmic, self.m2u_temperatures[1], ~anchor_source)
         (delta_joint, beta_joint, bg_joint, scores_joint,
-         alpha_joint, cover_joint) = mix(
+         alpha_joint, cover_joint, response_joint) = mix(
             w_joint, self.m2u_temperatures[2],
             torch.ones(anchor_count, device=coords.device, dtype=torch.bool))
         weights_joint_query = (torch.einsum('ba,an->bn', beta_joint, w_joint)
@@ -1658,6 +1837,9 @@ class FSIA_INR_Model(nn.Module):
             'shared_anchor_cover_M10': cover_fy,
             'shared_anchor_cover_M01': cover_cosmic,
             'shared_anchor_cover_M11': cover_joint,
+            'shared_anchor_response_M10': response_fy,
+            'shared_anchor_response_M01': response_cosmic,
+            'shared_anchor_response_M11': response_joint,
             'shared_anchor_core_M10': (alpha_fy == 1.0) & (cover_fy == 1.0),
             'shared_anchor_core_M01': (
                 (alpha_cosmic == 1.0) & (cover_cosmic == 1.0)),
@@ -1683,6 +1865,18 @@ class FSIA_INR_Model(nn.Module):
                 fy_joint_terms[5] + cosmic_joint_terms[5]),
             'm2u_covariance_loss_count': (
                 fy_joint_terms[6] + cosmic_joint_terms[6]),
+            'm2u_gram_loss_sum_M10': fy_gram_loss,
+            'm2u_gram_loss_sum_M01': cosmic_gram_loss,
+            'm2u_gram_loss_sum_M11': joint_gram_loss,
+            'm2u_gram_valid_M10': fy_gram_valid,
+            'm2u_gram_valid_M01': cosmic_gram_valid,
+            'm2u_gram_valid_M11': joint_gram_valid,
+            'm2u_hx_effective_rank_M10': fy_rank,
+            'm2u_hx_effective_rank_M01': cosmic_rank,
+            'm2u_hx_effective_rank_M11': joint_rank,
+            'm2u_hx_condition_M10': fy_condition,
+            'm2u_hx_condition_M01': cosmic_condition,
+            'm2u_hx_condition_M11': joint_condition,
         }
         extras.update(diag_source('FY', beta_fy, fy_terms, fy_cov, fy_rhs))
         extras.update(diag_source(

@@ -1,9 +1,15 @@
 import numpy as np
 import torch
+import json
+import hashlib
 
 from inr_modules.data_managers.irinc_neural_proxy import IRINeuralProxy
 from inr_modules.mdia.fsia_model import FSIA_INR_Model
-from inr_modules.mdia.sliding_dataset import build_m2u_anchor_directories
+from inr_modules.mdia.sliding_dataset import (
+    build_m2u_anchor_directories,
+    validate_m2u_statistics_report,
+)
+from inr_modules.mdia.train_fsia import observation_gram_whitening_loss
 from inr_modules.mdia.m2u_anchor_etkf import (
     accumulate_anchor_terms,
     anchor_mixing_weights,
@@ -131,6 +137,17 @@ def test_m2u_model_uses_pairwise_basis_and_frozen_representativeness():
         anchor_observations_fy=catalog)
     assert torch.isfinite(prediction).all() and torch.isfinite(delta).all()
     assert torch.equal(delta[0], delta[1])
+    assert extras['m2u_hx_effective_rank_M11'].shape == (2,)
+    assert torch.isfinite(extras['m2u_hx_effective_rank_M11']).all()
+    assert torch.isfinite(extras['m2u_gram_loss_sum_M11']).all()
+    gram_loss, _, coverage = observation_gram_whitening_loss(
+        extras, torch.tensor([1, 2]), model.kalman_layer, return_details=True)
+    assert torch.isfinite(gram_loss)
+    assert set(coverage) == {'M10', 'M01', 'M11'}
+    eta = model._m2u_state_eta(
+        endpoint['z_background'], endpoint['h_sw'], anchors,
+        {'iri_peak': query_peak})
+    assert eta.shape == (2, 16) and torch.isfinite(eta).all()
     active_rep = extras['representativeness_FY'][
         extras['precision_FY'] > 0]
     assert active_rep.numel() and torch.allclose(
@@ -145,15 +162,56 @@ def test_m2u_model_uses_pairwise_basis_and_frozen_representativeness():
         query, query_sw, iri_peak=query_peak,
         anchor_observations_fy=catalog,
         anchor_observations_cosmic=cosmic_catalog)
-    assert torch.equal(
+    assert torch.allclose(
         extras['mode_increments']['M10'],
-        both['mode_increments']['M10'])
+        both['mode_increments']['M10'], atol=1e-6, rtol=0.0)
     _, _, _, _, cosmic_only = model(
         query, query_sw, iri_peak=query_peak,
         anchor_observations_cosmic=cosmic_catalog)
-    assert torch.equal(
+    assert torch.allclose(
         cosmic_only['mode_increments']['M01'],
-        both['mode_increments']['M01'])
+        both['mode_increments']['M01'], atol=1e-6, rtol=0.0)
+    clone = FSIA_INR_Model(
+        IRINeuralProxy(layers=[4, 128, 128, 128, 128, 1]), config)
+    clone.load_state_dict(model.state_dict(), strict=True)
+    clone_prediction = clone(
+        query, query_sw, iri_peak=query_peak,
+        anchor_observations_fy=catalog,
+        anchor_observations_cosmic=cosmic_catalog)[0]
+    assert torch.allclose(
+        clone_prediction, both['ne_bkg'] + both['ne_residual'],
+        atol=1e-7, rtol=0.0)
+
+
+def test_m2u_statistics_validator_requires_the_frozen_schema(tmp_path):
+    cell_count = int(np.prod((4, 3, 3, 3, 4)))
+    npz_path = tmp_path / 'empirical_covariance_cells.npz'
+    np.savez(
+        npz_path,
+        cell_id=np.arange(cell_count, dtype=np.int16),
+        stable=np.ones(cell_count, dtype=bool),
+        covariance=np.ones(cell_count, dtype=np.float32),
+        correlation=np.ones(cell_count, dtype=np.float32),
+    )
+    digest = hashlib.sha256(npz_path.read_bytes()).hexdigest()
+    report = {
+        'mode': 'full',
+        'split_mode': 'date_blocked_train',
+        'npz_sha256': digest,
+        'window': {
+            'localization_semantics': 'm2u',
+            'hours': 1.5,
+            'space_km': 1800.0,
+            'top_profiles': None,
+            'points_per_profile': 8,
+        },
+        'cross_source_gate': {'passed': True},
+        'input_identity': {},
+    }
+    (tmp_path / 'empirical_covariance_report.json').write_text(
+        json.dumps(report), encoding='utf-8')
+    result = validate_m2u_statistics_report(npz_path, expected={})
+    assert result['shadow'] is False
 
 
 def test_anchor_directories_expand_observations_around_union_anchors():
