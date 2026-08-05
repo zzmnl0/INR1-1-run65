@@ -157,11 +157,12 @@ def _directory_payload(index, coords_np, exclude_profile_ids=None,
             payload['value'][row, offset:offset + count] = values[:, 4]
             payload['valid_mask'][row, offset:offset + count] = True
             payload['profile_id'][row, offset:offset + count] = profile_id
-            dlat = np.abs(values[:, 0] - coords_np[row, 0]) / 5.0
-            dlon = np.abs((values[:, 1] - coords_np[row, 1] + 180.0) % 360.0 - 180.0) / 15.0
+            distance = _great_circle_km_np(
+                coords_np[row, 0], coords_np[row, 1],
+                values[:, 0], values[:, 1]) / float(space_km)
             dt = np.abs(values[:, 3] - coords_np[row, 3]) / float(time_h)
             payload['rho_squared'][row, offset:offset + count] = np.maximum.reduce(
-                [dlat, dlon, dt]).astype(np.float32) ** 2
+                [distance, dt]).astype(np.float32) ** 2
             offset += count
     return payload
 

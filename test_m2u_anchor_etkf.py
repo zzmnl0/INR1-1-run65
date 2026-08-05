@@ -1,10 +1,16 @@
+import numpy as np
 import torch
 
+from inr_modules.data_managers.irinc_neural_proxy import IRINeuralProxy
+from inr_modules.mdia.fsia_model import FSIA_INR_Model
+from inr_modules.mdia.sliding_dataset import build_m2u_anchor_directories
 from inr_modules.mdia.m2u_anchor_etkf import (
     accumulate_anchor_terms,
     anchor_mixing_weights,
     blend_anchor_increments,
     flat_top_cover,
+    normalized_support_distance_squared,
+    pairwise_representativeness_weight,
     solve_anchor_weights,
     sparsemax,
 )
@@ -50,8 +56,154 @@ def test_anchor_terms_and_shared_increment():
     assert torch.isfinite(increment).all()
 
 
+def test_pairwise_representativeness_uses_anchor_source_and_spherical_rho():
+    target = torch.tensor([
+        [0.0, 0.0, 200.0, 0.0],
+        [0.0, 0.0, 200.0, 0.0],
+    ])
+    observation = torch.tensor([[0.0, 0.0, 200.0, 0.0]])
+    rho_squared = normalized_support_distance_squared(target, observation)
+    stable = torch.zeros(4, 3, 3, 3, 4)
+    stable[0] = 1.0
+    weight = pairwise_representativeness_weight(
+        target, observation, rho_squared,
+        torch.tensor([True, False]), 'FY', stable, floor=0.25)
+    assert torch.equal(weight[:, 0], torch.tensor([1.0, 0.25]))
+
+
+def test_normalized_support_distance_reaches_time_boundary():
+    target = torch.tensor([[0.0, 0.0, 200.0, 0.0]])
+    observation = torch.tensor([[0.0, 0.0, 200.0, 1.5]])
+    assert torch.equal(
+        normalized_support_distance_squared(target, observation),
+        torch.ones(1, 1))
+
+
+def test_m2u_model_uses_pairwise_basis_and_frozen_representativeness():
+    config = {
+        'alt_range': (120.0, 500.0), 'seq_len': 36, 'basis_dim': 64,
+        'sw_hidden_dim': 16, 'sw_lstm_layers': 1, 'sw_out_dim': 16,
+        'tau_kp_init': 8.0, 'tau_solar_init': 72.0,
+        'enkf_n_members': 8, 'enkf_pert_hidden': 32,
+        'enkf_anomaly_parameterization': 'orthogonal_factor',
+        'density_basis_semantics': 'endpoint_context_symmetric',
+        'analysis_state_semantics': 'shared_anchor_response',
+        'context_semantics': 'shared_error_state',
+        'representativeness_floor': 0.25,
+        'use_sw_freq': False,
+    }
+    proxy = IRINeuralProxy(layers=[4, 128, 128, 128, 128, 1])
+    model = FSIA_INR_Model(proxy, config)
+    model.set_m2u_representativeness_kernel(
+        torch.zeros(4, 3, 3, 3, 4),
+        torch.zeros(4, 3, 3, 3, 4))
+    query = torch.tensor([
+        [0.0, 0.0, 250.0, 24.0],
+        [0.0, 0.0, 250.0, 24.0],
+    ])
+    anchors = torch.tensor([
+        [0.0, 0.0, 250.0, 24.0],
+        [2.0, 3.0, 320.0, 24.5],
+    ])
+    query_sw = torch.zeros(2, 36, 2)
+    anchor_sw = torch.zeros(2, 36, 2)
+    query_peak = torch.tensor([[300.0, 11.5], [300.0, 11.5]])
+    anchor_peak = torch.tensor([[300.0, 11.5], [300.0, 11.5]])
+    with torch.no_grad():
+        endpoint = model.encode_background(
+            anchors, anchor_sw, iri_peak=anchor_peak)
+    base = {
+        'coords': anchors.unsqueeze(0),
+        'value': (endpoint['ne_bkg'].squeeze(-1) + 0.1).unsqueeze(0),
+        'background': endpoint['ne_bkg'].squeeze(-1).unsqueeze(0),
+        'valid_mask': torch.ones(1, 2, dtype=torch.bool),
+        'rho_squared': torch.zeros(1, 2),
+        'profile_id': torch.tensor([[1, 2]]),
+        'source': torch.zeros(1, 2, dtype=torch.int8),
+        'basis_z_background': endpoint['z_background'].unsqueeze(0),
+        'basis_h_sw': endpoint['h_sw'].unsqueeze(0),
+    }
+    catalog = dict(base)
+    catalog['self_observation_pool'] = base
+    catalog['joint_observation_pool'] = base
+    prediction, _, _, delta, extras = model(
+        query, query_sw, iri_peak=query_peak,
+        anchor_observations_fy=catalog)
+    assert torch.isfinite(prediction).all() and torch.isfinite(delta).all()
+    assert torch.equal(delta[0], delta[1])
+    active_rep = extras['representativeness_FY'][
+        extras['precision_FY'] > 0]
+    assert active_rep.numel() and torch.allclose(
+        active_rep, torch.full_like(active_rep, 0.25))
+    cosmic_base = dict(base)
+    cosmic_base['value'] = base['background'] - 0.1
+    cosmic_base['source'] = torch.ones(1, 2, dtype=torch.int8)
+    cosmic_catalog = dict(cosmic_base)
+    cosmic_catalog['self_observation_pool'] = cosmic_base
+    cosmic_catalog['joint_observation_pool'] = cosmic_base
+    _, _, _, _, both = model(
+        query, query_sw, iri_peak=query_peak,
+        anchor_observations_fy=catalog,
+        anchor_observations_cosmic=cosmic_catalog)
+    assert torch.equal(
+        extras['mode_increments']['M10'],
+        both['mode_increments']['M10'])
+    _, _, _, _, cosmic_only = model(
+        query, query_sw, iri_peak=query_peak,
+        anchor_observations_cosmic=cosmic_catalog)
+    assert torch.equal(
+        cosmic_only['mode_increments']['M01'],
+        both['mode_increments']['M01'])
+
+
+def test_anchor_directories_expand_observations_around_union_anchors():
+    class Index:
+        def __init__(self, longitude_offset, source):
+            self.longitude_offset = longitude_offset
+            self.source = source
+
+        def query_observation_directory(self, coords, **_):
+            coords = np.asarray(coords, dtype=np.float32).copy()
+            coords[:, 1] += self.longitude_offset
+            count = len(coords)
+            return {
+                'coords': coords[:, None, :4],
+                'value': np.ones((count, 1), dtype=np.float32),
+                'valid_mask': np.ones((count, 1), dtype=bool),
+                'profile_id': np.arange(count, dtype=np.int64)[:, None]
+                + self.source * 100,
+                'source': np.full((count, 1), self.source, dtype=np.int8),
+                'rho_squared': np.zeros((count, 1), dtype=np.float32),
+            }
+
+    class Model:
+        density_basis_semantics = 'none'
+
+        @staticmethod
+        def encode_background(coords, *_args, **_kwargs):
+            return {'ne_bkg': torch.zeros(len(coords), 1)}
+
+    class Weather:
+        @staticmethod
+        def get_drivers_sequence(time):
+            return torch.zeros(len(time), 1, 2)
+
+    fy, cosmic = build_m2u_anchor_directories(
+        {'FY': Index(0.0, 0), 'COSMIC': Index(10.0, 1)},
+        torch.tensor([[0.0, 0.0, 250.0, 0.0]]), torch.device('cpu'),
+        Model(), Weather())
+    assert fy['self_observation_pool']['coords'].shape[1] == 1
+    assert fy['joint_observation_pool']['coords'].shape[1] == 2
+    assert cosmic['self_observation_pool']['coords'].shape[1] == 1
+    assert cosmic['joint_observation_pool']['coords'].shape[1] == 2
+
+
 if __name__ == '__main__':
     test_sparsemax_has_one_hot_core_and_continuous_simplex()
     test_flat_cover_fades_single_anchor_to_background()
     test_anchor_terms_and_shared_increment()
+    test_pairwise_representativeness_uses_anchor_source_and_spherical_rho()
+    test_normalized_support_distance_reaches_time_boundary()
+    test_m2u_model_uses_pairwise_basis_and_frozen_representativeness()
+    test_anchor_directories_expand_observations_around_union_anchors()
     print('M2-U anchor ETKF tests passed')

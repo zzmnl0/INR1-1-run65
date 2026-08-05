@@ -24,6 +24,7 @@ try:
         solve_density_modes,
     )
     from .physics_losses_mdia import profile_huber_loss, second_difference_loss
+    from .m2u_anchor_etkf import anchor_scores
     from .sliding_dataset import (
         SlidingWindowBatchProcessor,
         attach_representativeness_weight,
@@ -32,14 +33,14 @@ try:
         load_empirical_covariance_targets,
         load_representativeness_kernel,
         query_observation_payload,
-        query_observation_directory,
-        build_shared_anchor_catalog,
+        build_m2u_anchor_directories,
     )
     from .plotting import plot_training_curves
 except ImportError:
     from config_mdia import get_config_mdia
     from fsia_model import FSIA_INR_Model, solve_density_modes
     from physics_losses_mdia import profile_huber_loss, second_difference_loss
+    from m2u_anchor_etkf import anchor_scores
     from sliding_dataset import (
         SlidingWindowBatchProcessor,
         attach_representativeness_weight,
@@ -48,8 +49,7 @@ except ImportError:
         load_empirical_covariance_targets,
         load_representativeness_kernel,
         query_observation_payload,
-        query_observation_directory,
-        build_shared_anchor_catalog,
+        build_m2u_anchor_directories,
     )
     from plotting import plot_training_curves
 
@@ -240,6 +240,9 @@ def _record_resolved_training_config(config, covariance_strata):
                 'm2u_space_support_km', 'm2u_time_support_h',
                 'm2u_state_floor', 'm2u_tau_M10', 'm2u_tau_M01',
                 'm2u_tau_M11')}
+        manifest['resolved_training']['m2u'][
+            'temperature_calibration'] = config.get(
+                'm2u_temperature_calibration')
     temp_path = f'{path}.tmp'
     with open(temp_path, 'w', encoding='utf-8') as stream:
         json.dump(manifest, stream, ensure_ascii=False, indent=2)
@@ -256,34 +259,111 @@ def _query_observations(index, coords, profile_ids=None,
         allowed_profile_ids=allowed_profile_ids)
 
 
-def _m2u_anchor_catalog(index, model, sw_manager, iri_peak_manager, coords,
-                        profile_ids, allowed_profile_ids, config):
-    """Build one source-specific anchor catalog for the whole query batch."""
-    if index is None:
-        return None
-    excluded = None
-    if profile_ids is not None:
-        excluded = np.unique(profile_ids.detach().cpu().numpy().astype(np.int64))
-    payload = query_observation_directory(
-        index, coords, coords.device, exclude_profile_ids=excluded,
-        allowed_profile_ids=allowed_profile_ids,
-        space_km=float(config.get('m2u_space_support_km', 1800.0)),
-        time_h=float(config.get('m2u_time_support_h', 1.5)),
-    )
-    catalog = build_shared_anchor_catalog(payload)
-    if catalog is None or catalog['coords'].shape[1] == 0:
-        return catalog
-    # Anchor payloads are already source-separated and target profiles were
-    # removed before catalog construction.  Background/context is evaluated
-    # once per unique token, not once per query.
-    return attach_observation_background(
-        catalog, model, sw_manager, iri_peak_manager)
-
-
 def _unpack_source_batch(batch, device):
     data, _, profile_ids = batch
     data = data.to(device, non_blocking=True)
     return data[:, :4], data[:, 4:5], profile_ids.to(device, non_blocking=True)
+
+
+def _m2u_score_gaps(scores):
+    gaps = []
+    for row in scores:
+        finite = row[torch.isfinite(row)]
+        if finite.numel() >= 2:
+            top = torch.topk(finite, 2).values
+            gap = top[0] - top[1]
+            if torch.isfinite(gap) and gap > 0:
+                gaps.append(gap)
+    return gaps
+
+
+def _calibrate_m2u_temperatures(
+        model, train_loader, cosmic_train_loader, batch_processor, config,
+        iri_peak_manager, allowed_profile_ids):
+    """Calibrate all three Sparsemax temperatures on a fixed train-only pool."""
+    if not model.uses_shared_anchor_response:
+        return None
+    batches = int(config.get('m2u_temperature_calibration_batches', 8))
+    minimum = int(config.get('m2u_temperature_min_gaps', 32))
+    if batches < 1 or minimum < 1:
+        raise ValueError('M2-U temperature calibration limits must be positive')
+    gaps = {mode: [] for mode in ('M10', 'M01', 'M11')}
+    per_source = max(1, (batches + 1) // 2)
+    indices = {'FY': batch_processor.fy_nb_index,
+               'COSMIC': batch_processor.cosmic_nb_index}
+    model.eval()
+    with torch.no_grad():
+        for target_source, loader in (
+                ('FY', train_loader), ('COSMIC', cosmic_train_loader)):
+            for batch_index, batch in enumerate(loader):
+                if batch_index >= per_source:
+                    break
+                coords, _, profile_ids = _unpack_source_batch(
+                    batch, next(model.parameters()).device)
+                excluded = np.unique(
+                    profile_ids.detach().cpu().numpy().astype(np.int64))
+                fy, cosmic = build_m2u_anchor_directories(
+                    indices, coords, coords.device, model,
+                    batch_processor.sw_manager, iri_peak_manager,
+                    allowed_profile_ids=allowed_profile_ids,
+                    excluded_profile_ids={target_source: excluded},
+                    space_km=model.m2u_space_support_km,
+                    time_h=model.m2u_time_support_h,
+                    build_observation_pools=False)
+                sw_seq = batch_processor.sw_manager.get_drivers_sequence(
+                    coords[:, 3])
+                peak = (iri_peak_manager.get_iri_peak(coords)
+                        if iri_peak_manager is not None else None)
+                background = model.encode_background(
+                    coords, sw_seq, iri_peak=peak)
+                query_eta = model._m2u_state_eta(
+                    background['z_background'], background['h_sw'])
+                mode_catalogs = {
+                    'M10': [fy], 'M01': [cosmic],
+                    'M11': [fy, cosmic],
+                }
+                for mode, catalogs in mode_catalogs.items():
+                    valid = [catalog for catalog in catalogs
+                             if catalog is not None
+                             and catalog['coords'].shape[1] > 0]
+                    if not valid:
+                        continue
+                    anchor_coords = torch.cat([
+                        catalog['coords'].squeeze(0) for catalog in valid])
+                    anchor_eta = model._m2u_state_eta(
+                        torch.cat([catalog['basis_z_background'].squeeze(0)
+                                   for catalog in valid]),
+                        torch.cat([catalog['basis_h_sw'].squeeze(0)
+                                   for catalog in valid]))
+                    scores, _ = anchor_scores(
+                        coords, anchor_coords, query_eta, anchor_eta,
+                        model.m2u_state_direction_scale,
+                        model.m2u_state_amplitude_scale, 1.0,
+                        model.m2u_space_support_km,
+                        model.m2u_time_support_h)
+                    gaps[mode].extend(_m2u_score_gaps(scores))
+    tensors = {}
+    for mode, values in gaps.items():
+        if len(values) < minimum:
+            raise RuntimeError(
+                f'M2-U {mode} temperature has only {len(values)} valid gaps; '
+                f'{minimum} required')
+        tensors[mode] = torch.stack(values)
+        median = float(torch.median(tensors[mode]).item())
+        if not np.isfinite(median) or median <= 1e-3:
+            raise RuntimeError(f'M2-U {mode} temperature is degenerate: {median}')
+    temperatures = model.set_m2u_temperatures(tensors)
+    report = {
+        'method': 'train_only_positive_top2_score_gap_median',
+        'batches': 2 * per_source,
+        'gap_counts': {mode: len(values) for mode, values in gaps.items()},
+        'temperatures': temperatures,
+    }
+    config['m2u_temperature_calibration'] = report
+    for mode, value in temperatures.items():
+        config[f'm2u_tau_{mode}'] = value
+    print(f'[M2-U温度校准] {report}')
+    return report
 
 
 def _apply_source_dropout(fy_obs, cosmic_obs, profile_ids, probabilities):
@@ -425,16 +505,19 @@ def _source_forward(model, batch_processor, coords, sw_seq, iri_peak,
             == 'shared_anchor_response'):
         if stage == 'background':
             return model(coords, sw_seq, iri_peak=iri_peak)
-        fy_anchor = _m2u_anchor_catalog(
-            batch_processor.fy_nb_index, model, batch_processor.sw_manager,
-            iri_peak_manager, coords,
-            profile_ids if target_source == 'FY' else None,
-            allowed_profile_ids.get('FY'), config)
-        cosmic_anchor = _m2u_anchor_catalog(
-            batch_processor.cosmic_nb_index, model,
-            batch_processor.sw_manager, iri_peak_manager, coords,
-            profile_ids if target_source == 'COSMIC' else None,
-            allowed_profile_ids.get('COSMIC'), config)
+        excluded = {}
+        if profile_ids is not None:
+            excluded[target_source] = np.unique(
+                profile_ids.detach().cpu().numpy().astype(np.int64))
+        fy_anchor, cosmic_anchor = build_m2u_anchor_directories(
+            {'FY': batch_processor.fy_nb_index,
+             'COSMIC': batch_processor.cosmic_nb_index},
+            coords, coords.device, model, batch_processor.sw_manager,
+            iri_peak_manager=iri_peak_manager,
+            allowed_profile_ids=allowed_profile_ids,
+            excluded_profile_ids=excluded,
+            space_km=float(config.get('m2u_space_support_km', 1800.0)),
+            time_h=float(config.get('m2u_time_support_h', 1.5)))
         return model(
             coords, sw_seq, iri_peak=iri_peak,
             anchor_observations_fy=fy_anchor,
@@ -761,6 +844,11 @@ def empirical_covariance_loss(
     """Match model covariance to frozen train-only profile-blocked cells."""
     if empirical_targets is None:
         raise ValueError('empirical covariance targets are required')
+    if 'm2u_covariance_loss_sum' in extras:
+        count = extras['m2u_covariance_loss_count'].sum()
+        if count <= 0:
+            return extras['ne_bkg'].sum() * 0.0
+        return extras['m2u_covariance_loss_sum'].sum() / count
     target_r = (
         extras['r_fy'] if target_source == 'FY' else extras['r_cosmic'])
     query_sum = extras['ne_bkg'].new_zeros(extras['ne_bkg'].shape[0])
@@ -1821,8 +1909,14 @@ def _architecture_signature(config):
             'm2u_time_support_h': float(
                 config.get('m2u_time_support_h', 1.5)),
             'm2u_state_floor': float(config.get('m2u_state_floor', 0.05)),
+            'm2u_state_direction_scale': float(
+                config.get('m2u_state_direction_scale', 1.0)),
+            'm2u_state_amplitude_scale': float(
+                config.get('m2u_state_amplitude_scale', 1.0)),
             'm2u_anchor_chunk_size': int(
                 config.get('m2u_anchor_chunk_size', 256)),
+            'm2u_representativeness_geometry': 'spherical_time_max_norm',
+            'm2u_temperature_semantics': 'train_only_median_positive_top2_gap',
             'm2u_tau_M10': float(config.get('m2u_tau_M10', 1.0)),
             'm2u_tau_M01': float(config.get('m2u_tau_M01', 1.0)),
             'm2u_tau_M11': float(config.get('m2u_tau_M11', 1.0)),
@@ -2146,6 +2240,13 @@ def train_fsia(config=None):
         empirical_covariance_targets=empirical_covariance_targets)
 
     model = FSIA_INR_Model(iri_proxy=iri_proxy, config=config).to(device)
+    if analysis_semantics == 'shared_anchor_response':
+        if representativeness_kernel is None:
+            raise ValueError('M2-U requires a frozen train-only representativeness grid')
+        model.set_m2u_representativeness_kernel(
+            representativeness_kernel,
+            empirical_covariance_targets['covariance']
+            if empirical_covariance_targets is not None else None)
     resume_state = None
     start_epoch = 0
     history = []
@@ -2230,6 +2331,12 @@ def train_fsia(config=None):
             if loaded.get('gram_gradient_calibration') is not None:
                 config['gram_gradient_calibration'] = loaded[
                     'gram_gradient_calibration']
+            if loaded.get('m2u_temperature_calibration') is not None:
+                config['m2u_temperature_calibration'] = loaded[
+                    'm2u_temperature_calibration']
+                for mode, value in loaded[
+                        'm2u_temperature_calibration']['temperatures'].items():
+                    config[f'm2u_tau_{mode}'] = float(value)
             resume_state = loaded
             if loaded.get('torch_rng_state') is not None:
                 torch.set_rng_state(loaded['torch_rng_state'].cpu())
@@ -2275,6 +2382,11 @@ def train_fsia(config=None):
         _calibrate_fixed_r(
             model, train_loader, cosmic_train_loader, device,
             sw_manager, iri_peak_manager, batch_processor, config)
+        if (model.uses_shared_anchor_response
+                and 'm2u_temperature_calibration' not in config):
+            _calibrate_m2u_temperatures(
+                model, train_loader, cosmic_train_loader, batch_processor,
+                config, iri_peak_manager, allowed_profiles['train'])
         _reset_random_seeds(config.get('analysis_seed', 42), device)
 
     _set_training_stage(model, current_stage)
@@ -2324,6 +2436,11 @@ def train_fsia(config=None):
             _calibrate_fixed_r(
                 model, train_loader, cosmic_train_loader, device,
                 sw_manager, iri_peak_manager, batch_processor, config)
+            if (model.uses_shared_anchor_response
+                    and 'm2u_temperature_calibration' not in config):
+                _calibrate_m2u_temperatures(
+                    model, train_loader, cosmic_train_loader, batch_processor,
+                    config, iri_peak_manager, allowed_profiles['train'])
             _reset_random_seeds(config.get('analysis_seed', 42), device)
             current_stage = stage
             _set_training_stage(model, stage)
@@ -2467,6 +2584,8 @@ def train_fsia(config=None):
             'resolved_gram_weight': config.get('resolved_gram_weight'),
             'gram_gradient_calibration': config.get(
                 'gram_gradient_calibration'),
+            'm2u_temperature_calibration': config.get(
+                'm2u_temperature_calibration'),
             'stage': stage,
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),

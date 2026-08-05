@@ -32,10 +32,10 @@ from main_fsia import _code_identity, _file_identity
 ROOT = Path(__file__).resolve().parent
 OUTPUT_DEFAULT = (
     ROOT / 'isr_validation_outputs'
-    / 'run66-empirical-covariance-train-only')
+    / 'run66-m2u-empirical-covariance-date-blocked-train-only')
 BACKGROUND_DEFAULT = (
-    ROOT / 'checkpoints_fsia' / 'run66-etkf-loss'
-    / 'best_background_model.pth')
+    Path(r'D:\code11\IRI01\IRI03\INR1-1-run65\checkpoints_fsia'
+         r'\run66-etkf-loss\best_background_model.pth'))
 FY_PATH = Path(r'D:\FYsatellite\EDP_data\fy_202409_qc_v2.npy')
 FY_INDEX_PATH = Path(
     r'D:\FYsatellite\EDP_data\fy_202409_qc_v2_index.npz')
@@ -119,6 +119,22 @@ def _local_time(coords):
 
 def _localization(rho):
     return 1.0 - 3.0 * rho ** 2 + 2.0 * rho ** 3
+
+
+def _flat_top(rho):
+    transition = np.clip(2.0 * rho - 1.0, 0.0, 1.0)
+    taper = 1.0 - 3.0 * transition ** 2 + 2.0 * transition ** 3
+    return np.where(rho <= 0.5, 1.0, np.where(rho < 1.0, taper, 0.0))
+
+
+def _great_circle_km(lat_a, lon_a, lat_b, lon_b):
+    lat_a, lon_a, lat_b, lon_b = map(
+        np.deg2rad, (lat_a, lon_a, lat_b, lon_b))
+    dlat = lat_b - lat_a
+    dlon = (lon_b - lon_a + np.pi) % (2.0 * np.pi) - np.pi
+    hav = (np.sin(dlat * 0.5) ** 2
+           + np.cos(lat_a) * np.cos(lat_b) * np.sin(dlon * 0.5) ** 2)
+    return 2.0 * 6371.0 * np.arcsin(np.sqrt(np.clip(hav, 0.0, 1.0)))
 
 
 def _moment_summary(rows, prefix):
@@ -321,7 +337,8 @@ def _reduce_profile_pairs(inverse, target_values, observation_values, weights):
 
 def _append_profile_rows(
         target, target_indices, observation, observation_index, pair_index,
-        rows_by_cell, neighbor_sets, pair_counts, pair_masses):
+        rows_by_cell, neighbor_sets, pair_counts, pair_masses,
+        localization_semantics='m2u'):
     profile_data = target.data[target_indices]
     profile_valid = target.valid[target_indices]
     profile_residual = target.residual[target_indices]
@@ -333,38 +350,73 @@ def _append_profile_rows(
         profile_ids, profile_valid.shape[1])[point_valid]
     exclude = (
         point_profile if target.source == observation.source else None)
-    cached = observation_index.query_profiles_only(
-        point_data[:, :4], exclude_profile_ids=exclude,
-        allowed_profile_ids=observation.ids)
-    neighbor_residual, present = _lookup_neighbor_residual(
-        observation, cached['sel_ids'])
-    if not np.all(present[cached['valid_prof']]):
-        raise AssertionError('top-K returned a profile outside train-only cache')
-    selected_data = cached['sel_abs']
-    token_valid = (
-        cached['valid_prof'][..., None] & cached['sel_vmask']
-        & present[..., None] & np.isfinite(neighbor_residual))
-    payload = observation_index.observation_payload_from_cached(cached)
-    rho = payload['rho_squared'].reshape(token_valid.shape)
-    rho = np.sqrt(np.maximum(rho, 0.0))
-    localization = _localization(rho)
+    if localization_semantics == 'm2u':
+        payload = observation_index.query_observation_directory(
+            point_data[:, :4], exclude_profile_ids=exclude,
+            allowed_profile_ids=observation.ids,
+            space_km=1800.0, time_h=1.5)
+        selected_data = payload['coords']
+        neighbor_ids = payload['profile_id']
+        safe_ids = np.maximum(neighbor_ids, 0)
+        positions = np.searchsorted(observation.ids, safe_ids)
+        present = positions < len(observation.ids)
+        clipped = np.minimum(positions, max(0, len(observation.ids) - 1))
+        present &= observation.ids[clipped] == safe_ids
+        candidates = observation.data[clipped]
+        candidate_valid = observation.valid[clipped]
+        difference = np.max(np.abs(
+            candidates[..., :4] - selected_data[..., None, :4]), axis=-1)
+        difference[~candidate_valid] = np.inf
+        selected_height = np.argmin(difference, axis=-1)
+        matched = np.take_along_axis(
+            difference, selected_height[..., None], axis=-1).squeeze(-1) < 1e-4
+        neighbor_residual = np.take_along_axis(
+            observation.residual[clipped], selected_height[..., None],
+            axis=-1).squeeze(-1)
+        token_valid = (payload['valid_mask'] & present & matched
+                       & np.isfinite(neighbor_residual))
+        rho = np.sqrt(np.maximum(payload['rho_squared'], 0.0))
+        space_rho = _great_circle_km(
+            point_data[:, None, 0], point_data[:, None, 1],
+            selected_data[..., 0], selected_data[..., 1]) / 1800.0
+        time_rho = np.abs(
+            point_data[:, None, 3] - selected_data[..., 3]) / 1.5
+        localization = _flat_top(space_rho) * _flat_top(time_rho)
+        neighbor_id_grid = neighbor_ids
+    elif localization_semantics == 'legacy_top8':
+        cached = observation_index.query_profiles_only(
+            point_data[:, :4], exclude_profile_ids=exclude,
+            allowed_profile_ids=observation.ids)
+        neighbor_residual, present = _lookup_neighbor_residual(
+            observation, cached['sel_ids'])
+        if not np.all(present[cached['valid_prof']]):
+            raise AssertionError('top-K returned a profile outside train-only cache')
+        selected_data = cached['sel_abs']
+        token_valid = (
+            cached['valid_prof'][..., None] & cached['sel_vmask']
+            & present[..., None] & np.isfinite(neighbor_residual))
+        payload = observation_index.observation_payload_from_cached(cached)
+        rho = np.sqrt(np.maximum(
+            payload['rho_squared'].reshape(token_valid.shape), 0.0))
+        localization = _localization(rho)
+        neighbor_id_grid = np.broadcast_to(
+            cached['sel_ids'][..., None], token_valid.shape)
+    else:
+        raise ValueError(f'unknown localization semantics: {localization_semantics}')
     token_valid &= (rho < 1.0) & (localization > 0.0)
     if not token_valid.any():
         return
 
     shape = token_valid.shape
-    target_grid = np.broadcast_to(
-        point_residual[:, None, None], shape)
-    target_id_grid = np.broadcast_to(
-        point_profile[:, None, None], shape)
-    neighbor_id_grid = np.broadcast_to(
-        cached['sel_ids'][..., None], shape)
+    expansion = (len(point_residual),) + (1,) * (len(shape) - 1)
+    target_grid = np.broadcast_to(point_residual.reshape(expansion), shape)
+    target_id_grid = np.broadcast_to(point_profile.reshape(expansion), shape)
     target_alt = np.broadcast_to(
-        _altitude_bin(point_data[:, 2])[:, None, None], shape)
+        _altitude_bin(point_data[:, 2]).reshape(expansion), shape)
     observation_alt = _altitude_bin(selected_data[..., 2])
     target_day = np.broadcast_to(
         ((_local_time(point_data) >= 6.0)
-         & (_local_time(point_data) < 18.0))[:, None, None], shape)
+         & (_local_time(point_data) < 18.0)).reshape(expansion), shape)
     observation_lt = _local_time(selected_data)
     observation_day = (observation_lt >= 6.0) & (observation_lt < 18.0)
     lt_class = np.where(
@@ -685,7 +737,7 @@ def _configuration():
 
 
 def run(output, checkpoint, bootstrap=1000, max_profiles=0,
-        date_split_manifest=None):
+        date_split_manifest=None, localization_semantics='m2u'):
     if bootstrap < 1 or max_profiles < 0:
         raise ValueError('bootstrap must be positive and max-profiles non-negative')
     required = (
@@ -783,7 +835,8 @@ def run(output, checkpoint, bootstrap=1000, max_profiles=0,
                 _append_profile_rows(
                     target, selected, caches[observation_source],
                     indices[observation_source], pair, rows_by_cell,
-                    neighbor_sets, pair_counts, pair_masses)
+                    neighbor_sets, pair_counts, pair_masses,
+                    localization_semantics=localization_semantics)
 
     cells = []
     for cell in range(N_CELLS):
@@ -850,9 +903,16 @@ def run(output, checkpoint, bootstrap=1000, max_profiles=0,
         'analyzed_profile_counts': {
             source: len(caches[source].ids) for source in SOURCE_NAMES},
         'window': {
-            'hours': 1.5, 'latitude_degrees': 5.0,
-            'longitude_degrees': 15.0, 'top_profiles': 8,
+            'hours': 1.5,
+            'space_km': 1800.0 if localization_semantics == 'm2u' else None,
+            'latitude_degrees': (
+                5.0 if localization_semantics == 'legacy_top8' else None),
+            'longitude_degrees': (
+                15.0 if localization_semantics == 'legacy_top8' else None),
+            'top_profiles': (
+                8 if localization_semantics == 'legacy_top8' else None),
             'points_per_profile': 8,
+            'localization_semantics': localization_semantics,
         },
         'cell_definitions': {
             'source_pairs': PAIR_NAMES,
@@ -905,12 +965,16 @@ def main():
     parser.add_argument(
         '--date-split-manifest', type=Path,
         help='use only the train partition from this UTC-date manifest')
+    parser.add_argument(
+        '--localization-semantics',
+        choices=('m2u', 'legacy_top8'), default='m2u')
     args = parser.parse_args()
     run(
         args.output.resolve(), args.background_checkpoint.resolve(),
         bootstrap=args.bootstrap,
         max_profiles=args.max_profiles_per_source,
-        date_split_manifest=args.date_split_manifest)
+        date_split_manifest=args.date_split_manifest,
+        localization_semantics=args.localization_semantics)
 
 
 if __name__ == '__main__':

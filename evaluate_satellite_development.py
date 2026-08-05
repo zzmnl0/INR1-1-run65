@@ -27,9 +27,8 @@ from inr_modules.mdia.fsia_model import FSIA_INR_Model, solve_density_mode
 from inr_modules.mdia.sliding_dataset import (
     attach_representativeness_weight,
     attach_observation_background,
-    build_shared_anchor_catalog,
+    build_m2u_anchor_directories,
     load_representativeness_kernel,
-    query_observation_directory,
     query_observation_payload,
 )
 
@@ -518,6 +517,11 @@ def _evaluate_source(
         for source_name in ("FY", "COSMIC")
     }
     rank_records = defaultdict(list)
+    m2u_records = {
+        mode: {'core': [], 'active': [], 'increment': [], 'edge_increment': [],
+               'alpha_dispersion': [], 'anchor_count': []}
+        for mode in ('M10', 'M01', 'M11')}
+    m2u_peak_memory_bytes = 0
     mode_seconds = {mode: 0.0 for mode in MODES}
     m00_max_error = 0.0
     joint_formula_max_error = 0.0
@@ -554,24 +558,13 @@ def _evaluate_source(
             )
             excluded = profile_ids.cpu().numpy()
             if getattr(model, "uses_shared_anchor_response", False):
-                def m2u_catalog(index, observation_source, exclude):
-                    if index is None:
-                        return None
-                    raw = query_observation_directory(
-                        index, coords, device,
-                        exclude_profile_ids=exclude,
-                        allowed_profile_ids=allowed[observation_source],
-                        space_km=model.m2u_space_support_km,
-                        time_h=model.m2u_time_support_h,
-                    )
-                    return attach_observation_background(
-                        build_shared_anchor_catalog(raw), model,
-                        sw_manager, iri_peak_manager)
-                fy = m2u_catalog(
-                    fy_index, "FY", excluded if source == "FY" else None)
-                cosmic = m2u_catalog(
-                    cosmic_index, "COSMIC",
-                    excluded if source == "COSMIC" else None)
+                fy, cosmic = build_m2u_anchor_directories(
+                    {"FY": fy_index, "COSMIC": cosmic_index},
+                    coords, device, model, sw_manager, iri_peak_manager,
+                    allowed_profile_ids=allowed,
+                    excluded_profile_ids={source: excluded},
+                    space_km=model.m2u_space_support_km,
+                    time_h=model.m2u_time_support_h)
                 fy_counts = {"directory_tokens": int(
                     fy['valid_mask'].sum().item()) if fy is not None else 0}
                 cosmic_counts = {"directory_tokens": int(
@@ -655,6 +648,36 @@ def _evaluate_source(
                 ).cpu().numpy(),
             }
             active["M11"] = active["M10"] | active["M01"]
+
+            if getattr(model, "uses_shared_anchor_response", False):
+                m2u_peak_memory_bytes = max(
+                    m2u_peak_memory_bytes,
+                    int(joint_extras.get('m2u_peak_memory_bytes', 0)))
+                for mode in ('M10', 'M01', 'M11'):
+                    core = joint_extras[
+                        f'shared_anchor_core_{mode}'].any(dim=-1)
+                    active_count = joint_extras[
+                        f'shared_anchor_active_count_{mode}']
+                    alpha = joint_extras[f'shared_anchor_alpha_{mode}']
+                    background_weight = joint_extras[
+                        f'shared_anchor_background_weight_{mode}']
+                    increment = joint_extras['mode_increments'][mode]
+                    m2u_records[mode]['core'].extend(
+                        core.cpu().numpy().tolist())
+                    m2u_records[mode]['active'].extend(
+                        active_count.cpu().numpy().tolist())
+                    m2u_records[mode]['increment'].extend(
+                        increment.cpu().numpy().tolist())
+                    edge = (background_weight >= 0.999) & (
+                        background_weight < 1.0)
+                    m2u_records[mode]['edge_increment'].extend(
+                        increment[edge].abs().cpu().numpy().tolist())
+                    if alpha.shape[1]:
+                        dispersion = 1.0 - alpha.max(dim=-1).values
+                        m2u_records[mode]['alpha_dispersion'].extend(
+                            dispersion[active_count > 1].cpu().numpy().tolist())
+                    m2u_records[mode]['anchor_count'].append(int(
+                        joint_extras[f'shared_anchor_count_{mode}']))
 
             target_np = target.cpu().numpy()
             coords_np = coords.cpu().numpy()
@@ -837,6 +860,25 @@ def _evaluate_source(
                 rank_records["scale_saturation"]
             ),
         },
+        "m2u_shared_anchor": ({
+            mode: {
+                "core_query_coverage": _mean(records['core']),
+                "core_query_count": int(np.sum(records['core'])),
+                "active_anchor_median": _finite(np.median(records['active'])),
+                "overlap_query_fraction": _mean(
+                    np.asarray(records['active']) > 1),
+                "overlap_alpha_dispersion_mean": _mean(
+                    records['alpha_dispersion']),
+                "increment_rms": _finite(np.sqrt(np.mean(
+                    np.square(records['increment'])))),
+                "M00_edge_max_abs_increment": (
+                    max(records['edge_increment'])
+                    if records['edge_increment'] else 0.0),
+                "anchor_count_max": max(records['anchor_count'], default=0),
+            }
+            for mode, records in m2u_records.items()
+        } | {"peak_memory_bytes": m2u_peak_memory_bytes}
+            if getattr(model, "uses_shared_anchor_response", False) else None),
         "stable_filter": {
             observation_source: {
                 **counts,

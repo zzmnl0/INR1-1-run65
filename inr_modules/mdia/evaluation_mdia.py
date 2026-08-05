@@ -14,8 +14,8 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 from matplotlib.colors import LogNorm
 from sklearn.metrics import r2_score, mean_squared_error
 from scipy.stats import pearsonr
-from .sliding_dataset import attach_observation_background
-from .sliding_dataset import query_observation_directory, build_shared_anchor_catalog
+from .sliding_dataset import (
+    attach_observation_background, build_m2u_anchor_directories)
 
 
 # ======================== 内部辅助 ========================
@@ -45,19 +45,14 @@ def _collect_predictions(model, dataloader, batch_processor,
                 # Keep the validation target profile out of the corresponding
                 # anchor catalog; the M2-U model then solves shared anchors once.
                 exclude = profile_ids.detach().cpu().numpy()
-                def catalog(index, excluded):
-                    if index is None:
-                        return None
-                    raw = query_observation_directory(
-                        index, coords, coords.device,
-                        exclude_profile_ids=excluded,
-                        space_km=model.m2u_space_support_km,
-                        time_h=model.m2u_time_support_h)
-                    return attach_observation_background(
-                        build_shared_anchor_catalog(raw), model,
-                        batch_processor.sw_manager, iri_peak_manager)
-                fy_anchor = catalog(batch_processor.fy_nb_index, exclude)
-                cosmic_anchor = catalog(batch_processor.cosmic_nb_index, None)
+                fy_anchor, cosmic_anchor = build_m2u_anchor_directories(
+                    {'FY': batch_processor.fy_nb_index,
+                     'COSMIC': batch_processor.cosmic_nb_index},
+                    coords, coords.device, model, batch_processor.sw_manager,
+                    iri_peak_manager,
+                    excluded_profile_ids={'FY': exclude},
+                    space_km=model.m2u_space_support_km,
+                    time_h=model.m2u_time_support_h)
                 Ne_fused, _, _, _, extras = model(
                     coords, sw_seq, iri_peak=iri_peak,
                     anchor_observations_fy=fy_anchor,

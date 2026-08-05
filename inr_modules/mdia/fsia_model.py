@@ -17,6 +17,9 @@ try:
         anchor_mixing_weights,
         calibrate_temperature,
         flat_top_cover,
+        normalized_support_distance_squared,
+        pairwise_empirical_covariance_target,
+        pairwise_representativeness_weight,
         state_distance_squared,
     )
 except ImportError:
@@ -27,8 +30,10 @@ except ImportError:
     from ewma_sw_encoder import DualScaleSWEncoder
     from mdia_model import _compute_dip_features
     from m2u_anchor_etkf import (
-        anchor_mixing_weights,
-        calibrate_temperature, flat_top_cover, state_distance_squared)
+        anchor_mixing_weights, calibrate_temperature, flat_top_cover,
+        normalized_support_distance_squared,
+        pairwise_empirical_covariance_target,
+        pairwise_representativeness_weight, state_distance_squared)
 
 
 def _query_ensemble_anomalies(extras):
@@ -701,6 +706,15 @@ class FSIA_INR_Model(nn.Module):
             if not torch.isfinite(tau_values).all() or torch.any(tau_values <= 0):
                 raise ValueError('M2-U anchor temperatures must be finite and positive')
             self.register_buffer('m2u_temperatures', tau_values)
+            self.register_buffer(
+                'm2u_representativeness_kernel',
+                torch.ones(4, 3, 3, 3, 4, dtype=torch.float32))
+            self.register_buffer(
+                'm2u_empirical_covariance',
+                torch.zeros(4, 3, 3, 3, 4, dtype=torch.float32))
+            self.register_buffer(
+                'm2u_representativeness_ready',
+                torch.tensor(False, dtype=torch.bool))
             self.m2u_space_support_km = float(
                 config.get('m2u_space_support_km', 1800.0))
             self.m2u_time_support_h = float(
@@ -716,6 +730,13 @@ class FSIA_INR_Model(nn.Module):
                 raise ValueError('m2u_anchor_chunk_size must be positive')
             if not 0.0 < self.m2u_state_floor <= 1.0:
                 raise ValueError('m2u_state_floor must be in (0,1]')
+            if (self.m2u_space_support_km <= 0.0
+                    or self.m2u_time_support_h <= 0.0
+                    or self.m2u_state_direction_scale <= 0.0
+                    or self.m2u_state_amplitude_scale <= 0.0):
+                raise ValueError('M2-U support and state scales must be positive')
+            self.m2u_representativeness_floor = float(
+                config.get('representativeness_floor', 0.25))
 
         self.background_residual_cap = float(
             config.get('background_residual_cap', 0.5))
@@ -1258,6 +1279,29 @@ class FSIA_INR_Model(nn.Module):
         self.m2u_temperatures.copy_(self.m2u_temperatures.new_tensor(values))
         return dict(zip(names, values))
 
+    def set_m2u_representativeness_kernel(
+            self, stable_grid, covariance_grid=None):
+        """Freeze the train-only anchor-token representativeness grid."""
+        if not self.uses_shared_anchor_response:
+            raise ValueError('M2-U representativeness requires shared anchors')
+        value = torch.as_tensor(
+            stable_grid, device=self.m2u_representativeness_kernel.device,
+            dtype=self.m2u_representativeness_kernel.dtype)
+        if value.shape != self.m2u_representativeness_kernel.shape:
+            raise ValueError('invalid M2-U representativeness grid shape')
+        if not torch.isfinite(value).all() or torch.any((value < 0) | (value > 1)):
+            raise ValueError('invalid M2-U representativeness grid values')
+        self.m2u_representativeness_kernel.copy_(value)
+        if covariance_grid is not None:
+            covariance = torch.as_tensor(
+                covariance_grid, device=self.m2u_empirical_covariance.device,
+                dtype=self.m2u_empirical_covariance.dtype)
+            if (covariance.shape != self.m2u_empirical_covariance.shape
+                    or not torch.isfinite(covariance).all()):
+                raise ValueError('invalid M2-U empirical covariance grid')
+            self.m2u_empirical_covariance.copy_(covariance)
+        self.m2u_representativeness_ready.fill_(True)
+
     def _shared_anchor_forward(self, coords, background, query_phi,
                                anchor_observations_fy,
                                anchor_observations_cosmic):
@@ -1283,9 +1327,11 @@ class FSIA_INR_Model(nn.Module):
         def zero_terms(anchor_count):
             return (coords.new_zeros(anchor_count, members, members),
                     coords.new_zeros(anchor_count, members),
+                    coords.new_zeros(0),
+                    coords.new_ones(anchor_count),
                     coords.new_zeros(anchor_count),
-                    coords.new_zeros(anchor_count, 0, members),
-                    coords.new_zeros(anchor_count, 0))
+                    coords.new_zeros(anchor_count),
+                    coords.new_zeros(anchor_count))
 
         if active:
             anchor_coords = torch.cat([
@@ -1326,85 +1372,160 @@ class FSIA_INR_Model(nn.Module):
                 inflation = anomalies.new_ones(())
             return anomalies * torch.sqrt(inflation), scales
 
-        anchor_X, _ = make_anomalies(anchor_z, anchor_h, anchor_coords)
+        anchor_X_parts = []
+        anchor_self_parts = []
+        for _, catalog in active:
+            part_coords = catalog['coords'].squeeze(0)
+            part_z = catalog['basis_z_background'].squeeze(0)
+            part_h = catalog['basis_h_sw'].squeeze(0)
+            part_background = catalog['background'].squeeze(0)
+            part_X, _ = make_anomalies(part_z, part_h, part_coords)
+            anchor_X_parts.append(part_X)
+            part_phi = self._density_basis(
+                part_coords, part_coords[:, None, :],
+                part_background[:, None], part_z, part_h,
+                part_z[:, None, :], part_h[:, None, :]).squeeze(1)
+            anchor_self_parts.append(torch.einsum(
+                'ad,and->an', part_phi, part_X))
+        anchor_X = (torch.cat(anchor_X_parts, dim=0) if anchor_X_parts
+                    else coords.new_zeros(0, members, state_dim))
         query_X, factor_scales = make_anomalies(
             background['z_background'], background['h_sw'], coords)
         query_anomalies = torch.einsum('bd,bnd->bn', query_phi, query_X)
-        if anchor_count:
-            anchor_self_phi = self._density_basis(
-                anchor_coords, anchor_coords[:, None, :],
-                anchor_background[:, None], anchor_z, anchor_h,
-                anchor_z[:, None, :], anchor_h[:, None, :]).squeeze(1)
-            anchor_self_anomalies = torch.einsum(
-                'ad,and->an', anchor_self_phi, anchor_X)
-        else:
-            anchor_self_anomalies = coords.new_zeros(0, members)
+        anchor_self_anomalies = (
+            torch.cat(anchor_self_parts, dim=0) if anchor_self_parts
+            else coords.new_zeros(0, members))
 
-        def source_terms(source, catalog):
-            if not valid_catalog(catalog):
-                return (*zero_terms(anchor_count), None)
-            obs_coords = catalog['coords'].squeeze(0)
-            obs_value = catalog['value'].squeeze(0)
-            obs_background = catalog['background'].squeeze(0)
-            obs_z = catalog['basis_z_background'].squeeze(0)
-            obs_h = catalog['basis_h_sw'].squeeze(0)
-            obs_phi = self._density_basis(
-                anchor_coords[:1], obs_coords.unsqueeze(0),
-                obs_background.unsqueeze(0), anchor_z[:1].unsqueeze(0),
-                anchor_h[:1].unsqueeze(0), obs_z.unsqueeze(0),
-                obs_h.unsqueeze(0)).squeeze(0)
-            cover = flat_top_cover(
-                anchor_coords, obs_coords,
-                self.m2u_space_support_km, self.m2u_time_support_h)
-            anchor_eta = self._m2u_state_eta(anchor_z, anchor_h)
+        def source_terms(source, catalog, pool_key, anchor_mask=None):
+            pool = (catalog.get(pool_key, catalog)
+                    if catalog is not None else None)
+            if pool is None or pool['coords'].shape[1] == 0:
+                return zero_terms(anchor_count)
+            if not bool(self.m2u_representativeness_ready.item()):
+                raise RuntimeError(
+                    'M2-U representativeness kernel was not initialized')
+            obs_coords = pool['coords'].squeeze(0)
+            obs_value = pool['value'].squeeze(0)
+            obs_background = pool['background'].squeeze(0)
+            obs_z = pool['basis_z_background'].squeeze(0)
+            obs_h = pool['basis_h_sw'].squeeze(0)
             obs_eta = self._m2u_state_eta(obs_z, obs_h)
-            distance = state_distance_squared(
-                anchor_eta, obs_eta,
-                self.m2u_state_direction_scale,
-                self.m2u_state_amplitude_scale)
-            state_weight = self.m2u_state_floor + (
-                1.0 - self.m2u_state_floor) * torch.exp(-0.5 * distance)
-            rep = catalog.get(
-                'representativeness_weight',
-                torch.ones_like(catalog['value'])).squeeze(0)
-            valid = catalog['valid_mask'].squeeze(0).to(coords.dtype)
-            precision = (cover * state_weight * rep.unsqueeze(0)
-                         * valid.unsqueeze(0))
-            precision = precision / (
-                self.kalman_layer.r_fy if source == 'FY'
-                else self.kalman_layer.r_cosmic).clamp_min(1e-12)
+            valid = pool['valid_mask'].squeeze(0).to(coords.dtype)
             innovation = obs_value - obs_background
             covariance = coords.new_zeros(anchor_count, members, members)
             rhs = coords.new_zeros(anchor_count, members)
+            rep_sum = coords.new_zeros(anchor_count)
+            rep_count = coords.new_zeros(anchor_count)
+            precision_mass = coords.new_zeros(anchor_count)
+            covariance_loss_sum = coords.new_zeros(anchor_count)
+            covariance_loss_count = coords.new_zeros(anchor_count)
+            selected = (torch.arange(anchor_count, device=coords.device)
+                        if anchor_mask is None
+                        else anchor_mask.nonzero(as_tuple=True)[0])
             chunk = self.m2u_anchor_chunk_size
-            for start in range(0, anchor_count, chunk):
-                stop = min(start + chunk, anchor_count)
+            for start in range(0, len(selected), chunk):
+                indices = selected[start:start + chunk]
+                chunk_coords = anchor_coords[indices]
+                chunk_z = anchor_z[indices]
+                chunk_h = anchor_h[indices]
+                count = len(indices)
+                obs_phi = self._density_basis(
+                    chunk_coords,
+                    obs_coords.unsqueeze(0).expand(count, -1, -1),
+                    obs_background.unsqueeze(0).expand(count, -1),
+                    chunk_z, chunk_h,
+                    obs_z.unsqueeze(0).expand(count, -1, -1),
+                    obs_h.unsqueeze(0).expand(count, -1, -1))
+                cover = flat_top_cover(
+                    chunk_coords, obs_coords,
+                    self.m2u_space_support_km, self.m2u_time_support_h)
+                distance = state_distance_squared(
+                    self._m2u_state_eta(chunk_z, chunk_h), obs_eta,
+                    self.m2u_state_direction_scale,
+                    self.m2u_state_amplitude_scale)
+                state_weight = self.m2u_state_floor + (
+                    1.0 - self.m2u_state_floor) * torch.exp(-0.5 * distance)
+                rho_squared = normalized_support_distance_squared(
+                    chunk_coords, obs_coords,
+                    self.m2u_space_support_km, self.m2u_time_support_h)
+                rep = pairwise_representativeness_weight(
+                    chunk_coords, obs_coords, rho_squared,
+                    anchor_source[indices], source,
+                    self.m2u_representativeness_kernel,
+                    self.m2u_representativeness_floor)
+                valid_pair = valid.unsqueeze(0).expand_as(cover)
+                support = (cover > 0.0).to(coords.dtype) * valid_pair
+                precision = cover * state_weight * rep * valid_pair
+                precision = precision / (
+                    self.kalman_layer.r_fy if source == 'FY'
+                    else self.kalman_layer.r_cosmic).clamp_min(1e-12)
                 anomalies = torch.einsum(
-                    'jd,cnd->cjn', obs_phi, anchor_X[start:stop])
-                covariance[start:stop] = torch.einsum(
-                    'cjn,cj,cjk->cnk', anomalies, precision[start:stop],
+                    'cjd,cnd->cjn', obs_phi, anchor_X[indices])
+                covariance[indices] = torch.einsum(
+                    'cjn,cj,cjk->cnk', anomalies, precision,
                     anomalies)
-                rhs[start:stop] = torch.einsum(
-                    'cjn,cj,j->cn', anomalies, precision[start:stop],
+                rhs[indices] = torch.einsum(
+                    'cjn,cj,j->cn', anomalies, precision,
                     innovation)
-            return covariance, rhs, innovation, None, None
+                rep_sum[indices] = (rep * support).sum(dim=-1)
+                rep_count[indices] = support.sum(dim=-1)
+                precision_mass[indices] = precision.sum(dim=-1)
+                covariance_target, stable = pairwise_empirical_covariance_target(
+                    chunk_coords, obs_coords, rho_squared,
+                    anchor_source[indices], source,
+                    self.m2u_representativeness_kernel,
+                    self.m2u_empirical_covariance)
+                cross_covariance = torch.einsum(
+                    'cn,cjn->cj', anchor_self_anomalies[indices],
+                    anomalies) / max(members - 1, 1)
+                target_r = torch.where(
+                    anchor_source[indices],
+                    self.kalman_layer.r_fy,
+                    self.kalman_layer.r_cosmic)
+                source_r = (self.kalman_layer.r_fy if source == 'FY'
+                            else self.kalman_layer.r_cosmic)
+                scale = torch.sqrt(target_r * source_r).clamp_min(1e-12)
+                covariance_loss = F.smooth_l1_loss(
+                    cross_covariance / scale[:, None],
+                    covariance_target.detach() / scale[:, None],
+                    beta=1.0, reduction='none')
+                covariance_valid = stable & support.bool()
+                covariance_loss_sum[indices] = (
+                    covariance_loss * covariance_valid).sum(dim=-1)
+                covariance_loss_count[indices] = covariance_valid.to(
+                    coords.dtype).sum(dim=-1)
+            rep_mean = rep_sum / rep_count.clamp_min(1.0)
+            return (covariance, rhs, innovation, rep_mean, precision_mass,
+                    covariance_loss_sum, covariance_loss_count)
 
-        fy_terms = source_terms('FY', anchor_observations_fy)
-        cosmic_terms = source_terms('COSMIC', anchor_observations_cosmic)
+        fy_terms = source_terms(
+            'FY', anchor_observations_fy, 'self_observation_pool',
+            anchor_source)
+        cosmic_terms = source_terms(
+            'COSMIC', anchor_observations_cosmic, 'self_observation_pool',
+            ~anchor_source)
+        fy_joint_terms = source_terms(
+            'FY', anchor_observations_fy, 'joint_observation_pool')
+        cosmic_joint_terms = source_terms(
+            'COSMIC', anchor_observations_cosmic, 'joint_observation_pool')
         fy_cov, fy_rhs = fy_terms[0], fy_terms[1]
         cosmic_cov, cosmic_rhs = cosmic_terms[0], cosmic_terms[1]
+        fy_joint_cov, fy_joint_rhs = fy_joint_terms[0], fy_joint_terms[1]
+        cosmic_joint_cov, cosmic_joint_rhs = (
+            cosmic_joint_terms[0], cosmic_joint_terms[1])
         if anchor_count:
             eye = base.unsqueeze(0).expand(anchor_count, -1, -1)
             system_fy = eye + fy_cov
             system_cosmic = eye + cosmic_cov
-            system_joint = eye + fy_cov + cosmic_cov
+            system_joint = eye + fy_joint_cov + cosmic_joint_cov
             chol_fy = torch.linalg.cholesky(system_fy)
             chol_cosmic = torch.linalg.cholesky(system_cosmic)
             chol_joint = torch.linalg.cholesky(system_joint)
             w_fy = torch.cholesky_solve(fy_rhs.unsqueeze(-1), chol_fy).squeeze(-1)
             w_cosmic = torch.cholesky_solve(
                 cosmic_rhs.unsqueeze(-1), chol_cosmic).squeeze(-1)
-            joint_rhs = torch.stack([fy_rhs, cosmic_rhs], dim=-1)
+            joint_rhs = torch.stack(
+                [fy_joint_rhs, cosmic_joint_rhs], dim=-1)
             w_joint_pair = torch.cholesky_solve(
                 joint_rhs, chol_joint)
             w_joint = w_joint_pair.sum(dim=-1)
@@ -1420,6 +1541,7 @@ class FSIA_INR_Model(nn.Module):
             if anchor_count == 0:
                 return (coords.new_zeros(batch), coords.new_zeros(batch, 0),
                         torch.ones(batch, device=coords.device, dtype=coords.dtype),
+                        coords.new_zeros(batch, 0), coords.new_zeros(batch, 0),
                         coords.new_zeros(batch, 0))
             result = anchor_mixing_weights(
                 coords[:, :4], anchor_coords, query_eta, anchor_eta,
@@ -1435,13 +1557,15 @@ class FSIA_INR_Model(nn.Module):
                 'an,an->a', anchor_self_anomalies, weights)
             increment = torch.einsum('ba,a->b', result['beta'], anchor_response)
             return (increment, result['beta'], result['background_weight'],
-                    result['scores'])
+                    result['scores'], result['alpha'], result['cover'])
 
-        delta_fy, beta_fy, bg_fy, scores_fy = mix(
+        delta_fy, beta_fy, bg_fy, scores_fy, alpha_fy, cover_fy = mix(
             w_fy, self.m2u_temperatures[0], anchor_source)
-        delta_cosmic, beta_cosmic, bg_cosmic, scores_cosmic = mix(
+        (delta_cosmic, beta_cosmic, bg_cosmic, scores_cosmic,
+         alpha_cosmic, cover_cosmic) = mix(
             w_cosmic, self.m2u_temperatures[1], ~anchor_source)
-        delta_joint, beta_joint, bg_joint, scores_joint = mix(
+        (delta_joint, beta_joint, bg_joint, scores_joint,
+         alpha_joint, cover_joint) = mix(
             w_joint, self.m2u_temperatures[2],
             torch.ones(anchor_count, device=coords.device, dtype=torch.bool))
         weights_joint_query = (torch.einsum('ba,an->bn', beta_joint, w_joint)
@@ -1450,8 +1574,11 @@ class FSIA_INR_Model(nn.Module):
             weights_joint_query.abs()
             / weights_joint_query.abs().sum(dim=-1, keepdim=True).clamp_min(1e-6))
         self.kalman_layer.last_inflation_scale = coords.new_ones(())
-        latent_increment = torch.einsum(
-            'bn,bnd->bd', weights_joint_query, query_X)
+        anchor_latent_increment = torch.einsum(
+            'an,and->ad', w_joint, anchor_X)
+        latent_increment = (
+            torch.einsum('ba,ad->bd', beta_joint, anchor_latent_increment)
+            if anchor_count else coords.new_zeros(batch, state_dim))
         ne_delta = delta_joint.unsqueeze(-1)
         ne_fused = background['ne_bkg'] + ne_delta
         interpolated_system = base.unsqueeze(0).expand(batch, -1, -1).clone()
@@ -1490,9 +1617,14 @@ class FSIA_INR_Model(nn.Module):
                 f'observation_coords_{name}': anchor_coords_diag,
                 f'observation_rho_squared_{name}': (
                     (1.0 - beta).clamp_min(0.0).square()),
-                f'representativeness_{name}': torch.ones_like(beta),
+                f'representativeness_{name}': (
+                    terms[3].unsqueeze(0).expand(batch, -1)
+                    if terms[3] is not None else torch.ones_like(beta)),
             }
         extras = {
+            'analysis_output_semantics': (
+                'local_etkf_anchor_response_interpolation'),
+            'posterior_variance_semantics': 'not_available',
             'z_analysis': background['z_background'] + latent_increment,
             'latent_increment': latent_increment,
             'latent_anomalies': query_X,
@@ -1520,8 +1652,37 @@ class FSIA_INR_Model(nn.Module):
             'shared_anchor_scores_M10': scores_fy,
             'shared_anchor_scores_M01': scores_cosmic,
             'shared_anchor_scores_M11': scores_joint,
+            'shared_anchor_alpha_M10': alpha_fy,
+            'shared_anchor_alpha_M01': alpha_cosmic,
+            'shared_anchor_alpha_M11': alpha_joint,
+            'shared_anchor_cover_M10': cover_fy,
+            'shared_anchor_cover_M01': cover_cosmic,
+            'shared_anchor_cover_M11': cover_joint,
+            'shared_anchor_core_M10': (alpha_fy == 1.0) & (cover_fy == 1.0),
+            'shared_anchor_core_M01': (
+                (alpha_cosmic == 1.0) & (cover_cosmic == 1.0)),
+            'shared_anchor_core_M11': (
+                (alpha_joint == 1.0) & (cover_joint == 1.0)),
             'shared_anchor_background_weight': bg_joint,
+            'shared_anchor_background_weight_M10': bg_fy,
+            'shared_anchor_background_weight_M01': bg_cosmic,
+            'shared_anchor_background_weight_M11': bg_joint,
             'shared_anchor_count': anchor_count,
+            'shared_anchor_count_M10': int(anchor_source.sum().item()),
+            'shared_anchor_count_M01': int((~anchor_source).sum().item()),
+            'shared_anchor_count_M11': anchor_count,
+            'shared_anchor_active_count_M10': (beta_fy > 0.0).sum(dim=-1),
+            'shared_anchor_active_count_M01': (
+                (beta_cosmic > 0.0).sum(dim=-1)),
+            'shared_anchor_active_count_M11': (
+                (beta_joint > 0.0).sum(dim=-1)),
+            'm2u_peak_memory_bytes': (
+                torch.cuda.max_memory_allocated(coords.device)
+                if coords.is_cuda else 0),
+            'm2u_covariance_loss_sum': (
+                fy_joint_terms[5] + cosmic_joint_terms[5]),
+            'm2u_covariance_loss_count': (
+                fy_joint_terms[6] + cosmic_joint_terms[6]),
         }
         extras.update(diag_source('FY', beta_fy, fy_terms, fy_cov, fy_rhs))
         extras.update(diag_source(

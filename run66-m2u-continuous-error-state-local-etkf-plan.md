@@ -65,7 +65,7 @@ A_{r,11}=7I+C_{r,\mathrm{FY}}+C_{r,\mathrm{COSMIC}},
 
 ## 5. 代码实施与检查顺序
 
-首先固定 `shared_anchor_response` 架构签名、M2-U 温度及支持尺度，并将温度作为 checkpoint buffer 保存。随后使用全正支持 token 目录构造来源独立锚点，接入锚点充分统计量、精确 M10/M01/M11 Cholesky 求解、query 端 Sparsemax 和 M00 混合。保留 Gram whitening 与经验误差结构损失作为训练/诊断项，但不让其改变锚点核心共享的数学语义。
+首先固定 `shared_anchor_response` 架构签名与支持尺度。M10、M01、M11 的 Sparsemax 温度必须由固定 train-only 校准池的正 top-2 分数差中位数分别确定，并作为 checkpoint buffer 保存；不能以配置默认值代替校准结果。representativeness 与经验误差结构统计必须使用 1800 km 球面支持、1.5 h 时间支持和全部正支持 token 重新生成，旧的矩形 top-8 统计只可用于 M2-O 复现。随后构造来源独立锚点及锚点完整观测池，接入逐锚点端点 basis、分块充分统计量、精确 M10/M01/M11 Cholesky 求解、query 端 Sparsemax 和 M00 混合。经验误差结构损失直接由锚点—观测集合协方差的分块统计计算，不使用伪造的 query token 诊断量，也不改变锚点核心共享的数学语义。
 
 开发评估需输出锚点数量、活动锚点数量、核心覆盖率、重叠区增益/增量差异、M00 边界连续性、HX 有效秩与条件数、增量 RMS 和峰值内存。模型输出中的锚点混合结果明确标记为“局地 ETKF 分析插值”。
 

@@ -107,7 +107,8 @@ CONFIG_MDIA = {
     'val_ratio': 0.1,
     'use_date_blocked_split': True,
     'date_split_manifest': (
-        r'isr_validation_outputs\run66-modelonly-m0\date_split_manifest.json'),
+        r'D:\code11\IRI01\IRI03\INR1-1-run65\isr_validation_outputs'
+        r'\run66-modelonly-m0\date_split_manifest.json'),
     'development_days': 5,
     'locked_test_days': 5,
 
@@ -149,7 +150,8 @@ CONFIG_MDIA = {
     'r_mode': 'global',
     'use_distance_localization': True,
     'representativeness_kernel_path': (
-        r'isr_validation_outputs\run66-empirical-covariance-date-blocked-train-only'
+        r'D:\code11\IRI01\IRI03\INR1-1-run65-m2u\isr_validation_outputs'
+        r'\run66-m2u-empirical-covariance-date-blocked-train-only'
         r'\empirical_covariance_cells.npz'),
     'representativeness_floor': 0.25,
     'r_calibration_batches': None,
@@ -158,7 +160,8 @@ CONFIG_MDIA = {
     'r_min_profiles': 200,
     'r_shrinkage_profiles': 200,
     'background_seed_ckpt': (
-        './checkpoints_fsia/run66-etkf-loss/best_background_model.pth'),
+        r'D:\code11\IRI01\IRI03\INR1-1-run65\checkpoints_fsia'
+        r'\run66-etkf-loss\best_background_model.pth'),
     'source_dropout': (0.25, 0.25, 0.50),  # M10, M01, M11
     'source_mode_schedule': 'random_profile',
 
@@ -218,6 +221,8 @@ CONFIG_MDIA = {
     'm2u_state_direction_scale': 1.0,
     'm2u_state_amplitude_scale': 1.0,
     'm2u_anchor_chunk_size': 256,
+    'm2u_temperature_calibration_batches': 8,
+    'm2u_temperature_min_gaps': 32,
     'm2u_tau_M10': 1.0,
     'm2u_tau_M01': 1.0,
     'm2u_tau_M11': 1.0,
@@ -288,6 +293,8 @@ def print_config_mdia():
                     'source_mode_schedule', 'm2u_space_support_km',
                     'm2u_time_support_h', 'm2u_state_floor',
                     'm2u_anchor_chunk_size',
+                    'm2u_temperature_calibration_batches',
+                    'm2u_temperature_min_gaps',
                     'm2u_tau_M10', 'm2u_tau_M01', 'm2u_tau_M11'],
         '其他': ['grad_clip', 'use_amp'],
     }

@@ -94,6 +94,158 @@ def state_distance_squared(query_eta: torch.Tensor,
     return distance.clamp_min(eps)
 
 
+def normalized_support_distance_squared(
+        target_coords: torch.Tensor, observation_coords: torch.Tensor,
+        space_scale_km: float = 1800.0,
+        time_scale_h: float = 1.5) -> torch.Tensor:
+    """Return the M2-U spherical/time max-norm distance on ``[A, M]``."""
+    if space_scale_km <= 0.0 or time_scale_h <= 0.0:
+        raise ValueError('support scales must be positive')
+    distance = spherical_distance_km(
+        target_coords[:, None, :2], observation_coords[None, :, :2])
+    time_distance = torch.abs(
+        target_coords[:, None, 3] - observation_coords[None, :, 3])
+    rho = torch.maximum(
+        distance / float(space_scale_km),
+        time_distance / float(time_scale_h))
+    return rho.square()
+
+
+def _interpolation_brackets(values: torch.Tensor,
+                            centers: torch.Tensor):
+    upper = torch.bucketize(values.contiguous(), centers).clamp(
+        1, len(centers) - 1)
+    lower = upper - 1
+    fraction = ((values - centers[lower])
+                / (centers[upper] - centers[lower])).clamp(0.0, 1.0)
+    return lower, upper, 1.0 - fraction, fraction
+
+
+def _smooth_day_probability(local_time: torch.Tensor) -> torch.Tensor:
+    def smoothstep(value):
+        value = value.clamp(0.0, 1.0)
+        return value.square() * (3.0 - 2.0 * value)
+
+    return (smoothstep((local_time - 5.0) / 2.0)
+            * (1.0 - smoothstep((local_time - 17.0) / 2.0)))
+
+
+def pairwise_representativeness_weight(
+        target_coords: torch.Tensor, observation_coords: torch.Tensor,
+        rho_squared: torch.Tensor, target_is_fy: torch.Tensor,
+        observation_source: str, stable_grid: torch.Tensor,
+        floor: float = 0.25) -> torch.Tensor:
+    """Interpolate the frozen train-only stability grid for anchor-token pairs."""
+    if observation_source not in ('FY', 'COSMIC'):
+        raise ValueError('observation_source must be FY or COSMIC')
+    expected = (4, 3, 3, 3, 4)
+    if tuple(stable_grid.shape) != expected:
+        raise ValueError(f'representativeness grid must have shape {expected}')
+    if rho_squared.shape != (target_coords.shape[0], observation_coords.shape[0]):
+        raise ValueError('rho_squared must have shape [anchors, observations]')
+    if target_is_fy.shape != (target_coords.shape[0],):
+        raise ValueError('target_is_fy must match anchors')
+    if not 0.0 < floor <= 1.0:
+        raise ValueError('representativeness floor must be in (0, 1]')
+
+    dtype = target_coords.dtype
+    grid = stable_grid.to(device=target_coords.device, dtype=dtype)
+    grid = float(floor) + (1.0 - float(floor)) * grid
+    fy_pair = 0 if observation_source == 'FY' else 1
+    cosmic_pair = 2 if observation_source == 'FY' else 3
+    pair = torch.where(
+        target_is_fy.bool(),
+        torch.full_like(target_is_fy, fy_pair, dtype=torch.long),
+        torch.full_like(target_is_fy, cosmic_pair, dtype=torch.long))[:, None]
+
+    altitude_centers = target_coords.new_tensor([160.0, 250.0, 400.0])
+    rho_centers = target_coords.new_tensor([0.125, 0.375, 0.625, 0.875])
+    target_brackets = _interpolation_brackets(
+        target_coords[:, 2:3], altitude_centers)
+    observation_altitude = observation_coords[None, :, 2].expand(
+        target_coords.shape[0], -1)
+    observation_brackets = _interpolation_brackets(
+        observation_altitude, altitude_centers)
+    rho_brackets = _interpolation_brackets(
+        torch.sqrt(rho_squared.clamp_min(0.0)), rho_centers)
+
+    target_lt = torch.remainder(
+        target_coords[:, 3] + target_coords[:, 1] / 15.0, 24.0)[:, None]
+    observation_lt = torch.remainder(
+        observation_coords[:, 3] + observation_coords[:, 1] / 15.0,
+        24.0)[None, :]
+    target_day = _smooth_day_probability(target_lt)
+    observation_day = _smooth_day_probability(observation_lt)
+    local_time_weights = torch.stack([
+        (1.0 - target_day) * (1.0 - observation_day),
+        target_day * observation_day,
+        1.0 - ((1.0 - target_day) * (1.0 - observation_day)
+               + target_day * observation_day),
+    ], dim=-1)
+
+    weight = rho_squared.new_zeros(rho_squared.shape)
+    for target_index, target_weight in zip(
+            target_brackets[:2], target_brackets[2:]):
+        for observation_index, observation_weight in zip(
+                observation_brackets[:2], observation_brackets[2:]):
+            for rho_index, rho_weight in zip(
+                    rho_brackets[:2], rho_brackets[2:]):
+                cell = grid[
+                    pair, target_index, observation_index, :, rho_index]
+                weight = weight + (
+                    target_weight * observation_weight * rho_weight
+                    * (cell * local_time_weights).sum(dim=-1))
+    return weight.clamp(float(floor), 1.0)
+
+
+def pairwise_empirical_covariance_target(
+        target_coords: torch.Tensor, observation_coords: torch.Tensor,
+        rho_squared: torch.Tensor, target_is_fy: torch.Tensor,
+        observation_source: str, stable_grid: torch.Tensor,
+        covariance_grid: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Map M2-U anchor-token pairs to frozen train-only covariance cells."""
+    expected = (4, 3, 3, 3, 4)
+    if tuple(stable_grid.shape) != expected or tuple(covariance_grid.shape) != expected:
+        raise ValueError(f'empirical grids must have shape {expected}')
+    if rho_squared.shape != (target_coords.shape[0], observation_coords.shape[0]):
+        raise ValueError('rho_squared must have shape [anchors, observations]')
+    if observation_source not in ('FY', 'COSMIC'):
+        raise ValueError('observation_source must be FY or COSMIC')
+    fy_pair = 0 if observation_source == 'FY' else 1
+    cosmic_pair = 2 if observation_source == 'FY' else 3
+    pair = torch.where(
+        target_is_fy.bool(),
+        torch.full_like(target_is_fy, fy_pair, dtype=torch.long),
+        torch.full_like(target_is_fy, cosmic_pair, dtype=torch.long))[:, None]
+    boundaries = target_coords.new_tensor([200.0, 300.0])
+    target_altitude = torch.bucketize(
+        target_coords[:, 2].contiguous(), boundaries, right=True)[:, None]
+    observation_altitude = torch.bucketize(
+        observation_coords[:, 2].contiguous(), boundaries, right=True)[None, :]
+    target_lt = torch.remainder(
+        target_coords[:, 3] + target_coords[:, 1] / 15.0, 24.0)[:, None]
+    observation_lt = torch.remainder(
+        observation_coords[:, 3] + observation_coords[:, 1] / 15.0,
+        24.0)[None, :]
+    target_day = (target_lt >= 6.0) & (target_lt < 18.0)
+    observation_day = (observation_lt >= 6.0) & (observation_lt < 18.0)
+    local_time = torch.where(
+        target_day & observation_day,
+        torch.ones_like(rho_squared, dtype=torch.long),
+        torch.where(
+            ~target_day & ~observation_day,
+            torch.zeros_like(rho_squared, dtype=torch.long),
+            torch.full_like(rho_squared, 2, dtype=torch.long)))
+    rho_bin = torch.clamp(
+        (torch.sqrt(rho_squared.clamp_min(0.0)) * 4.0).long(), max=3)
+    stable = stable_grid.to(target_coords.device)[
+        pair, target_altitude, observation_altitude, local_time, rho_bin].bool()
+    covariance = covariance_grid.to(
+        device=target_coords.device, dtype=target_coords.dtype)[
+            pair, target_altitude, observation_altitude, local_time, rho_bin]
+    return covariance, stable
+
+
 def sparsemax(scores: torch.Tensor, dim: int = -1) -> torch.Tensor:
     """Sparsemax projection onto the probability simplex.
 
@@ -284,6 +436,9 @@ __all__ = [
     'blend_anchor_increments',
     'calibrate_temperature',
     'flat_top_cover',
+    'normalized_support_distance_squared',
+    'pairwise_empirical_covariance_target',
+    'pairwise_representativeness_weight',
     'solve_anchor_weights',
     'sparsemax',
     'spherical_distance_km',

@@ -317,6 +317,68 @@ def attach_observation_background(
     return result
 
 
+def build_m2u_anchor_directories(
+        indices, query_coords, device, model, sw_manager,
+        iri_peak_manager=None, allowed_profile_ids=None,
+        excluded_profile_ids=None, space_km=1800.0, time_h=1.5,
+        build_observation_pools=True):
+    """Build source anchors plus complete observation pools around every anchor.
+
+    The second directory query is essential: an observation can lie inside an
+    anchor's support while lying outside the originating query's support.
+    """
+    allowed_profile_ids = allowed_profile_ids or {}
+    excluded_profile_ids = excluded_profile_ids or {}
+    anchors = {}
+    for source in ('FY', 'COSMIC'):
+        index = indices.get(source)
+        if index is None:
+            anchors[source] = None
+            continue
+        raw = query_observation_directory(
+            index, query_coords, device,
+            exclude_profile_ids=excluded_profile_ids.get(source),
+            allowed_profile_ids=allowed_profile_ids.get(source),
+            space_km=space_km, time_h=time_h)
+        anchors[source] = attach_observation_background(
+            build_shared_anchor_catalog(raw), model, sw_manager,
+            iri_peak_manager)
+
+    centers = [
+        catalog['coords'].squeeze(0)
+        for catalog in anchors.values()
+        if catalog is not None and catalog['coords'].shape[1] > 0]
+    if not centers:
+        return anchors['FY'], anchors['COSMIC']
+    centers = torch.cat(centers, dim=0)
+    if not build_observation_pools:
+        return anchors['FY'], anchors['COSMIC']
+
+    for source in ('FY', 'COSMIC'):
+        catalog = anchors[source]
+        index = indices.get(source)
+        if catalog is None or index is None:
+            continue
+        source_centers = catalog['coords'].squeeze(0)
+        for key, pool_centers in (
+                ('self_observation_pool', source_centers),
+                ('joint_observation_pool', centers)):
+            if pool_centers.shape[0] == 0:
+                catalog[key] = build_shared_anchor_catalog({
+                    name: value[:, :0] for name, value in catalog.items()
+                    if torch.is_tensor(value)})
+                continue
+            raw = query_observation_directory(
+                index, pool_centers, device,
+                exclude_profile_ids=excluded_profile_ids.get(source),
+                allowed_profile_ids=allowed_profile_ids.get(source),
+                space_km=space_km, time_h=time_h)
+            catalog[key] = attach_observation_background(
+                build_shared_anchor_catalog(raw), model, sw_manager,
+                iri_peak_manager)
+    return anchors['FY'], anchors['COSMIC']
+
+
 def build_failed_shadow_reference_context(
         coords, model, sw_manager, iri_peak_manager, chunk_size=4096):
     """Audit-only endpoint context for failed V1/V2 query-local shadows."""
