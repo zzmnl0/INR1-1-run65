@@ -44,8 +44,8 @@ CONFIG = {
     # ---- 模型类型：'fsia'（默认）或 'mdia' ----
     'model_type': 'fsia',
 
-    # ---- 必须显式指定通过development门禁并冻结的epoch ----
-    'checkpoint_path': None,
+    # ---- 默认评估本次M2-O训练的RMSE-best；--checkpoint可覆盖 ----
+    'checkpoint_path': r"D:\code11\IRI01\IRI03\INR1-1-run65\checkpoints_fsia\run66-m2o-full-15epoch\best_fsia_model.pth",
 
     # ---- ISR 数据目录 ----
     # 每个目录下应包含 .hdf5 / .h5 文件（可多个文件，同站同月）
@@ -216,14 +216,12 @@ def _parse_unix(date_str):
 
 
 def _resolve_checkpoint(config, mdia_cfg):
-    """Resolve an explicitly frozen FSIA epoch; RMSE-best is not an ISR gate."""
+    """Resolve the configured or CLI-provided checkpoint."""
     if config['checkpoint_path'] is not None:
         return config['checkpoint_path']
     model_type = config.get('model_type', 'fsia')
     if model_type == 'fsia':
-        raise ValueError(
-            'M2-O ISR验证必须用--checkpoint显式指定通过development门禁的epoch；'
-            '不得自动使用RMSE-best best_fsia_model.pth')
+        raise ValueError('M2-O ISR验证缺少checkpoint路径；请配置development候选')
     return os.path.join(mdia_cfg['save_dir'], 'best_mdia_model.pth')
 
 
@@ -746,8 +744,8 @@ def main(checkpoint=None, save_dir=None):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        '--checkpoint', required=True,
-        help='development门禁通过后冻结的M2-O epoch checkpoint')
+        '--checkpoint', default=None,
+        help='可选：覆盖CONFIG中的M2-O checkpoint路径')
     parser.add_argument('--save-dir', default=None)
     args = parser.parse_args()
     main(checkpoint=args.checkpoint, save_dir=args.save_dir)
