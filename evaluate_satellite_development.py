@@ -301,14 +301,21 @@ def _single_source_gain(extras, source):
         max(members - 1, 1) * eye
         + extras[f"ensemble_covariance_{source}"]
     )
-    weighted_observations = (
-        extras[f"obs_anomalies_{source}"].transpose(1, 2)
-        * extras[f"precision_{source}"].unsqueeze(1)
-    )
+    anomalies = extras[f"obs_anomalies_{source}"]
+    precision = extras[f"precision_{source}"]
+    if anomalies.ndim == 2:
+        query_index = extras[f"observation_query_index_{source}"].long()
+        if not query_index.numel():
+            return anomalies.new_zeros(0)
+        solved = torch.cholesky_solve(
+            (anomalies * precision.unsqueeze(-1)).unsqueeze(-1),
+            torch.linalg.cholesky(system[query_index]),
+        ).squeeze(-1)
+        return torch.einsum(
+            "tn,tn->t", query_anomalies[query_index], solved)
+    weighted_observations = anomalies.transpose(1, 2) * precision.unsqueeze(1)
     solved = torch.cholesky_solve(
-        weighted_observations,
-        torch.linalg.cholesky(system),
-    )
+        weighted_observations, torch.linalg.cholesky(system))
     return torch.einsum("bn,bnm->bm", query_anomalies, solved)
 
 
@@ -320,13 +327,26 @@ def _attribution_record(
     gain,
     precision,
     date,
+    query_index=None,
 ):
-    selected = (
-        query_mask[:, None]
-        & (precision > 0.0)
-        & (np.abs(desired[:, None]) >= 0.05)
-        & (np.abs(innovation) >= 0.05)
-    )
+    if innovation.ndim == 1:
+        if query_index is None:
+            raise ValueError('flat attribution requires query_index')
+        desired_tokens = desired[query_index]
+        selected = (
+            query_mask[query_index]
+            & (precision > 0.0)
+            & (np.abs(desired_tokens) >= 0.05)
+            & (np.abs(innovation) >= 0.05)
+        )
+    else:
+        desired_tokens = np.broadcast_to(desired[:, None], innovation.shape)
+        selected = (
+            query_mask[:, None]
+            & (precision > 0.0)
+            & (np.abs(desired[:, None]) >= 0.05)
+            & (np.abs(innovation) >= 0.05)
+        )
     if not selected.any():
         return {
             "date": int(date),
@@ -341,7 +361,6 @@ def _attribution_record(
             "gain_mean": math.nan,
             "contribution_mean": math.nan,
         }
-    desired_tokens = np.broadcast_to(desired[:, None], innovation.shape)
     empirical_sign = desired_tokens * innovation
     contribution = gain * innovation
     return {
@@ -449,6 +468,24 @@ def _query_payload(
         exclude_profile_ids=excluded_profile_ids,
         allowed_profile_ids=allowed_profile_ids,
     )
+    if getattr(model, 'assimilation_semantics', None) == (
+            'continuous_physical_local_letkf'):
+        valid = payload['valid_mask'].bool()
+        row_ptr = payload.get('row_ptr')
+        counts = {
+            'tokens': int(valid.sum().item()),
+            'queries': int((row_ptr[1:] > row_ptr[:-1]).sum().item())
+            if row_ptr is not None else 0,
+            'retained_tokens': int(valid.sum().item()),
+            'retained_queries': int((row_ptr[1:] > row_ptr[:-1]).sum().item())
+            if row_ptr is not None else 0,
+        }
+        return (
+            attach_observation_background(
+                payload, model, sw_manager, iri_peak_manager
+            ),
+            counts,
+        )
     payload, counts = _apply_stable_cell_mask(
         payload,
         coords,
@@ -491,10 +528,9 @@ def _evaluate_source(
     representativeness_grid=None,
     representativeness_floor=0.25,
 ):
-    if getattr(model, 'uses_physical_modes', False):
-        raise ValueError(
-            'query-local physical states are failed audit shadows; '
-            'development evaluation is restricted to M2-O')
+    if getattr(model, 'assimilation_semantics', None) not in (
+            'continuous_physical_local_letkf', 'legacy_local_etkf'):
+        raise ValueError('unsupported assimilation semantics for development')
     global_records = {mode: [] for mode in MODES}
     cell_records = {mode: defaultdict(list) for mode in MODES}
     attribution_records = {
@@ -615,13 +651,22 @@ def _evaluate_source(
                 variances[mode] = variance.cpu().numpy()
             active = {
                 "M00": np.zeros(len(coords), dtype=bool),
-                "M10": (
-                    joint_extras["precision_FY"].sum(dim=-1) > 0
-                ).cpu().numpy(),
-                "M01": (
-                    joint_extras["precision_COSMIC"].sum(dim=-1) > 0
-                ).cpu().numpy(),
             }
+            for observation_source, mode in (("FY", "M10"),
+                                             ("COSMIC", "M01")):
+                precision = joint_extras[f"precision_{observation_source}"]
+                if precision.ndim == 1:
+                    query_index = joint_extras[
+                        f"observation_query_index_{observation_source}"
+                    ].long()
+                    source_active = torch.zeros(
+                        len(coords), device=precision.device, dtype=torch.bool)
+                    if query_index.numel():
+                        source_active.index_fill_(
+                            0, query_index[precision > 0], True)
+                else:
+                    source_active = precision.sum(dim=-1) > 0
+                active[mode] = source_active.cpu().numpy()
             active["M11"] = active["M10"] | active["M01"]
 
             target_np = target.cpu().numpy()
@@ -640,7 +685,17 @@ def _evaluate_source(
                 innovation = joint_extras[
                     f"innov_{observation_source}"
                 ]
-                contribution = (exact_gain * innovation).sum(dim=-1)
+                if innovation.ndim == 1:
+                    query_index = joint_extras[
+                        f"observation_query_index_{observation_source}"
+                    ].long()
+                    contribution = torch.zeros(
+                        len(coords), device=innovation.device,
+                        dtype=innovation.dtype)
+                    contribution.index_add_(
+                        0, query_index, exact_gain * innovation)
+                else:
+                    contribution = (exact_gain * innovation).sum(dim=-1)
                 single_increment = torch.as_tensor(
                     predictions[mode] - background,
                     device=contribution.device,
@@ -660,6 +715,9 @@ def _evaluate_source(
                     "gain": exact_gain.cpu().numpy(),
                     "precision": joint_extras[
                         f"precision_{observation_source}"
+                    ].cpu().numpy(),
+                    "query_index": joint_extras[
+                        f"observation_query_index_{observation_source}"
                     ].cpu().numpy(),
                 }
             m00_max_error = max(
@@ -685,6 +743,19 @@ def _evaluate_source(
                     "scale_boundary_saturation"
                 ].cpu().numpy(),
             }
+            for suffix in ("FY", "COSMIC", "M11"):
+                rank_values[f"hx_effective_rank_{suffix}"] = rank_extras[
+                    f"hx_effective_rank_{suffix}"
+                ].cpu().numpy()
+                rank_values[f"hx_numeric_rank_{suffix}"] = rank_extras[
+                    f"hx_numeric_rank_{suffix}"
+                ].cpu().numpy()
+                rank_values[f"hx_condition_{suffix}"] = rank_extras[
+                    f"hx_condition_{suffix}"
+                ].cpu().numpy()
+                rank_values[f"hx_valid_{suffix}"] = rank_extras[
+                    f"hx_valid_{suffix}"
+                ].cpu().numpy().astype(np.float32)
             for profile_id in np.unique(profile_np):
                 profile_mask = profile_np == profile_id
                 date = int(np.floor(np.median(coords_np[profile_mask, 3]) / 24.0))
@@ -799,6 +870,19 @@ def _evaluate_source(
             "scale_saturation_mean": _mean(
                 rank_records["scale_saturation"]
             ),
+            "hx": {
+                suffix: {
+                    "effective_rank_median": _finite(np.median(
+                        rank_records[f"hx_effective_rank_{suffix}"])),
+                    "numeric_rank_median": _finite(np.median(
+                        rank_records[f"hx_numeric_rank_{suffix}"])),
+                    "condition_q95": _finite(np.quantile(
+                        rank_records[f"hx_condition_{suffix}"], 0.95)),
+                    "valid_fraction": _mean(
+                        rank_records[f"hx_valid_{suffix}"]),
+                }
+                for suffix in ("FY", "COSMIC", "M11")
+            },
         },
         "stable_filter": {
             observation_source: {
@@ -889,6 +973,10 @@ def main():
         help="train-only empirical cells used for a read-only stable-only mask",
     )
     args = parser.parse_args()
+    if args.partition != "development":
+        raise ValueError("M2-V development evaluator does not access locked-test")
+    if args.stable_covariance_cells is not None:
+        raise ValueError("M2-V development evaluator does not apply covariance-cell filtering")
     run_dir = args.run_dir.resolve()
     checkpoint = args.checkpoint or run_dir / "best_fsia_model.pth"
     if not checkpoint.is_absolute():
@@ -900,6 +988,33 @@ def main():
     with manifest_path.open(encoding="utf-8") as stream:
         run_manifest = json.load(stream)
     config = dict(run_manifest["config"])
+    required_m2v = {
+        "assimilation_semantics": "continuous_physical_local_letkf",
+        "checkpoint_format_version": 12,
+        "basis_dim": 64,
+        "enkf_n_members": 8,
+        "enkf_anomaly_parameterization": "orthogonal_factor",
+        "density_basis_semantics": "endpoint_context_symmetric",
+        "r_mode": "global",
+        "use_physical_localization": True,
+        "neighbor_directory_semantics": "token_exact_positive_support_v1",
+        "physical_localization_space_km": 1800.0,
+        "physical_localization_time_hours": 1.5,
+        "representativeness_floor": 1.0,
+        "use_empirical_covariance_loss": False,
+    }
+    for key, expected in required_m2v.items():
+        actual = config.get(key)
+        if isinstance(expected, float):
+            valid = np.isclose(float(actual), expected)
+        else:
+            valid = actual == expected
+        if not valid:
+            raise ValueError(
+                f"development evaluator requires M2-V {key}={expected!r}; "
+                f"got {actual!r}")
+    if config.get("representativeness_kernel_path") is not None:
+        raise ValueError("M2-V development evaluation forbids representativeness tables")
     date_manifest_path = Path(config["date_split_manifest"])
     if not date_manifest_path.is_absolute():
         date_manifest_path = ROOT / date_manifest_path
@@ -971,7 +1086,16 @@ def main():
         raise ValueError(
             "stable-only and continuous representativeness filters conflict")
     report = {
-        "schema_version": 1,
+        "schema_version": 2,
+        "assimilation_semantics": config["assimilation_semantics"],
+        "m2v_physical_localization": {
+            "directory_semantics": config["neighbor_directory_semantics"],
+            "space_support_km": float(config["physical_localization_space_km"]),
+            "time_support_hours": float(config["physical_localization_time_hours"]),
+            "observation_chunk_size": int(config.get("observation_chunk_size", 4096)),
+            "representativeness_enabled": False,
+            "peak_memory_bytes": None,
+        },
         "purpose": (
             f"ISR-blind satellite {args.partition} stable-only counterfactual"
             if stable_cells is not None

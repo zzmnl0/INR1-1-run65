@@ -39,7 +39,10 @@ CONFIG_MDIA = {
     'fy_qc_report_path': r'D:\FYsatellite\EDP_data\fy_202409_qc_v2_report.json',
     'iri_proxy_path': r'D:\code11\IRI01\output_results\iri_september_full_proxy.pth',
     'sw_path': r'D:\FYsatellite\EDP_data\kp\OMNI_Kp_F107_20240901_20241001.txt',
-    'save_dir': './checkpoints_fsia/run66-m2o-full-15epoch',
+    'save_dir': './checkpoints_fsia/run66-m2v-continuous-physical-letkf',
+    'run_semantics': 'M2-V_continuous_physical_local_letkf',
+    'assimilation_semantics': 'continuous_physical_local_letkf',
+    'checkpoint_format_version': 12,
 
     # ==================== GIRO 独立评估数据（训练不读取）====================
     # 由 preprocess_giro.py 生成，供 evaluate_giro_peak.py 使用
@@ -128,11 +131,11 @@ CONFIG_MDIA = {
     'analysis_loss_active_only': False,
     'analysis_exact_mode_loss': True,
     'use_covariance_moment_loss': False,
-    'use_empirical_covariance_loss': True,
+    'use_empirical_covariance_loss': False,
     'covariance_gradient_target': 0.008139966,
     'covariance_calibration_batches': 20,
-    # M2-T: optional precision-weighted HX Gram whitening; off keeps M2-O exact.
-    'use_observation_gram_loss': False,
+    # M2-V retains the production-precision HX Gram whitening diagnostic/loss.
+    'use_observation_gram_loss': True,
     'gram_gradient_target': 0.02,
     'gram_calibration_batches': 20,
     'use_direction_loss': False,
@@ -148,10 +151,15 @@ CONFIG_MDIA = {
     'r_cosmic_init': 0.04,
     'r_mode': 'global',
     'use_distance_localization': True,
-    'representativeness_kernel_path': (
-        r'isr_validation_outputs\run66-empirical-covariance-date-blocked-train-only'
-        r'\empirical_covariance_cells.npz'),
-    'representativeness_floor': 0.25,
+    'use_physical_localization': True,
+    # M2-V uses only physical Gaspari-Cohn localization.  The previous
+    # source-labelled representativeness table is not valid for ISR queries.
+    'representativeness_kernel_path': None,
+    'representativeness_floor': 1.0,
+    'physical_localization_space_km': 1800.0,
+    'physical_localization_time_hours': 1.5,
+    'observation_chunk_size': 4096,
+    'neighbor_directory_semantics': 'token_exact_positive_support_v1',
     'r_calibration_batches': None,
     'r_sigma_min': 0.05,
     'r_sigma_max': 0.40,
@@ -267,6 +275,10 @@ def print_config_mdia():
         '同化控制': ['background_residual_cap',
                     'r_fy_init', 'r_cosmic_init', 'r_mode',
                     'use_distance_localization',
+                    'use_physical_localization',
+                    'physical_localization_space_km',
+                    'physical_localization_time_hours',
+                    'neighbor_directory_semantics',
                     'representativeness_kernel_path',
                     'representativeness_floor',
                     'r_calibration_batches', 'r_sigma_min', 'r_sigma_max',

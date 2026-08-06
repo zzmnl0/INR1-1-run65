@@ -115,11 +115,13 @@ class SpaceWeatherManager:
         Returns:
             [Batch, Seq_Len, 2] 历史序列 (Kp, F10.7)
         """
-        # 向下取整获取索引
-        time_idx = torch.floor(time_batch).long()
-        
-        # 边界保护
-        time_idx = torch.clamp(time_idx, 0, self.total_hours - 1)
-        
-        # 直接索引预计算好的窗口
-        return self.sw_windows[time_idx]
+        # Continuous interpolation avoids an artificial one-hour forcing jump
+        # when a query crosses an integer hour.
+        time_value = time_batch.to(device=self.device, dtype=torch.float32)
+        lower = torch.floor(time_value).long().clamp(0, self.total_hours - 1)
+        upper = (lower + 1).clamp(0, self.total_hours - 1)
+        fraction = (time_value - lower.to(time_value.dtype)).clamp(0.0, 1.0)
+        return (
+            (1.0 - fraction).view(-1, 1, 1) * self.sw_windows[lower]
+            + fraction.view(-1, 1, 1) * self.sw_windows[upper]
+        )

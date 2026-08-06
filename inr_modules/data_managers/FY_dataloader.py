@@ -29,6 +29,124 @@ def _normalized_profile_distance(dlat, dlon, dt, dlat_limit, dlon_limit,
             + np.abs(dt) / dt_limit)
 
 
+def _gaspari_cohn_numpy(u):
+    """Gaspari--Cohn correlation with support at normalized distance one."""
+    u = np.abs(np.asarray(u, dtype=np.float64)) * 2.0
+    first = (1.0 - (5.0 / 3.0) * u ** 2 + (5.0 / 8.0) * u ** 3
+             + 0.5 * u ** 4 - 0.25 * u ** 5)
+    safe = np.maximum(u, 1e-12)
+    second = (4.0 - 5.0 * u + (5.0 / 3.0) * u ** 2
+              + (5.0 / 8.0) * u ** 3 - 0.5 * u ** 4
+              + (1.0 / 12.0) * u ** 5 - 2.0 / (3.0 * safe))
+    return np.where(u <= 1.0, first, second).clip(0.0, None) * (u < 2.0)
+
+
+def _great_circle_km(lat_a, lon_a, lat_b, lon_b):
+    """Vectorized spherical great-circle distance in kilometres."""
+    lat_a = np.deg2rad(lat_a)
+    lat_b = np.deg2rad(lat_b)
+    dlat = lat_b - lat_a
+    dlon = np.deg2rad((lon_b - lon_a + 180.0) % 360.0 - 180.0)
+    hav = np.sin(dlat / 2.0) ** 2 + np.cos(lat_a) * np.cos(lat_b) * np.sin(dlon / 2.0) ** 2
+    return 6371.0088 * 2.0 * np.arcsin(np.sqrt(np.clip(hav, 0.0, 1.0)))
+
+
+def _token_observation_payload(
+        token_coords, token_values, token_profile_ids, token_ids,
+        coords_np, source_code, space_radius_km=1800.0,
+        time_radius_hours=1.5, exclude_profile_ids=None,
+        allowed_profile_ids=None):
+    """Query exact sampled tokens with continuous physical support.
+
+    M2-V keeps the result ragged: every positive-support token is stored once
+    and ``row_ptr``/``query_index`` carry the query grouping.  This avoids a
+    batch-wide padded observation tensor before the LETKF can chunk it.
+    """
+    coords_np = np.asarray(coords_np, dtype=np.float32)
+    allowed = (None if allowed_profile_ids is None else
+               np.asarray(allowed_profile_ids, dtype=np.int64))
+    time_sorted = (
+        len(token_coords) < 2
+        or np.all(np.diff(token_coords[:, 3]) >= 0.0))
+    rows = []
+    for i, query in enumerate(coords_np):
+        if time_sorted:
+            lo = np.searchsorted(
+                token_coords[:, 3], query[3] - float(time_radius_hours), side='right')
+            hi = np.searchsorted(
+                token_coords[:, 3], query[3] + float(time_radius_hours), side='left')
+            candidate = np.arange(lo, hi, dtype=np.int64)
+        else:
+            candidate = np.arange(len(token_coords), dtype=np.int64)
+        candidate_coords = token_coords[candidate]
+        distance = _great_circle_km(
+            query[0], query[1], candidate_coords[:, 0], candidate_coords[:, 1])
+        time_distance = np.abs(candidate_coords[:, 3] - query[3])
+        mask = (distance < float(space_radius_km)) & (
+            time_distance < float(time_radius_hours))
+        if allowed is not None:
+            mask &= np.isin(token_profile_ids[candidate], allowed,
+                            assume_unique=False)
+        if exclude_profile_ids is not None:
+            mask &= token_profile_ids[candidate] != int(
+                np.asarray(exclude_profile_ids)[i])
+        local_selected = np.flatnonzero(mask)
+        selected = candidate[local_selected]
+        selected_distance = distance[local_selected]
+        selected_time_distance = time_distance[local_selected]
+        if len(selected):
+            # Primary key is profile identity, secondary key is stable token id.
+            order = np.lexsort((token_ids[selected], token_profile_ids[selected]))
+            selected = selected[order]
+            selected_distance = selected_distance[order]
+            selected_time_distance = selected_time_distance[order]
+        rows.append((selected, selected_distance, selected_time_distance))
+    row_ptr = np.zeros(len(rows) + 1, dtype=np.int64)
+    row_ptr[1:] = np.cumsum([len(row[0]) for row in rows], dtype=np.int64)
+    total = int(row_ptr[-1])
+    if total:
+        selected = np.concatenate([row[0] for row in rows])
+        distances = np.concatenate([row[1] for row in rows]).astype(np.float32)
+        time_distances = np.concatenate([row[2] for row in rows]).astype(np.float32)
+        query_index = np.repeat(
+            np.arange(len(rows), dtype=np.int64),
+            np.diff(row_ptr),
+        )
+        space_u = distances / float(space_radius_km)
+        time_u = time_distances / float(time_radius_hours)
+        localization = _gaspari_cohn_numpy(space_u) * _gaspari_cohn_numpy(time_u)
+        payload = {
+            'coords': np.asarray(token_coords[selected], dtype=np.float32),
+            'value': np.asarray(token_values[selected], dtype=np.float32),
+            'valid_mask': np.ones(total, dtype=bool),
+            'profile_id': np.asarray(token_profile_ids[selected], dtype=np.int64),
+            'token_id': np.asarray(token_ids[selected], dtype=np.int64),
+            'source': np.full(total, source_code, dtype=np.int8),
+            'rho_squared': np.maximum(space_u, time_u).astype(np.float32) ** 2,
+            'localization_weight': localization.astype(np.float32),
+            'space_distance_km': distances,
+            'time_distance_hours': time_distances,
+            'query_index': query_index,
+            'row_ptr': row_ptr,
+        }
+    else:
+        payload = {
+            'coords': np.zeros((0, 4), dtype=np.float32),
+            'value': np.zeros(0, dtype=np.float32),
+            'valid_mask': np.zeros(0, dtype=bool),
+            'profile_id': np.zeros(0, dtype=np.int64),
+            'token_id': np.zeros(0, dtype=np.int64),
+            'source': np.zeros(0, dtype=np.int8) + source_code,
+            'rho_squared': np.zeros(0, dtype=np.float32),
+            'localization_weight': np.zeros(0, dtype=np.float32),
+            'space_distance_km': np.zeros(0, dtype=np.float32),
+            'time_distance_hours': np.zeros(0, dtype=np.float32),
+            'query_index': np.zeros(0, dtype=np.int64),
+            'row_ptr': row_ptr,
+        }
+    return payload
+
+
 def _profile_representative_days(relative_hours, profile_ids):
     """Assign every row in a profile to its median UTC-relative day."""
     relative_hours = np.asarray(relative_hours, dtype=np.float64)
@@ -479,20 +597,16 @@ def get_dataloaders(
 
 class FYNeighborhoodIndex:
     """
-    FY 掩星剖面邻域索引（run61 profile-level 聚合版）
+    FY 掩星观测索引。
 
     核心设计：
         FY EDP 数据 = GNSS 掩星剖面，每次掩星事件在 (lat₀,lon₀,t₀) 产生
         ~200-400 个垂直高度层行。直接索引原始点时 M~3000，即使分块仍慢。
 
         解决方案：把时空索引从「逐测量点」升级为「逐掩星剖面」：
-            1. __init__:  使用 clean3 第 7 列 profile_id 检测真实剖面边界
-                          每条剖面均匀预采样 n_alt=8 个高度点存入 prof_abs_data
-                          时间分箱建立在剖面代表点上 → M_prof ≈ 5-15（vs 原始 ~3000）
-            2. query_observation_batch:
-                          CHUNK_G=64 分块广播 [Gc, M_prof] 找 K_prof=8 最近剖面
-                          查表 prof_abs_data → 物理坐标、log10Ne和有效掩码
-                          无 Python 内层循环 → ~2ms/batch
+            1. 每条剖面最多保留8个稳定高度token；
+            2. M2-V查询直接对token坐标执行球面距离和时间支持筛选，
+               不使用剖面中心近似或profile top-k截断。
 
     输出为物理观测payload；ETKF观测始终保持在log10Ne空间。
     """
@@ -542,6 +656,12 @@ class FYNeighborhoodIndex:
         self.dlon     = float(config.get('fy_nb_dlon',    15.0))
         self.k_prof   = int(config.get('fy_nb_k_prof',     8))
         self.n_alt    = int(config.get('fy_nb_n_alt',      8))
+        self.space_radius_km = float(
+            config.get('physical_localization_space_km', 1800.0))
+        self.time_radius_hours = float(
+            config.get('physical_localization_time_hours', self.dt))
+        self.token_mode = config.get('neighbor_directory_semantics') == (
+            'token_exact_positive_support_v1')
         # ---- 1. 以 clean3 profile_id 聚合，保留剖面内原始点顺序 ----
         sort_idx          = np.argsort(profile_ids, kind='stable')
         self.sorted_data  = data[sort_idx]
@@ -571,6 +691,11 @@ class FYNeighborhoodIndex:
                     + frac[None, :] * (counts[:, None] - 1))                  # [N_prof, n_alt]
         row_idx  = np.round(row_idx).astype(np.int32)
         row_idx  = np.clip(row_idx, starts[:, None], ends[:, None] - 1)
+        short = counts < self.n_alt
+        if np.any(short):
+            row_idx[short] = starts[short, None] + np.arange(self.n_alt)[None, :]
+            row_idx[short] = np.clip(
+                row_idx[short], starts[short, None], ends[short, None] - 1)
         self.prof_abs_data   = self.sorted_data[row_idx.ravel()].reshape(N_prof, self.n_alt, 5)
         # 有效性：counts[p] < n_alt 时末尾槽是重复点，标为无效
         self.prof_valid_mask = (np.arange(self.n_alt)[None, :] <
@@ -583,6 +708,20 @@ class FYNeighborhoodIndex:
         self.prof_sorted_abs     = self.prof_abs_data[prof_sort_t]             # [N_prof, n_alt, 5]
         self.prof_sorted_vmask   = self.prof_valid_mask[prof_sort_t]           # [N_prof, n_alt]
         self.prof_sorted_ids     = self.prof_ids[prof_sort_t]
+
+        # Exact token directory: at most n_alt valid sampled heights per profile,
+        # with stable (profile_id, token_id) identity and no profile top-k.
+        token_valid = self.prof_sorted_vmask.reshape(-1)
+        self.token_coords = self.prof_sorted_abs.reshape(-1, 5)[token_valid, :4]
+        self.token_values = self.prof_sorted_abs.reshape(-1, 5)[token_valid, 4]
+        self.token_profile_ids = np.repeat(
+            self.prof_sorted_ids, self.n_alt)[token_valid]
+        self.token_ids = np.tile(np.arange(self.n_alt, dtype=np.int64), N_prof)[token_valid]
+        token_order = np.argsort(self.token_coords[:, 3], kind='stable')
+        self.token_coords = self.token_coords[token_order]
+        self.token_values = self.token_values[token_order]
+        self.token_profile_ids = self.token_profile_ids[token_order]
+        self.token_ids = self.token_ids[token_order]
 
         self.bin_size = self.dt
         self.t_min    = float(self.prof_sorted_meta[0, 2])
@@ -734,10 +873,18 @@ class FYNeighborhoodIndex:
 
     def query_observation_batch(self, coords_np, exclude_profile_ids=None,
                                 allowed_profile_ids=None):
-        """Return actual sampled FY profile points for the density observation operator."""
-        cached = self.query_profiles_only(
-            coords_np, exclude_profile_ids, allowed_profile_ids)
-        return self.observation_payload_from_cached(cached)
+        """Return every positive-support exact FY token in stable order."""
+        if not self.token_mode:
+            cached = self.query_profiles_only(
+                coords_np, exclude_profile_ids, allowed_profile_ids)
+            return self.observation_payload_from_cached(cached)
+        return _token_observation_payload(
+            self.token_coords, self.token_values, self.token_profile_ids,
+            self.token_ids, coords_np, source_code=0,
+            space_radius_km=self.space_radius_km,
+            time_radius_hours=self.time_radius_hours,
+            exclude_profile_ids=exclude_profile_ids,
+            allowed_profile_ids=allowed_profile_ids)
 
     def observation_payload_from_cached(self, cached):
         return _observation_payload_from_cached(
@@ -757,7 +904,7 @@ class COSMICDataset(FY3D_Dataset):
 
 class COSMICNeighborhoodIndex:
     """
-    COSMIC-2 掩星剖面邻域索引。
+    COSMIC-2 掩星观测索引；M2-V查询使用稳定token目录。
 
     与 FYNeighborhoodIndex 的物理观测接口兼容，但以profile_id（col 5）识别剖面边界，
     而非 FY 的 Δt 断点。
@@ -774,6 +921,12 @@ class COSMICNeighborhoodIndex:
         self.dlon   = float(config.get('cosmic_nb_dlon', 15.0))
         self.k_prof = int(config.get('cosmic_nb_k_prof',  8))
         self.n_alt  = int(config.get('cosmic_nb_n_alt',   8))
+        self.space_radius_km = float(
+            config.get('physical_localization_space_km', 1800.0))
+        self.time_radius_hours = float(
+            config.get('physical_localization_time_hours', self.dt))
+        self.token_mode = config.get('neighbor_directory_semantics') == (
+            'token_exact_positive_support_v1')
 
         raw   = np.load(cosmic_path, mmap_mode='r')
         profile_index_path = config.get('cosmic_profile_index_path')
@@ -822,6 +975,11 @@ class COSMICNeighborhoodIndex:
                    + frac[None, :] * (counts[:, None] - 1))
         row_idx = np.round(row_idx).astype(np.int32)
         row_idx = np.clip(row_idx, starts[:, None], ends[:, None] - 1)
+        short = counts < self.n_alt
+        if np.any(short):
+            row_idx[short] = starts[short, None] + np.arange(self.n_alt)[None, :]
+            row_idx[short] = np.clip(
+                row_idx[short], starts[short, None], ends[short, None] - 1)
         self.prof_abs_data   = self.sorted_data[row_idx.ravel()].reshape(N_prof, self.n_alt, 5)
         self.prof_valid_mask = (np.arange(self.n_alt)[None, :]
                                 < counts[:, None].astype(int))
@@ -833,6 +991,18 @@ class COSMICNeighborhoodIndex:
         self.prof_sorted_abs     = self.prof_abs_data[prof_sort_t]
         self.prof_sorted_vmask   = self.prof_valid_mask[prof_sort_t]
         self.prof_sorted_ids     = self.prof_ids[prof_sort_t]
+
+        token_valid = self.prof_sorted_vmask.reshape(-1)
+        self.token_coords = self.prof_sorted_abs.reshape(-1, 5)[token_valid, :4]
+        self.token_values = self.prof_sorted_abs.reshape(-1, 5)[token_valid, 4]
+        self.token_profile_ids = np.repeat(
+            self.prof_sorted_ids, self.n_alt)[token_valid]
+        self.token_ids = np.tile(np.arange(self.n_alt, dtype=np.int64), N_prof)[token_valid]
+        token_order = np.argsort(self.token_coords[:, 3], kind='stable')
+        self.token_coords = self.token_coords[token_order]
+        self.token_values = self.token_values[token_order]
+        self.token_profile_ids = self.token_profile_ids[token_order]
+        self.token_ids = self.token_ids[token_order]
 
         self.bin_size = self.dt
         self.t_min    = float(self.prof_sorted_meta[0, 2])
@@ -917,10 +1087,18 @@ class COSMICNeighborhoodIndex:
 
     def query_observation_batch(self, coords_np, exclude_profile_ids=None,
                                 allowed_profile_ids=None):
-        """Return actual sampled COSMIC profile points for the density operator."""
-        cached = self.query_profiles_only(
-            coords_np, exclude_profile_ids, allowed_profile_ids)
-        return self.observation_payload_from_cached(cached)
+        """Return every positive-support exact COSMIC token in stable order."""
+        if not self.token_mode:
+            cached = self.query_profiles_only(
+                coords_np, exclude_profile_ids, allowed_profile_ids)
+            return self.observation_payload_from_cached(cached)
+        return _token_observation_payload(
+            self.token_coords, self.token_values, self.token_profile_ids,
+            self.token_ids, coords_np, source_code=1,
+            space_radius_km=self.space_radius_km,
+            time_radius_hours=self.time_radius_hours,
+            exclude_profile_ids=exclude_profile_ids,
+            allowed_profile_ids=allowed_profile_ids)
 
     def observation_payload_from_cached(self, cached):
         return _observation_payload_from_cached(

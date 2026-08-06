@@ -131,7 +131,7 @@ def _compute_solar_features(lat_deg, lon_deg, rel_hour):
     计算太阳天顶角余弦 + day-of-year 编码（run25：物理上替代 LT 当地时编码）
 
     使用 Spencer 7阶傅里叶公式计算太阳赤纬，精度 < 0.01°。
-    所有运算可微（floor 仅用于离散化 day index，不影响梯度路径）。
+    年内相位按连续小时计算，避免整日边界产生非物理跳变。
 
     Args:
         lat_deg:  [B] 地理纬度（度）
@@ -145,7 +145,7 @@ def _compute_solar_features(lat_deg, lon_deg, rel_hour):
         cos_doy:  [B] cos(2π·doy/365)
     """
     # ---- day-of-year + 年角 ----
-    doy     = (rel_hour / 24.0).floor() + _DOY_SEP1_FLOAT
+    doy     = rel_hour / 24.0 + _DOY_SEP1_FLOAT
     doy_mod = doy % 365.0
     gamma   = 2.0 * math.pi * doy_mod / 365.0                                # [B] 年角
 
@@ -195,7 +195,7 @@ def _build_kalman_b_input(h_sw, lat_n, cos_SZA, sin_doy, cos_doy, sin_I):
 # ======================== NeuralETKFLayer (run28) ========================
 
 class NeuralETKFLayer(nn.Module):
-    """Low-dimensional ETKF with a physical log10Ne observation operator."""
+    """Query-local LETKF, solved as an ensemble-space ETKF."""
 
     def __init__(self, d_model: int = 64, b_net_in: int = 69,
                  n_members: int = 8, pert_hidden: int = 64,
@@ -204,7 +204,11 @@ class NeuralETKFLayer(nn.Module):
                  scale_init: float = 1.1,
                  scale_condition_max: float = 3.0,
                  coordinate_local_symmetric: bool = False,
-                 coefficient_space: bool = False):
+                 coefficient_space: bool = False,
+                 physical_localization: bool = True,
+                 physical_space_radius_km: float = 1800.0,
+                 physical_time_radius_hours: float = 1.5,
+                 observation_chunk_size: int = 4096):
         super().__init__()
         if d_model < 1 or n_members < 2 or pert_hidden < 1:
             raise ValueError(
@@ -236,6 +240,12 @@ class NeuralETKFLayer(nn.Module):
         self.scale_condition_max = float(scale_condition_max)
         self.coordinate_local_symmetric = bool(coordinate_local_symmetric)
         self.coefficient_space = bool(coefficient_space)
+        self.physical_localization = bool(physical_localization)
+        self.physical_space_radius_km = float(physical_space_radius_km)
+        self.physical_time_radius_hours = float(physical_time_radius_hours)
+        if int(observation_chunk_size) < 1:
+            raise ValueError('observation_chunk_size must be positive')
+        self.observation_chunk_size = int(observation_chunk_size)
 
         if anomaly_parameterization == 'legacy_independent':
             # Preserve v7 state-dict keys for strict read-only compatibility.
@@ -370,6 +380,20 @@ class NeuralETKFLayer(nn.Module):
         return (1.0 - 3.0 * radius.square() + 2.0 * radius.pow(3)).clamp_min(0.0)
 
     @staticmethod
+    def _gaspari_cohn(u):
+        """Gaspari--Cohn correlation for distance/support ``u`` in [0, 1]."""
+        u = u.abs() * 2.0
+        first = (1.0 - (5.0 / 3.0) * u.square()
+                 + (5.0 / 8.0) * u.pow(3)
+                 + 0.5 * u.pow(4) - 0.25 * u.pow(5))
+        safe = u.clamp_min(1e-6)
+        second = (4.0 - 5.0 * u + (5.0 / 3.0) * u.square()
+                  + (5.0 / 8.0) * u.pow(3) - 0.5 * u.pow(4)
+                  + (1.0 / 12.0) * u.pow(5) - 2.0 / (3.0 * safe))
+        return torch.where(u <= 1.0, first, second).where(
+            u < 2.0, torch.zeros_like(u)).clamp_min(0.0)
+
+    @staticmethod
     def _empty_observations(reference, batch):
         return {
             'value': reference.new_zeros(batch, 0),
@@ -379,23 +403,108 @@ class NeuralETKFLayer(nn.Module):
             'rho_squared': reference.new_zeros(batch, 0),
         }
 
-    def _source_terms(self, X, phi_obs, observations, variance):
+    def _source_terms(self, X, phi_obs, observations, variance,
+                      factor_scales=None):
         innovation = observations['value'] - observations['background']
         valid = observations['valid_mask'].to(dtype=X.dtype)
-        localization = self._localization_precision(
-            observations['rho_squared'])
+        localization = observations.get('localization_weight')
+        if localization is None:
+            if (self.physical_localization
+                    and 'space_distance_km' in observations
+                    and 'time_distance_hours' in observations):
+                localization = (
+                    self._gaspari_cohn(
+                        observations['space_distance_km']
+                        / self.physical_space_radius_km)
+                    * self._gaspari_cohn(
+                        observations['time_distance_hours']
+                        / self.physical_time_radius_hours))
+            else:
+                localization = self._localization_precision(
+                    observations['rho_squared'])
         representativeness = observations.get(
             'representativeness_weight',
             torch.ones_like(observations['rho_squared']))
         precision = (
             valid * localization * representativeness
             / variance.clamp_min(1e-12))
-        obs_anomalies = torch.einsum('bmd,bnd->bmn', phi_obs, X)
-        covariance = torch.einsum(
-            'bmn,bm,bmk->bnk', obs_anomalies, precision, obs_anomalies)
-        rhs = torch.einsum(
-            'bmn,bm,bm->bn', obs_anomalies, precision, innovation)
-        return covariance, rhs, innovation, obs_anomalies, precision
+        if phi_obs.ndim == 2:
+            if 'query_index' not in observations:
+                raise ValueError('ragged observations require query_index')
+            query_index = observations['query_index'].long()
+            if query_index.numel() and int(query_index.max()) >= X.shape[0]:
+                raise ValueError('observation query_index is out of range')
+            batch, members = X.shape[:2]
+            accum_dtype = (torch.float64 if X.dtype in (
+                torch.float16, torch.bfloat16, torch.float32) else X.dtype)
+            covariance = torch.zeros(
+                batch, members, members, device=X.device, dtype=accum_dtype)
+            rhs = torch.zeros(batch, members, device=X.device, dtype=accum_dtype)
+            anomaly_chunks = []
+            factor_chunks = []
+            for start in range(0, phi_obs.shape[0], self.observation_chunk_size):
+                end = min(start + self.observation_chunk_size, phi_obs.shape[0])
+                chunk_query = query_index[start:end]
+                chunk_anomalies = torch.einsum(
+                    'td,tnd->tn', phi_obs[start:end].to(accum_dtype),
+                    X[chunk_query].to(accum_dtype))
+                anomaly_chunks.append(chunk_anomalies)
+                chunk_precision = precision[start:end]
+                chunk_innovation = innovation[start:end]
+                if chunk_query.numel():
+                    covariance.index_add_(
+                        0, chunk_query,
+                        torch.einsum(
+                            'tn,t,tm->tnm', chunk_anomalies,
+                            chunk_precision.to(accum_dtype), chunk_anomalies))
+                    rhs.index_add_(
+                        0, chunk_query,
+                        chunk_anomalies
+                        * (chunk_precision.to(accum_dtype)
+                           * chunk_innovation.to(accum_dtype)).unsqueeze(-1))
+                if self.anomaly_parameterization == 'orthogonal_factor':
+                    basis = self.state_basis.to(
+                        device=phi_obs.device, dtype=phi_obs.dtype)
+                    chunk_factors = torch.einsum(
+                        'td,dr->tr', phi_obs[start:end].to(accum_dtype),
+                        basis.to(accum_dtype))
+                    if factor_scales is not None:
+                        chunk_factors = chunk_factors * factor_scales[chunk_query]
+                    factor_chunks.append(chunk_factors)
+            obs_anomalies = (torch.cat(anomaly_chunks, dim=0)
+                             if anomaly_chunks else X.new_zeros(0, members))
+            obs_anomalies = obs_anomalies.to(dtype=X.dtype)
+            if self.anomaly_parameterization == 'orthogonal_factor':
+                rank = self.n_members - 1
+                factor_gram = torch.zeros(
+                    batch, rank, rank, device=X.device, dtype=accum_dtype)
+                factors = (torch.cat(factor_chunks, dim=0)
+                           if factor_chunks else X.new_zeros(0, rank))
+                if query_index.numel():
+                    factor_gram.index_add_(
+                        0, query_index,
+                        torch.einsum('tr,t,tu->tru', factors,
+                                     precision.to(accum_dtype), factors))
+            else:
+                factor_gram = None
+        else:
+            obs_anomalies = torch.einsum('bmd,bnd->bmn', phi_obs, X)
+            covariance = torch.einsum(
+                'bmn,bm,bmk->bnk', obs_anomalies, precision, obs_anomalies)
+            rhs = torch.einsum(
+                'bmn,bm,bm->bn', obs_anomalies, precision, innovation)
+            if self.anomaly_parameterization == 'orthogonal_factor':
+                factors = self.observation_factor_coordinates(
+                    phi_obs, factor_scales)
+                factor_gram = torch.einsum(
+                    'bmr,bm,bmk->brk', factors, precision, factors)
+            else:
+                factor_gram = None
+        covariance = covariance.to(dtype=X.dtype)
+        rhs = rhs.to(dtype=X.dtype)
+        factor_gram = (factor_gram.to(dtype=X.dtype)
+                       if factor_gram is not None else None)
+        return covariance, rhs, innovation, obs_anomalies, precision, factor_gram
 
     def forward(self, z_background, h_sw, phi_query, sources,
                 lat_n, cos_SZA, sin_doy, cos_doy, sin_I):
@@ -412,13 +521,16 @@ class NeuralETKFLayer(nn.Module):
         fy_obs, fy_phi = sources.get('FY', (empty, X.new_zeros(batch, 0, self.d_model)))
         cosmic_obs, cosmic_phi = sources.get(
             'COSMIC', (empty, X.new_zeros(batch, 0, self.d_model)))
-        fy_terms = self._source_terms(X, fy_phi, fy_obs, self.r_fy)
+        fy_terms = self._source_terms(
+            X, fy_phi, fy_obs, self.r_fy, factor_scales)
         cosmic_terms = self._source_terms(
-            X, cosmic_phi, cosmic_obs, self.r_cosmic)
+            X, cosmic_phi, cosmic_obs, self.r_cosmic, factor_scales)
         eye = torch.eye(members, device=X.device, dtype=X.dtype).expand(
             batch, members, members)
         system = (
             max(members - 1, 1) * eye + fy_terms[0] + cosmic_terms[0])
+        system_fy = max(members - 1, 1) * eye + fy_terms[0]
+        system_cosmic = max(members - 1, 1) * eye + cosmic_terms[0]
         chol = torch.linalg.cholesky(system)
         weights_fy = torch.cholesky_solve(
             fy_terms[1].unsqueeze(-1), chol).squeeze(-1)
@@ -446,12 +558,30 @@ class NeuralETKFLayer(nn.Module):
         gain = []
         cross_covariance = []
         for terms in (fy_terms, cosmic_terms):
-            weighted_y = terms[3].transpose(1, 2) * terms[4].unsqueeze(1)
-            solved = torch.cholesky_solve(weighted_y, chol)
-            gain.append(torch.einsum('bn,bnm->bm', query_anomalies, solved))
-            cross_covariance.append(torch.einsum(
-                'bn,bmn->bm', query_anomalies, terms[3])
-                / max(members - 1, 1))
+            if terms[3].ndim == 2:
+                query_index = (
+                    fy_obs if terms is fy_terms else cosmic_obs
+                )['query_index'].long()
+                if query_index.numel():
+                    weighted_y = terms[3] * terms[4].unsqueeze(-1)
+                    solved = torch.cholesky_solve(
+                        weighted_y.unsqueeze(-1), chol[query_index]
+                    ).squeeze(-1)
+                    gain.append(torch.einsum(
+                        'tn,tn->t', query_anomalies[query_index], solved))
+                    cross_covariance.append(torch.einsum(
+                        'tn,tn->t', query_anomalies[query_index], terms[3])
+                        / max(members - 1, 1))
+                else:
+                    gain.append(X.new_zeros(0))
+                    cross_covariance.append(X.new_zeros(0))
+            else:
+                weighted_y = terms[3].transpose(1, 2) * terms[4].unsqueeze(1)
+                solved = torch.cholesky_solve(weighted_y, chol)
+                gain.append(torch.einsum('bn,bnm->bm', query_anomalies, solved))
+                cross_covariance.append(torch.einsum(
+                    'bn,bmn->bm', query_anomalies, terms[3])
+                    / max(members - 1, 1))
 
         w_abs = weights.abs()
         member_weights = w_abs / (w_abs.sum(dim=-1, keepdim=True) + 1e-6)
@@ -475,6 +605,34 @@ class NeuralETKFLayer(nn.Module):
         anomaly_condition = (
             positive_singular[:, 0]
             / positive_singular[:, -1].clamp_min(1e-12))
+        def gram_diagnostics(gram):
+            if gram is None:
+                return (X.new_zeros(batch, 0),
+                        torch.zeros(batch, device=X.device, dtype=torch.long),
+                        X.new_zeros(batch), X.new_zeros(batch),
+                        torch.zeros(batch, device=X.device, dtype=torch.bool))
+            symmetric = 0.5 * (gram + gram.transpose(-1, -2))
+            eigenvalues = torch.linalg.eigvalsh(symmetric).clamp_min(0.0)
+            singular = eigenvalues.sqrt()
+            hx_max = eigenvalues[:, -1]
+            threshold = 1e-6 * hx_max.unsqueeze(-1)
+            rank = (eigenvalues > threshold).sum(dim=-1)
+            energy = eigenvalues / eigenvalues.sum(
+                dim=-1, keepdim=True).clamp_min(1e-12)
+            effective = torch.exp(-torch.sum(
+                energy * torch.log(energy.clamp_min(1e-12)), dim=-1))
+            denominator = torch.maximum(
+                eigenvalues[:, 0], 1e-12 * hx_max)
+            condition = (hx_max / denominator).clamp(max=1e6)
+            valid = torch.isfinite(gram).all(dim=-1).all(dim=-1) & (hx_max > 0)
+            return singular, rank, effective, condition, valid
+
+        fy_hx = gram_diagnostics(fy_terms[5])
+        cosmic_hx = gram_diagnostics(cosmic_terms[5])
+        joint_gram = None
+        if fy_terms[5] is not None and cosmic_terms[5] is not None:
+            joint_gram = fy_terms[5] + cosmic_terms[5]
+        joint_hx = gram_diagnostics(joint_gram)
         if factor_scales is None:
             scale_saturation = X.new_zeros(batch)
         else:
@@ -516,12 +674,38 @@ class NeuralETKFLayer(nn.Module):
             'delta_COSMIC': delta_cosmic,
             'query_anomalies': query_anomalies,
             'system': system,
+            'system_M10': system_fy,
+            'system_M01': system_cosmic,
+            'system_M11': system,
             'inflation': inflation,
             'factor_scales': factor_scales,
             'anomaly_singular_values': singular_values,
             'anomaly_effective_rank': effective_rank,
             'anomaly_condition': anomaly_condition,
             'scale_boundary_saturation': scale_saturation,
+            'factor_gram_FY': fy_terms[5],
+            'factor_gram_COSMIC': cosmic_terms[5],
+            'factor_gram_M11': joint_gram,
+            'hx_singular_values_FY': fy_hx[0],
+            'hx_numeric_rank_FY': fy_hx[1],
+            'hx_effective_rank_FY': fy_hx[2],
+            'hx_condition_FY': fy_hx[3],
+            'hx_valid_FY': fy_hx[4],
+            'hx_singular_values_COSMIC': cosmic_hx[0],
+            'hx_numeric_rank_COSMIC': cosmic_hx[1],
+            'hx_effective_rank_COSMIC': cosmic_hx[2],
+            'hx_condition_COSMIC': cosmic_hx[3],
+            'hx_valid_COSMIC': cosmic_hx[4],
+            'hx_singular_values_M11': joint_hx[0],
+            'hx_numeric_rank_M11': joint_hx[1],
+            'hx_effective_rank_M11': joint_hx[2],
+            'hx_condition_M11': joint_hx[3],
+            'hx_valid_M11': joint_hx[4],
+            # Compatibility aliases retain the joint M11 meaning.
+            'hx_singular_values': joint_hx[0],
+            'hx_numeric_rank': joint_hx[1],
+            'hx_effective_rank': joint_hx[2],
+            'hx_condition': joint_hx[3],
         }
 
 
@@ -609,6 +793,8 @@ class FSIA_INR_Model(nn.Module):
         enkf_pert_hidden = int(config.get('enkf_pert_hidden', 64))
         self.analysis_state_semantics = config.get(
             'analysis_state_semantics', 'legacy_feature_increment')
+        self.assimilation_semantics = config.get(
+            'assimilation_semantics', 'legacy_local_etkf')
         if self.analysis_state_semantics not in (
                 'legacy_feature_increment', 'query_local_increment_coefficients'):
             raise ValueError(
@@ -667,6 +853,14 @@ class FSIA_INR_Model(nn.Module):
                 'coordinate_local_symmetric',
                 'endpoint_context_symmetric')) and not self.uses_physical_modes,
             coefficient_space=self.uses_physical_modes,
+            physical_localization=bool(
+                config.get('use_physical_localization', True)),
+            physical_space_radius_km=float(config.get(
+                'physical_localization_space_km', 1800.0)),
+            physical_time_radius_hours=float(config.get(
+                'physical_localization_time_hours', 1.5)),
+            observation_chunk_size=int(config.get(
+                'observation_chunk_size', 4096)),
         )
         self.enkf_n_members = enkf_n_members
         self.background_state_dim = basis_dim
@@ -1191,6 +1385,9 @@ class FSIA_INR_Model(nn.Module):
                 f'ensemble_rhs_{source}': etkf[f'ensemble_rhs_{source}'],
                 f'cross_covariance_{source}': etkf[f'cross_covariance_{source}'],
                 f'observation_coords_{source}': payload['coords'],
+                f'observation_profile_ids_{source}': payload.get(
+                    'profile_id'),
+                f'observation_token_ids_{source}': payload.get('token_id'),
                 f'observation_rho_squared_{source}': payload['rho_squared'],
             })
         return (ne_fused, torch.zeros_like(ne_fused),
@@ -1232,6 +1429,20 @@ class FSIA_INR_Model(nn.Module):
 
         def prepare(observations):
             if observations is None:
+                if self.assimilation_semantics == 'continuous_physical_local_letkf':
+                    return {
+                        'coords': coords.new_zeros(0, 4),
+                        'value': coords.new_zeros(0),
+                        'background': coords.new_zeros(0),
+                        'valid_mask': torch.zeros(
+                            0, device=coords.device, dtype=torch.bool),
+                        'rho_squared': coords.new_zeros(0),
+                        'localization_weight': coords.new_zeros(0),
+                        'query_index': torch.zeros(
+                            0, device=coords.device, dtype=torch.long),
+                        'row_ptr': torch.zeros(
+                            B + 1, device=coords.device, dtype=torch.long),
+                    }, coords.new_zeros(0, self.kalman_layer.d_model)
                 empty = {
                     'coords': coords.new_zeros(B, 0, 4),
                     'value': coords.new_zeros(B, 0),
@@ -1242,6 +1453,11 @@ class FSIA_INR_Model(nn.Module):
                 }
                 return empty, coords.new_zeros(
                     B, 0, self.kalman_layer.d_model)
+            if (self.assimilation_semantics
+                    == 'continuous_physical_local_letkf'
+                    and 'localization_weight' not in observations):
+                raise ValueError(
+                    'M2-V requires token-level physical localization weights')
             required = {
                 'coords', 'value', 'background', 'valid_mask',
                 'rho_squared'}
@@ -1252,6 +1468,35 @@ class FSIA_INR_Model(nn.Module):
                 raise ValueError(
                     f'observation payload missing fields: {sorted(missing)}')
             valid = observations['valid_mask']
+            if (self.assimilation_semantics
+                    == 'continuous_physical_local_letkf'):
+                if valid.ndim != 1 or 'query_index' not in observations:
+                    raise ValueError(
+                        'M2-V observations must use flat token payloads')
+                query_index = observations['query_index'].long()
+                if query_index.shape != valid.shape:
+                    raise ValueError('query_index and valid_mask shape mismatch')
+                if query_index.numel() and int(query_index.max()) >= B:
+                    raise ValueError('M2-V query_index is out of range')
+                if 'row_ptr' in observations:
+                    row_ptr = observations['row_ptr'].long()
+                    if row_ptr.shape != (B + 1,) or int(row_ptr[-1]) != valid.numel():
+                        raise ValueError('M2-V row_ptr does not match token count')
+                prepared = dict(observations)
+                prepared['query_index'] = query_index
+                prepared['valid_mask'] = valid.bool()
+                target_coords = observations['coords']
+                target_background = observations['background']
+                target_z_background = observations.get('basis_z_background')
+                target_h_sw = observations.get('basis_h_sw')
+                if target_z_background is None or target_h_sw is None:
+                    raise ValueError('M2-V endpoint context is missing')
+                query_phi = self._density_basis(
+                    coords[query_index], target_coords.unsqueeze(1),
+                    target_background.unsqueeze(1), f_iri[query_index],
+                    h_sw[query_index], target_z_background.unsqueeze(1),
+                    target_h_sw.unsqueeze(1)).squeeze(1)
+                return prepared, query_phi
             count = valid.shape[1]
             query_coords = coords[:, None, :4].expand(-1, count, -1)
             query_background = ne_bkg.expand(-1, count)
@@ -1329,6 +1574,9 @@ class FSIA_INR_Model(nn.Module):
             'latent_anomalies': etkf['latent_anomalies'],
             'analysis_anomalies': etkf['analysis_anomalies'],
             'etkf_transform': etkf['transform'],
+            'system_M10': etkf['system_M10'],
+            'system_M01': etkf['system_M01'],
+            'system_M11': etkf['system_M11'],
             'obs_anomalies_FY': etkf['obs_anomalies_FY'],
             'obs_anomalies_COSMIC': etkf['obs_anomalies_COSMIC'],
             'precision_FY': etkf['precision_FY'],
@@ -1344,6 +1592,10 @@ class FSIA_INR_Model(nn.Module):
             'cross_covariance_COSMIC': etkf['cross_covariance_COSMIC'],
             'observation_coords_FY': fy_obs['coords'],
             'observation_coords_COSMIC': cosmic_obs['coords'],
+            'observation_query_index_FY': fy_obs.get(
+                'query_index', torch.zeros(0, device=coords.device, dtype=torch.long)),
+            'observation_query_index_COSMIC': cosmic_obs.get(
+                'query_index', torch.zeros(0, device=coords.device, dtype=torch.long)),
             'observation_rho_squared_FY': fy_obs['rho_squared'],
             'observation_rho_squared_COSMIC': cosmic_obs['rho_squared'],
             'query_coords': coords,
@@ -1356,6 +1608,28 @@ class FSIA_INR_Model(nn.Module):
             'anomaly_effective_rank': etkf['anomaly_effective_rank'],
             'anomaly_condition': etkf['anomaly_condition'],
             'scale_boundary_saturation': etkf['scale_boundary_saturation'],
+            'hx_singular_values': etkf['hx_singular_values'],
+            'hx_numeric_rank': etkf['hx_numeric_rank'],
+            'hx_effective_rank': etkf['hx_effective_rank'],
+            'hx_condition': etkf['hx_condition'],
+            'factor_gram_FY': etkf['factor_gram_FY'],
+            'factor_gram_COSMIC': etkf['factor_gram_COSMIC'],
+            'factor_gram_M11': etkf['factor_gram_M11'],
+            'hx_singular_values_FY': etkf['hx_singular_values_FY'],
+            'hx_numeric_rank_FY': etkf['hx_numeric_rank_FY'],
+            'hx_effective_rank_FY': etkf['hx_effective_rank_FY'],
+            'hx_condition_FY': etkf['hx_condition_FY'],
+            'hx_valid_FY': etkf['hx_valid_FY'],
+            'hx_singular_values_COSMIC': etkf['hx_singular_values_COSMIC'],
+            'hx_numeric_rank_COSMIC': etkf['hx_numeric_rank_COSMIC'],
+            'hx_effective_rank_COSMIC': etkf['hx_effective_rank_COSMIC'],
+            'hx_condition_COSMIC': etkf['hx_condition_COSMIC'],
+            'hx_valid_COSMIC': etkf['hx_valid_COSMIC'],
+            'hx_singular_values_M11': etkf['hx_singular_values_M11'],
+            'hx_numeric_rank_M11': etkf['hx_numeric_rank_M11'],
+            'hx_effective_rank_M11': etkf['hx_effective_rank_M11'],
+            'hx_condition_M11': etkf['hx_condition_M11'],
+            'hx_valid_M11': etkf['hx_valid_M11'],
         }
 
         return Ne_fused, log_var, ne_placeholder, Ne_delta, extras

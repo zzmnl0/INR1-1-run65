@@ -221,11 +221,44 @@ def _resolve_checkpoint(config, mdia_cfg):
         return config['checkpoint_path']
     model_type = config.get('model_type', 'fsia')
     if model_type == 'fsia':
-        raise ValueError('M2-O ISR验证缺少checkpoint路径；请配置development候选')
+        raise ValueError('M2-V ISR验证缺少通过development门禁的checkpoint路径')
     return os.path.join(mdia_cfg['save_dir'], 'best_mdia_model.pth')
 
 
+def _require_m2v_config(config):
+    expected = {
+        'checkpoint_format_version': 12,
+        'basis_dim': 64,
+        'enkf_n_members': 8,
+        'enkf_anomaly_parameterization': 'orthogonal_factor',
+        'density_basis_semantics': 'endpoint_context_symmetric',
+        'r_mode': 'global',
+        'use_distance_localization': True,
+        'use_physical_localization': True,
+        'assimilation_semantics': 'continuous_physical_local_letkf',
+        'neighbor_directory_semantics': 'token_exact_positive_support_v1',
+        'physical_localization_space_km': 1800.0,
+        'physical_localization_time_hours': 1.5,
+        'representativeness_floor': 1.0,
+        'use_empirical_covariance_loss': False,
+    }
+    mismatches = {}
+    for key, value in expected.items():
+        actual = config.get(key)
+        if isinstance(value, float):
+            if actual is None or not np.isclose(float(actual), value):
+                mismatches[key] = (actual, value)
+        elif actual != value:
+            mismatches[key] = (actual, value)
+    if config.get('representativeness_kernel_path') is not None:
+        mismatches['representativeness_kernel_path'] = (
+            config.get('representativeness_kernel_path'), None)
+    if mismatches:
+        raise ValueError(f'checkpoint不是M2-V推理语义: {mismatches}')
+
+
 def _require_m2o_config(config):
+    """Legacy unit-test helper; ISR production loading uses M2-V checks."""
     expected = {
         'basis_dim': 64,
         'enkf_n_members': 8,
@@ -238,7 +271,7 @@ def _require_m2o_config(config):
         key: (config.get(key), value)
         for key, value in expected.items() if config.get(key) != value}
     if mismatches:
-        raise ValueError(f'checkpoint不是M2-O推理语义: {mismatches}')
+        raise ValueError(f'legacy M2-O configuration mismatch: {mismatches}')
 
 
 def _load_state_compat(model, state_dict):
@@ -300,7 +333,7 @@ def _load_model_and_managers(config, device):
     manifest_path = os.path.join(os.path.dirname(ckpt), 'run_manifest.json')
     if model_type == 'fsia':
         if not os.path.isfile(manifest_path):
-            raise FileNotFoundError(f'M2-O checkpoint缺少run manifest: {manifest_path}')
+            raise FileNotFoundError(f'M2-V checkpoint缺少run manifest: {manifest_path}')
         with open(manifest_path, encoding='utf-8') as stream:
             trained_config = json.load(stream).get('config', {})
         for key in (
@@ -310,10 +343,16 @@ def _load_model_and_managers(config, device):
                 'basis_dim', 'enkf_n_members', 'enkf_pert_hidden',
                 'enkf_anomaly_parameterization', 'enkf_scale_init',
                 'enkf_scale_condition_max', 'density_basis_semantics',
-                'r_mode', 'use_distance_localization'):
+                'r_mode', 'use_distance_localization',
+                'checkpoint_format_version', 'assimilation_semantics',
+                'neighbor_directory_semantics',
+                'physical_localization_space_km',
+                'physical_localization_time_hours',
+                'representativeness_kernel_path',
+                'observation_chunk_size'):
             if key in trained_config:
                 cfg[key] = trained_config[key]
-        _require_m2o_config(cfg)
+        _require_m2v_config(cfg)
 
     # IRI 代理
     iri_proxy = IRINeuralProxy(layers=[4, 128, 128, 128, 128, 1]).to(device)

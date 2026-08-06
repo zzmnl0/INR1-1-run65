@@ -1,4 +1,4 @@
-"""Two-stage run66 training for the feature-space ETKF model."""
+"""Two-stage run66 training for the feature-space local LETKF model."""
 
 import hashlib
 import json
@@ -267,7 +267,11 @@ def _apply_source_dropout(fy_obs, cosmic_obs, profile_ids, probabilities):
         if payload is None:
             return None
         result = dict(payload)
-        result['valid_mask'] = payload['valid_mask'] & keep.unsqueeze(-1)
+        if payload['valid_mask'].ndim == 1 and 'query_index' in payload:
+            result['valid_mask'] = (
+                payload['valid_mask'] & keep[payload['query_index']])
+        else:
+            result['valid_mask'] = payload['valid_mask'] & keep.unsqueeze(-1)
         return result
     return apply(fy_obs, keep_fy), apply(cosmic_obs, keep_cosmic)
 
@@ -284,7 +288,11 @@ def _apply_balanced_profile_modes(
         if payload is None:
             return None
         result = dict(payload)
-        result['valid_mask'] = payload['valid_mask'] & keep.unsqueeze(-1)
+        if payload['valid_mask'].ndim == 1 and 'query_index' in payload:
+            result['valid_mask'] = (
+                payload['valid_mask'] & keep[payload['query_index']])
+        else:
+            result['valid_mask'] = payload['valid_mask'] & keep.unsqueeze(-1)
         return result
 
     return (
@@ -503,12 +511,21 @@ def _gradient_norms(data_loss, auxiliary_loss, parameters, components=None):
     )
 
 
+def _query_precision_sum(extras, source):
+    precision = extras[f'precision_{source}']
+    if precision.ndim == 1:
+        query_index = extras[f'observation_query_index_{source}'].long()
+        result = extras['ne_bkg'].new_zeros(extras['ne_bkg'].shape[0])
+        if query_index.numel():
+            result.index_add_(0, query_index, precision)
+        return result
+    return precision.sum(dim=-1)
+
+
 def _analysis_active_mask(extras):
     """Queries with at least one physical observation contributing precision."""
-    return (
-        extras['precision_FY'].sum(dim=-1)
-        + extras['precision_COSMIC'].sum(dim=-1)
-    ) > 0
+    return (_query_precision_sum(extras, 'FY')
+            + _query_precision_sum(extras, 'COSMIC')) > 0
 
 
 _EXACT_MODE_SOURCES = {
@@ -525,9 +542,8 @@ def observation_gram_whitening_loss(extras, profile_ids, kalman_layer,
 
     The loss is computed in the seven independent factor coordinates and is
     therefore exactly tied to the ``HX = F @ C`` geometry used by the ETKF.
-    Queries with fewer than seven positive-precision tokens are excluded; this
-    keeps padding and genuinely unsupported local windows from manufacturing a
-    rank target.
+    Queries with fewer than seven positive-precision tokens are unsupported;
+    rank-deficient Gram matrices with sufficient support remain eligible.
     """
     if kalman_layer.anomaly_parameterization != 'orthogonal_factor':
         raise ValueError('observation Gram loss requires orthogonal_factor')
@@ -546,6 +562,17 @@ def observation_gram_whitening_loss(extras, profile_ids, kalman_layer,
         token_counts = torch.zeros(
             expected, device=extras['ne_bkg'].device, dtype=torch.long)
         for source in sources:
+            precomputed = extras.get(f'factor_gram_{source}')
+            if precomputed is not None:
+                grams.append(precomputed.float())
+                precision = extras[f'precision_{source}']
+                if precision.ndim == 1:
+                    query_index = extras[f'observation_query_index_{source}']
+                    token_counts.index_add_(
+                        0, query_index.long(), (precision > 0.0).long())
+                else:
+                    token_counts = token_counts + (precision > 0.0).sum(dim=-1)
+                continue
             factors = extras.get(f'observation_factors_{source}')
             if factors is None:
                 basis = extras.get(f'basis_{source}')
@@ -591,7 +618,7 @@ def exact_mode_profile_losses(extras, target, profile_ids, delta):
     for mode, sources in _EXACT_MODE_SOURCES.items():
         prediction = extras['ne_bkg'] + increments[mode].unsqueeze(-1)
         active = sum(
-            extras[f'precision_{source}'].sum(dim=-1)
+            _query_precision_sum(extras, source)
             for source in sources) > 0
         losses[mode] = profile_huber_loss(
             prediction, target, profile_ids, delta=delta, valid_mask=active)
@@ -636,7 +663,7 @@ def exact_mode_direction_losses(extras, target, profile_ids, target_source):
     active_masks = {}
     for mode, sources in _EXACT_MODE_SOURCES.items():
         active = (
-            sum(extras[f'precision_{source}'].sum(dim=-1)
+            sum(_query_precision_sum(extras, source)
                 for source in sources) > 0
         ) & (desired.abs() >= 0.05)
         token_loss = F.relu(
@@ -739,6 +766,9 @@ def empirical_covariance_loss(
 
 def _covariance_training_loss(
         extras, target, profile_ids, target_source, batch_processor, config):
+    if not (config.get('use_covariance_moment_loss', False)
+            or config.get('use_empirical_covariance_loss', False)):
+        return extras['ne_bkg'].sum() * 0.0
     if config.get('use_empirical_covariance_loss', False):
         return empirical_covariance_loss(
             extras, profile_ids, target_source,
@@ -1328,6 +1358,12 @@ def train_one_epoch(model, train_loader, batch_processor, optimizer, device,
                 'observation_grad_norm': observation_grad.item(),
                 'auxiliary_grad_norm': auxiliary_grad.item(),
                 'auxiliary_to_observation_grad': ratio.item(),
+                'fy_hx_effective_rank': fy_extras['hx_effective_rank'].mean().item(),
+                'cosmic_hx_effective_rank': cosmic_extras['hx_effective_rank'].mean().item(),
+                'fy_hx_condition': fy_extras['hx_condition'].mean().item(),
+                'cosmic_hx_condition': cosmic_extras['hx_condition'].mean().item(),
+                'fy_hx_numeric_rank': fy_extras['hx_numeric_rank'].float().mean().item(),
+                'cosmic_hx_numeric_rank': cosmic_extras['hx_numeric_rank'].float().mean().item(),
                 **{
                     f'fy_{mode.lower()}_raw': fy_mode_losses[mode].item()
                     for mode in _EXACT_MODE_SOURCES
@@ -1741,7 +1777,7 @@ def _reset_random_seeds(seed, device):
 
 
 def _architecture_signature(config):
-    return {
+    signature = {
         'basis_dim': int(config.get('basis_dim', 64)),
         'enkf_n_members': int(config.get('enkf_n_members', 8)),
         'enkf_pert_hidden': int(config.get('enkf_pert_hidden', 64)),
@@ -1759,6 +1795,19 @@ def _architecture_signature(config):
         'mode_basis_semantics': config.get(
             'mode_basis_semantics', 'learned_density_basis'),
     }
+    if config.get('assimilation_semantics') == 'continuous_physical_local_letkf':
+        signature.update({
+            'assimilation_semantics': config['assimilation_semantics'],
+            'neighbor_directory_semantics': config.get(
+                'neighbor_directory_semantics', 'profile_center_legacy'),
+            'physical_localization_space_km': float(config.get(
+                'physical_localization_space_km', 1800.0)),
+            'physical_localization_time_hours': float(config.get(
+                'physical_localization_time_hours', 1.5)),
+            'observation_chunk_size': int(config.get(
+                'observation_chunk_size', 4096)),
+        })
+    return signature
 
 
 def _restrict_training_profiles(loader, fraction, seed, source, manifest_path):
@@ -1892,6 +1941,18 @@ def train_fsia(config=None):
     if not config.get('use_distance_localization', False):
         raise ValueError(
             'density-observation ETKF requires continuous localization')
+    if config.get('assimilation_semantics') == 'continuous_physical_local_letkf':
+        if not config.get('use_physical_localization', False):
+            raise ValueError('M2-V requires physical Gaspari-Cohn localization')
+        if config.get('representativeness_kernel_path'):
+            raise ValueError('M2-V must not use source-labelled representativeness tables')
+        if config.get('use_empirical_covariance_loss', False):
+            raise ValueError('M2-V must not use empirical covariance supervision')
+        if config.get('neighbor_directory_semantics') != (
+                'token_exact_positive_support_v1'):
+            raise ValueError('M2-V requires the exact token directory')
+        if int(config.get('observation_chunk_size', 4096)) < 1:
+            raise ValueError('M2-V observation_chunk_size must be positive')
     if (config.get('use_direction_loss', False)
             and not config.get('analysis_exact_mode_loss', False)):
         raise ValueError(
@@ -1918,10 +1979,10 @@ def train_fsia(config=None):
         }
         if mismatched:
             raise ValueError(
-                f'observation Gram loss is restricted to M2-O: {mismatched}')
+                f'observation Gram loss requires the D64/N8 endpoint basis: {mismatched}')
         if config.get('analysis_state_semantics', 'legacy_feature_increment') != (
                 'legacy_feature_increment'):
-            raise ValueError('observation Gram loss cannot train M2-R states')
+            raise ValueError('observation Gram loss cannot train physical coefficient states')
         if not 0.0 < float(config.get('gram_gradient_target', 0.02)) <= 1.0:
             raise ValueError('gram_gradient_target must be in (0, 1]')
         if int(config.get('gram_calibration_batches', 20)) < 1:
@@ -1935,9 +1996,10 @@ def train_fsia(config=None):
     if background_epochs <= 0 or analysis_epochs <= 0:
         raise ValueError('background_epochs and analysis_epochs must both be positive')
     architecture = _architecture_signature(config)
-    format_version = (
+    format_version = int(config.get(
+        'checkpoint_format_version',
         8 if architecture['enkf_anomaly_parameterization']
-        == 'orthogonal_factor' else 7)
+        == 'orthogonal_factor' else 7))
 
     sw_manager = SpaceWeatherManager(
         txt_path=config['sw_path'],
@@ -2362,6 +2424,14 @@ def train_fsia(config=None):
             'r_mode': config.get('r_mode', 'global'),
             'use_distance_localization': bool(
                 config.get('use_distance_localization', False)),
+            'assimilation_semantics': config.get(
+                'assimilation_semantics', 'legacy_local_etkf'),
+            'use_physical_localization': bool(
+                config.get('use_physical_localization', False)),
+            'neighbor_directory_semantics': config.get(
+                'neighbor_directory_semantics', 'profile_center_legacy'),
+            'observation_chunk_size': int(config.get(
+                'observation_chunk_size', 4096)),
             'source_mode_schedule': config.get(
                 'source_mode_schedule', 'random_profile'),
             'analysis_exact_mode_loss': bool(
@@ -2415,6 +2485,14 @@ def train_fsia(config=None):
         'r_mode': config.get('r_mode', 'global'),
         'use_distance_localization': bool(
             config.get('use_distance_localization', False)),
+        'assimilation_semantics': config.get(
+            'assimilation_semantics', 'legacy_local_etkf'),
+        'use_physical_localization': bool(
+            config.get('use_physical_localization', False)),
+        'neighbor_directory_semantics': config.get(
+            'neighbor_directory_semantics', 'profile_center_legacy'),
+        'observation_chunk_size': int(config.get(
+            'observation_chunk_size', 4096)),
         'source_mode_schedule': config.get(
             'source_mode_schedule', 'random_profile'),
         'analysis_exact_mode_loss': bool(

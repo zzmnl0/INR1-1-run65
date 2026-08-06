@@ -21,7 +21,7 @@ from inr_modules.mdia.evaluation_mdia import evaluate_and_save_report, evaluate_
 from inr_modules.mdia.visualization_mdia import (plot_global_slice, plot_altitude_profile,
                                                   plot_hmf2_nmf2_map)
 
-_DEFAULT_RUN_NAME = 'run66-m2o-full-15epoch'
+_DEFAULT_RUN_NAME = 'run66-m2v-continuous-physical-letkf'
 _DEFAULT_BACKGROUND_SEED = (
     Path(current_dir) / 'checkpoints_fsia' / 'run66-etkf-loss'
     / 'best_background_model.pth')
@@ -170,7 +170,8 @@ def main(eval_only=False, resume_ckpt=None, run_name=_DEFAULT_RUN_NAME,
     if profile_subset_manifest is None:
         profile_subset_manifest = prior_config.get('profile_subset_manifest')
     date_blocked_split = bool(
-        prior_config.get('use_date_blocked_split', False)
+        prior_config.get('use_date_blocked_split',
+                         config.get('use_date_blocked_split', True))
         if date_blocked_split is None else date_blocked_split)
     if date_split_manifest is None:
         date_split_manifest = prior_config.get(
@@ -495,7 +496,7 @@ if __name__ == '__main__':
                         default='global')
     parser.add_argument('--distance-localization',
                         action=argparse.BooleanOptionalAction, default=True,
-                        help='inflate fixed R using deterministic local distance')
+                        help='enable continuous physical localization')
     parser.add_argument('--background-seed', default=None,
                         help='shared Background checkpoint for Analysis-only runs')
     parser.add_argument('--basis-dim', type=int, default=None,

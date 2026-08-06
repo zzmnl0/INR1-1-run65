@@ -306,8 +306,9 @@ class SlidingWindowBatchProcessor:
     """
     滑动窗口批次处理器
 
-    Receives one FY batch and returns the tensors consumed by FSIA training
-    and evaluation.
+    Receives one FY batch and returns tensors consumed by FSIA training and
+    evaluation.  M2-V payloads are exact token-level ragged batches; their
+    physical Gaspari--Cohn weights are carried in ``localization_weight``.
     """
 
     def __init__(self, sw_manager, device='cuda',
