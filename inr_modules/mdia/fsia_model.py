@@ -404,7 +404,7 @@ class NeuralETKFLayer(nn.Module):
         }
 
     def _source_terms(self, X, phi_obs, observations, variance,
-                      factor_scales=None):
+                      factor_scales=None, retain_diagnostics=True):
         innovation = observations['value'] - observations['background']
         valid = observations['valid_mask'].to(dtype=X.dtype)
         localization = observations.get('localization_weight')
@@ -440,15 +440,19 @@ class NeuralETKFLayer(nn.Module):
             covariance = torch.zeros(
                 batch, members, members, device=X.device, dtype=accum_dtype)
             rhs = torch.zeros(batch, members, device=X.device, dtype=accum_dtype)
-            anomaly_chunks = []
-            factor_chunks = []
+            anomaly_chunks = [] if retain_diagnostics else None
+            factor_gram = (None if self.anomaly_parameterization !=
+                           'orthogonal_factor' else torch.zeros(
+                               batch, self.n_members - 1, self.n_members - 1,
+                               device=X.device, dtype=accum_dtype))
             for start in range(0, phi_obs.shape[0], self.observation_chunk_size):
                 end = min(start + self.observation_chunk_size, phi_obs.shape[0])
                 chunk_query = query_index[start:end]
                 chunk_anomalies = torch.einsum(
                     'td,tnd->tn', phi_obs[start:end].to(accum_dtype),
                     X[chunk_query].to(accum_dtype))
-                anomaly_chunks.append(chunk_anomalies)
+                if retain_diagnostics:
+                    anomaly_chunks.append(chunk_anomalies)
                 chunk_precision = precision[start:end]
                 chunk_innovation = innovation[start:end]
                 if chunk_query.numel():
@@ -470,23 +474,17 @@ class NeuralETKFLayer(nn.Module):
                         basis.to(accum_dtype))
                     if factor_scales is not None:
                         chunk_factors = chunk_factors * factor_scales[chunk_query]
-                    factor_chunks.append(chunk_factors)
-            obs_anomalies = (torch.cat(anomaly_chunks, dim=0)
-                             if anomaly_chunks else X.new_zeros(0, members))
-            obs_anomalies = obs_anomalies.to(dtype=X.dtype)
-            if self.anomaly_parameterization == 'orthogonal_factor':
-                rank = self.n_members - 1
-                factor_gram = torch.zeros(
-                    batch, rank, rank, device=X.device, dtype=accum_dtype)
-                factors = (torch.cat(factor_chunks, dim=0)
-                           if factor_chunks else X.new_zeros(0, rank))
-                if query_index.numel():
-                    factor_gram.index_add_(
-                        0, query_index,
-                        torch.einsum('tr,t,tu->tru', factors,
-                                     precision.to(accum_dtype), factors))
-            else:
-                factor_gram = None
+                    if chunk_query.numel():
+                        factor_gram.index_add_(
+                            0, chunk_query,
+                            torch.einsum(
+                                'tr,t,tu->tru', chunk_factors,
+                                precision[start:end].to(accum_dtype),
+                                chunk_factors))
+            obs_anomalies = (
+                (torch.cat(anomaly_chunks, dim=0).to(dtype=X.dtype)
+                 if anomaly_chunks else X.new_zeros(0, members))
+                if retain_diagnostics else None)
         else:
             obs_anomalies = torch.einsum('bmd,bnd->bmn', phi_obs, X)
             covariance = torch.einsum(
@@ -521,10 +519,13 @@ class NeuralETKFLayer(nn.Module):
         fy_obs, fy_phi = sources.get('FY', (empty, X.new_zeros(batch, 0, self.d_model)))
         cosmic_obs, cosmic_phi = sources.get(
             'COSMIC', (empty, X.new_zeros(batch, 0, self.d_model)))
+        retain_diagnostics = not self.training
         fy_terms = self._source_terms(
-            X, fy_phi, fy_obs, self.r_fy, factor_scales)
+            X, fy_phi, fy_obs, self.r_fy, factor_scales,
+            retain_diagnostics=retain_diagnostics)
         cosmic_terms = self._source_terms(
-            X, cosmic_phi, cosmic_obs, self.r_cosmic, factor_scales)
+            X, cosmic_phi, cosmic_obs, self.r_cosmic, factor_scales,
+            retain_diagnostics=retain_diagnostics)
         eye = torch.eye(members, device=X.device, dtype=X.dtype).expand(
             batch, members, members)
         system = (
@@ -558,7 +559,10 @@ class NeuralETKFLayer(nn.Module):
         gain = []
         cross_covariance = []
         for terms in (fy_terms, cosmic_terms):
-            if terms[3].ndim == 2:
+            if terms[3] is None:
+                gain.append(X.new_zeros(batch, 0))
+                cross_covariance.append(X.new_zeros(batch, 0))
+            elif terms[3].ndim == 2:
                 query_index = (
                     fy_obs if terms is fy_terms else cosmic_obs
                 )['query_index'].long()
@@ -1601,8 +1605,13 @@ class FSIA_INR_Model(nn.Module):
             'query_coords': coords,
             'query_basis': query_phi,
             'query_anomalies': etkf['query_anomalies'],
-            'basis_FY': phi_fy,
-            'basis_COSMIC': phi_cosmic,
+            **({
+                'basis_FY': phi_fy,
+                'basis_COSMIC': phi_cosmic,
+            } if not (
+                self.training
+                and self.assimilation_semantics == (
+                    'continuous_physical_local_letkf')) else {}),
             'factor_scales': etkf['factor_scales'],
             'anomaly_singular_values': etkf['anomaly_singular_values'],
             'anomaly_effective_rank': etkf['anomaly_effective_rank'],
