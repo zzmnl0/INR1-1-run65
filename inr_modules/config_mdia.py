@@ -39,10 +39,23 @@ CONFIG_MDIA = {
     'fy_qc_report_path': r'D:\FYsatellite\EDP_data\fy_202409_qc_v2_report.json',
     'iri_proxy_path': r'D:\code11\IRI01\output_results\iri_september_full_proxy.pth',
     'sw_path': r'D:\FYsatellite\EDP_data\kp\OMNI_Kp_F107_20240901_20241001.txt',
-    'save_dir': './checkpoints_fsia/run66-m2v-continuous-physical-letkf',
+    'save_dir': './checkpoints_fsia/run66-m2v-qcv2-dateblocked-background',
     'run_semantics': 'M2-V_continuous_physical_local_letkf',
     'assimilation_semantics': 'continuous_physical_local_letkf',
     'checkpoint_format_version': 12,
+    'background_training_semantics': 'qc_v2_date_blocked_train_only',
+    'background_only': False,
+    # Fixed physical trust gate for the new QC-v2 Background run.  It is
+    # deliberately disabled by default so historical manifests keep their
+    # exact M2-V behavior unless the CLI enables it explicitly.
+    'background_trust_gate_enabled': False,
+    'background_trust_gate_semantics': 'disabled',
+    'background_trust_gate_altitude_core_km': 200.0,
+    'background_trust_gate_altitude_transition_km': 100.0,
+    'background_trust_gate_night_cosine_offset': 0.2,
+    'background_trust_gate_night_cosine_scale': 0.2,
+    'background_trust_gate_dip_core': 0.25,
+    'background_trust_gate_dip_transition': 0.25,
 
     # ==================== GIRO 独立评估数据（训练不读取）====================
     # 由 preprocess_giro.py 生成，供 evaluate_giro_peak.py 使用
@@ -165,8 +178,7 @@ CONFIG_MDIA = {
     'r_sigma_max': 0.40,
     'r_min_profiles': 200,
     'r_shrinkage_profiles': 200,
-    'background_seed_ckpt': (
-        './checkpoints_fsia/run66-etkf-loss/best_background_model.pth'),
+    'background_seed_ckpt': None,
     'source_dropout': (0.25, 0.25, 0.50),  # M10, M01, M11
     'source_mode_schedule': 'random_profile',
 
@@ -256,7 +268,15 @@ def print_config_mdia():
         '训练超参数': ['batch_size', 'lr', 'weight_decay', 'background_epochs',
                        'analysis_epochs', 'seed', 'analysis_seed', 'device',
                        'num_workers', 'use_memmap', 'train_profile_fraction',
-                       'profile_subset_manifest'],
+                       'profile_subset_manifest', 'background_training_semantics',
+                       'background_only', 'background_trust_gate_enabled',
+                       'background_trust_gate_semantics',
+                       'background_trust_gate_altitude_core_km',
+                       'background_trust_gate_altitude_transition_km',
+                       'background_trust_gate_night_cosine_offset',
+                       'background_trust_gate_night_cosine_scale',
+                       'background_trust_gate_dip_core',
+                       'background_trust_gate_dip_transition'],
         '损失权重': ['huber_delta', 'w_iri', 'w_increment',
                     'w_vertical_background', 'w_time_background',
                     'w_vertical_analysis', 'w_time_analysis',

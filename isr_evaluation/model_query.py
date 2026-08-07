@@ -9,6 +9,7 @@ import numpy as np
 import torch
 from inr_modules.mdia.sliding_dataset import (
     attach_observation_background,
+    observation_query_coverage,
     query_observation_payload,
 )
 
@@ -124,20 +125,14 @@ def query_model_grid(model, sw_manager, day_record, start_unix, device,
                 observations = query_observation_payload(
                     fy_nb_index, chunk, device)
                 fy_covered += int(
-                    (observations['row_ptr'][1:] > observations['row_ptr'][:-1])
-                    .sum().item()
-                    if observations['valid_mask'].ndim == 1 else
-                    observations['valid_mask'].any(dim=1).sum().item())
+                    observation_query_coverage(observations).sum().item())
                 model_kwargs['observations_fy'] = attach_observation_background(
                     observations, model, sw_manager, iri_peak_manager)
             if cosmic_nb_index is not None:
                 observations = query_observation_payload(
                     cosmic_nb_index, chunk, device)
                 cosmic_covered += int(
-                    (observations['row_ptr'][1:] > observations['row_ptr'][:-1])
-                    .sum().item()
-                    if observations['valid_mask'].ndim == 1 else
-                    observations['valid_mask'].any(dim=1).sum().item())
+                    observation_query_coverage(observations).sum().item())
                 model_kwargs['observations_cosmic'] = (
                     attach_observation_background(
                         observations, model, sw_manager, iri_peak_manager))

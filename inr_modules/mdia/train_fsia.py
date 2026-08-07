@@ -227,6 +227,10 @@ def _record_resolved_training_config(config, covariance_strata):
             'resolved_representativeness_kernel'),
         'covariance_strata': covariance_strata,
         'date_split': config.get('resolved_date_split'),
+        'background_training_semantics': config.get(
+            'background_training_semantics'),
+        'background_loader_schedule': config.get('background_loader_schedule'),
+        'background_update_steps': config.get('background_update_steps', []),
     }
     temp_path = f'{path}.tmp'
     with open(temp_path, 'w', encoding='utf-8') as stream:
@@ -781,7 +785,7 @@ def _covariance_training_loss(
 def _paired_analysis_losses(
         model, batch_processor, fy_batch, cosmic_batch, device, config,
         sw_manager, iri_peak_manager, allowed_profile_ids=None,
-        source_mode=None, analysis_epoch=0, include_gram=False):
+        source_mode=None, analysis_epoch=0):
     coords, target, profile_ids = _unpack_source_batch(fy_batch, device)
     sw_seq = sw_manager.get_drivers_sequence(coords[:, 3])
     iri_peak = (iri_peak_manager.get_iri_peak(coords)
@@ -833,9 +837,7 @@ def _paired_analysis_losses(
                 fy_extras, profile_ids, model.kalman_layer)
             + observation_gram_whitening_loss(
                 cosmic_extras, cosmic_ids, model.kalman_layer))
-    if include_gram:
-        return observation_loss, covariance_loss, direction_loss, gram_loss
-    return observation_loss, covariance_loss, direction_loss
+    return observation_loss, covariance_loss, direction_loss, gram_loss
 
 
 def _resolve_covariance_weight(
@@ -862,7 +864,7 @@ def _resolve_covariance_weight(
             except StopIteration:
                 cosmic_iter = iter(cosmic_train_loader)
                 cosmic_batch = next(cosmic_iter)
-            observation, covariance, _ = _paired_analysis_losses(
+            observation, covariance, _, _ = _paired_analysis_losses(
                 model, batch_processor, fy_batch, cosmic_batch, device,
                 config, sw_manager, iri_peak_manager, allowed_profile_ids,
                 _source_mode_for_batch(
@@ -919,10 +921,10 @@ def _resolve_direction_weight(
             except StopIteration:
                 cosmic_iter = iter(cosmic_train_loader)
                 cosmic_batch = next(cosmic_iter)
-            observation, _, direction = _paired_analysis_losses(
+            observation, _, direction, _ = _paired_analysis_losses(
                 model, batch_processor, fy_batch, cosmic_batch, device,
                 config, sw_manager, iri_peak_manager, allowed_profile_ids,
-                'exact_M10_M01_M11', include_gram=True)
+                'exact_M10_M01_M11')
             decoder = (model.density_basis_decoder
                        if hasattr(model, 'density_basis_decoder')
                        else model.kalman_layer)
@@ -1013,6 +1015,11 @@ def train_one_epoch(model, train_loader, batch_processor, optimizer, device,
     _set_stage_mode(model, stage)
     use_amp = config.get('use_amp', False) and scaler is not None
     delta = config.get('huber_delta', 0.2)
+    # Background must cover both QC-v2 sources completely.  Analysis retains
+    # the historical FY-anchored schedule and only cycles COSMIC.
+    epoch_length = _background_epoch_length(
+        train_loader, cosmic_train_loader, stage)
+    fy_iter = iter(train_loader)
     cosmic_iter = iter(cosmic_train_loader)
     stats = {key: 0.0 for key in (
         'total', 'observation', 'covariance', 'direction', 'gram',
@@ -1052,7 +1059,12 @@ def train_one_epoch(model, train_loader, batch_processor, optimizer, device,
         and config.get('analysis_exact_mode_loss', False))
     started = time.time()
 
-    for batch_idx, fy_batch in enumerate(train_loader):
+    for batch_idx in range(epoch_length):
+        try:
+            fy_batch = next(fy_iter)
+        except StopIteration:
+            fy_iter = iter(train_loader)
+            fy_batch = next(fy_iter)
         coords, target, profile_ids = _unpack_source_batch(fy_batch, device)
         sw_seq = sw_manager.get_drivers_sequence(coords[:, 3])
         iri_peak = (iri_peak_manager.get_iri_peak(coords)
@@ -1469,7 +1481,7 @@ def train_one_epoch(model, train_loader, batch_processor, optimizer, device,
 
         if (batch_idx + 1) % 100 == 0:
             print(
-                f'  [{batch_idx + 1:>5}/{len(train_loader)}] {stage} '
+                f'  [{batch_idx + 1:>5}/{epoch_length}] {stage} '
                 f'loss={total_loss.item():.4f} FY={fy_loss.item():.4f} '
                 f'COSMIC={cosmic_loss.item():.4f} '
                 f'V={vertical_loss.item():.4f} T={time_loss.item():.4f} '
@@ -1488,6 +1500,7 @@ def train_one_epoch(model, train_loader, batch_processor, optimizer, device,
             stats[f'gradient_ratio_{name}'] / audited_batches
             if audited_batches else 0.0)
     result['gradient_audit_batches'] = audited_batches
+    result['processed_batches'] = processed_batches
     result['source_mode_counts'] = source_mode_counts
     result['source_mode_count_unit'] = (
         'batches_all_modes' if exact_mode_loss else
@@ -1517,11 +1530,99 @@ def _profile_metrics(predictions, targets, profile_ids):
     }
 
 
+def _background_stratified_metrics(prediction, raw_prediction, target, coords,
+                                   residual_raw, residual, trust_gate):
+    """Pointwise Background diagnostics by altitude and local day/night."""
+    prediction = np.asarray(prediction, dtype=np.float64).reshape(-1)
+    raw_prediction = np.asarray(raw_prediction, dtype=np.float64).reshape(-1)
+    target = np.asarray(target, dtype=np.float64).reshape(-1)
+    coords = np.asarray(coords, dtype=np.float64)
+    residual_raw = np.asarray(residual_raw, dtype=np.float64).reshape(-1)
+    residual = np.asarray(residual, dtype=np.float64).reshape(-1)
+    trust_gate = np.asarray(trust_gate, dtype=np.float64).reshape(-1)
+    local_time = np.remainder(coords[:, 3] + coords[:, 1] / 15.0, 24.0)
+    night = (local_time < 6.0) | (local_time >= 18.0)
+    finite = (np.isfinite(prediction) & np.isfinite(raw_prediction)
+              & np.isfinite(target) & np.isfinite(residual_raw)
+              & np.isfinite(residual) & np.isfinite(trust_gate))
+
+    def point_metrics(values, selected):
+        selected = selected & finite
+        if not selected.any():
+            return {'n': 0, 'rmse': None, 'bias': None, 'mae': None}
+        error = values[selected] - target[selected]
+        return {
+            'n': int(selected.sum()),
+            'rmse': float(np.sqrt(np.mean(error * error))),
+            'bias': float(np.mean(error)),
+            'mae': float(np.mean(np.abs(error))),
+        }
+
+    cells = {}
+    for lower, upper, label in (
+            (120.0, 200.0, '120-200'),
+            (200.0, 300.0, '200-300'),
+            (300.0, 500.0, '300-500')):
+        altitude = (coords[:, 2] >= lower) & (coords[:, 2] < upper)
+        for period, period_mask in (('night', night), ('day', ~night)):
+            selected = altitude & period_mask
+            raw = point_metrics(raw_prediction, selected)
+            m00 = point_metrics(prediction, selected)
+            cells[f'{label}_{period}'] = {
+                'raw_iri': raw,
+                'M00': m00,
+                'delta_rmse': (
+                    None if raw['rmse'] is None or m00['rmse'] is None
+                    else float(m00['rmse'] - raw['rmse'])),
+                'delta_bias': (
+                    None if raw['bias'] is None or m00['bias'] is None
+                    else float(m00['bias'] - raw['bias'])),
+                'residual_raw_rms': float(np.sqrt(np.mean(
+                    residual_raw[selected & finite] ** 2)))
+                if (selected & finite).any() else None,
+                'residual_rms': float(np.sqrt(np.mean(
+                    residual[selected & finite] ** 2)))
+                if (selected & finite).any() else None,
+                'trust_gate_mean': float(np.mean(trust_gate[selected & finite]))
+                if (selected & finite).any() else None,
+            }
+    transition = ((coords[:, 2] >= 200.0) & (coords[:, 2] < 300.0)
+                  & night & finite)
+    return {
+        'cells': cells,
+        'trust_gate': {
+            'mean': float(np.mean(trust_gate[finite])) if finite.any() else None,
+            'p05': float(np.quantile(trust_gate[finite], 0.05)) if finite.any() else None,
+            'p50': float(np.quantile(trust_gate[finite], 0.50)) if finite.any() else None,
+            'p95': float(np.quantile(trust_gate[finite], 0.95)) if finite.any() else None,
+            'strict_suppression_fraction': float(np.mean(
+                trust_gate[finite] <= 1e-8)) if finite.any() else None,
+        },
+        'raw_residual_rms': float(np.sqrt(np.mean(residual_raw[finite] ** 2)))
+        if finite.any() else None,
+        'gated_residual_rms': float(np.sqrt(np.mean(residual[finite] ** 2)))
+        if finite.any() else None,
+        'raw_residual_max_abs': float(np.max(np.abs(residual_raw[finite])))
+        if finite.any() else None,
+        'gated_residual_max_abs': float(np.max(np.abs(residual[finite])))
+        if finite.any() else None,
+        'transition_raw_residual_rms': float(np.sqrt(np.mean(
+            residual_raw[transition] ** 2))) if transition.any() else None,
+        'transition_gated_residual_rms': float(np.sqrt(np.mean(
+            residual[transition] ** 2))) if transition.any() else None,
+    }
+
+
 @torch.no_grad()
 def _evaluate_source(model, loader, batch_processor, device, stage, source,
                      sw_manager, iri_peak_manager, config,
                      allowed_profile_ids=None):
     predictions, targets, profile_ids_all = [], [], []
+    raw_predictions = []
+    coords_all = []
+    raw_residuals = []
+    residuals = []
+    trust_gates = []
     max_batches = config.get('max_validation_batches')
     for batch_index, batch in enumerate(loader):
         if max_batches is not None and batch_index >= int(max_batches):
@@ -1530,14 +1631,39 @@ def _evaluate_source(model, loader, batch_processor, device, stage, source,
         sw_seq = sw_manager.get_drivers_sequence(coords[:, 3])
         iri_peak = (iri_peak_manager.get_iri_peak(coords)
                     if iri_peak_manager is not None else None)
-        prediction, _, _, _, _ = _source_forward(
+        prediction, _, _, _, extras = _source_forward(
             model, batch_processor, coords, sw_seq, iri_peak,
             stage, source, profile_ids, False, config, iri_peak_manager,
             allowed_profile_ids)
         predictions.append(prediction.cpu().numpy())
         targets.append(target.cpu().numpy())
         profile_ids_all.append(profile_ids.cpu().numpy())
-    return _profile_metrics(predictions, targets, profile_ids_all)
+        if stage == 'background':
+            raw_predictions.append(extras['ne_iri'].cpu().numpy())
+            coords_all.append(coords.cpu().numpy())
+            raw_residuals.append(extras['background_residual_raw'].cpu().numpy())
+            residuals.append(extras['background_residual'].cpu().numpy())
+            trust_gates.append(extras['background_trust_gate'].cpu().numpy())
+    result = _profile_metrics(predictions, targets, profile_ids_all)
+    if stage == 'background':
+        raw = _profile_metrics(raw_predictions, targets, profile_ids_all)
+        residual = np.concatenate(predictions).reshape(-1)
+        raw_values = np.concatenate(raw_predictions).reshape(-1)
+        result.update({
+            'raw_iri_profile_rmse': raw['profile_rmse'],
+            'raw_iri_rmse': raw['rmse'],
+            'raw_iri_mae': raw['mae'],
+            'rmse_change_M00_minus_raw': result['rmse'] - raw['rmse'],
+            'profile_rmse_change_M00_minus_raw': (
+                result['profile_rmse'] - raw['profile_rmse']),
+            'background_residual_rms': float(
+                np.sqrt(np.mean((residual - raw_values) ** 2))),
+        })
+        result['background_stratified'] = _background_stratified_metrics(
+            residual, raw_values, np.concatenate(targets).reshape(-1),
+            np.concatenate(coords_all), np.concatenate(raw_residuals),
+            np.concatenate(residuals), np.concatenate(trust_gates))
+    return result
 
 
 def validate(model, val_loader, batch_processor, device, config,
@@ -1551,7 +1677,7 @@ def validate(model, val_loader, batch_processor, device, config,
         model, cosmic_val_loader, batch_processor, device, stage, 'COSMIC',
         sw_manager, iri_peak_manager, config, allowed_profile_ids)
     score = 0.5 * (fy['profile_rmse'] + cosmic['profile_rmse'])
-    return score, {
+    metrics = {
         'score': score,
         'fy_profile_rmse': fy['profile_rmse'],
         'cosmic_profile_rmse': cosmic['profile_rmse'],
@@ -1559,6 +1685,27 @@ def validate(model, val_loader, batch_processor, device, config,
         'rmse': 0.5 * (fy['rmse'] + cosmic['rmse']),
         'r2': 0.5 * (fy['r2'] + cosmic['r2']),
     }
+    if stage == 'background':
+        metrics.update({
+            'fy_raw_iri_profile_rmse': fy['raw_iri_profile_rmse'],
+            'cosmic_raw_iri_profile_rmse': cosmic['raw_iri_profile_rmse'],
+            'fy_raw_iri_rmse': fy['raw_iri_rmse'],
+            'cosmic_raw_iri_rmse': cosmic['raw_iri_rmse'],
+            'fy_rmse_change_M00_minus_raw': fy[
+                'rmse_change_M00_minus_raw'],
+            'cosmic_rmse_change_M00_minus_raw': cosmic[
+                'rmse_change_M00_minus_raw'],
+            'fy_profile_rmse_change_M00_minus_raw': fy[
+                'profile_rmse_change_M00_minus_raw'],
+            'cosmic_profile_rmse_change_M00_minus_raw': cosmic[
+                'profile_rmse_change_M00_minus_raw'],
+            'fy_background_residual_rms': fy['background_residual_rms'],
+            'cosmic_background_residual_rms': cosmic[
+                'background_residual_rms'],
+            'fy_background_stratified': fy['background_stratified'],
+            'cosmic_background_stratified': cosmic['background_stratified'],
+        })
+    return score, metrics
 
 
 def _mad_variance(values, sigma_min=0.05, sigma_max=0.40):
@@ -1794,6 +1941,22 @@ def _architecture_signature(config):
             'context_semantics', 'query_conditioning'),
         'mode_basis_semantics': config.get(
             'mode_basis_semantics', 'learned_density_basis'),
+        'background_trust_gate_enabled': bool(config.get(
+            'background_trust_gate_enabled', False)),
+        'background_trust_gate_semantics': config.get(
+            'background_trust_gate_semantics', 'disabled'),
+        'background_trust_gate_altitude_core_km': float(config.get(
+            'background_trust_gate_altitude_core_km', 200.0)),
+        'background_trust_gate_altitude_transition_km': float(config.get(
+            'background_trust_gate_altitude_transition_km', 100.0)),
+        'background_trust_gate_night_cosine_offset': float(config.get(
+            'background_trust_gate_night_cosine_offset', 0.2)),
+        'background_trust_gate_night_cosine_scale': float(config.get(
+            'background_trust_gate_night_cosine_scale', 0.2)),
+        'background_trust_gate_dip_core': float(config.get(
+            'background_trust_gate_dip_core', 0.25)),
+        'background_trust_gate_dip_transition': float(config.get(
+            'background_trust_gate_dip_transition', 0.25)),
     }
     if config.get('assimilation_semantics') == 'continuous_physical_local_letkf':
         signature.update({
@@ -1928,6 +2091,27 @@ def _load_background_seed(model, checkpoint, device):
     model.load_state_dict(migrated, strict=True)
 
 
+def _background_epoch_length(fy_loader, cosmic_loader, stage):
+    """Return the source schedule length for one training epoch."""
+    return (max(len(fy_loader), len(cosmic_loader))
+            if stage == 'background' else len(fy_loader))
+
+
+def _assert_fresh_background_identity(model, sw_manager, iri_peak_manager, device):
+    """The zero-initialized Background must start exactly at raw IRI."""
+    coords = torch.tensor(
+        [[-11.9, -76.0, 150.0, 4.0], [0.0, 120.0, 280.0, 240.0]],
+        dtype=torch.float32, device=device)
+    sw_seq = sw_manager.get_drivers_sequence(coords[:, 3])
+    peak = (iri_peak_manager.get_iri_peak(coords)
+            if iri_peak_manager is not None else None)
+    encoded = model.encode_background(coords, sw_seq, iri_peak=peak)
+    if not torch.equal(encoded['ne_bkg'], encoded['ne_iri']):
+        error = (encoded['ne_bkg'] - encoded['ne_iri']).abs().max().item()
+        raise RuntimeError(
+            f'fresh Background invariant failed: M00 != Raw IRI (max={error:.3e})')
+
+
 def train_fsia(config=None):
     """Train Background first, freeze it, then train ETKF Analysis."""
     config = get_config_mdia() if config is None else config
@@ -1953,6 +2137,21 @@ def train_fsia(config=None):
             raise ValueError('M2-V requires the exact token directory')
         if int(config.get('observation_chunk_size', 4096)) < 1:
             raise ValueError('M2-V observation_chunk_size must be positive')
+        if not config.get('eval_only'):
+            expected_background_semantics = (
+                'qc_v2_date_blocked_train_only_continuous_trust_gate_v1'
+                if config.get('background_trust_gate_enabled', False)
+                else 'qc_v2_date_blocked_train_only')
+            if config.get('background_training_semantics') != expected_background_semantics:
+                raise ValueError(
+                    'M2-V training requires the configured QC-v2 Background semantics')
+            if config.get('background_seed_ckpt'):
+                raise ValueError(
+                    'QC-v2 Background training cannot use an external seed checkpoint')
+        if config.get('background_trust_gate_enabled', False):
+            if config.get('background_trust_gate_semantics') != (
+                    'fixed_altitude_localtime_dip_smoothstep_v1'):
+                raise ValueError('M2-V trust-gate semantic is not recognized')
     if (config.get('use_direction_loss', False)
             and not config.get('analysis_exact_mode_loss', False)):
         raise ValueError(
@@ -1992,9 +2191,12 @@ def train_fsia(config=None):
 
     background_epochs = int(config.get('background_epochs', 5))
     analysis_epochs = int(config.get('analysis_epochs', 5))
-    total_epochs = background_epochs + analysis_epochs
-    if background_epochs <= 0 or analysis_epochs <= 0:
-        raise ValueError('background_epochs and analysis_epochs must both be positive')
+    background_only = bool(config.get('background_only', False))
+    total_epochs = (background_epochs if background_only
+                    else background_epochs + analysis_epochs)
+    if background_epochs <= 0 or (not background_only and analysis_epochs <= 0):
+        raise ValueError(
+            'background_epochs and analysis_epochs must be positive for full training')
     architecture = _architecture_signature(config)
     format_version = int(config.get(
         'checkpoint_format_version',
@@ -2046,6 +2248,14 @@ def train_fsia(config=None):
         profile_index_path=config.get('cosmic_profile_index_path'),
         **loader_kwargs,
     )
+    config['background_loader_schedule'] = {
+        'fy_batches': int(len(train_loader)),
+        'cosmic_batches': int(len(cosmic_train_loader)),
+        'background_epoch_batches': int(
+            max(len(train_loader), len(cosmic_train_loader))),
+        'pairing': 'cycle_shorter_source_max_loader_length',
+    }
+    print(f"[Background批次覆盖] {config['background_loader_schedule']}")
     subset_fraction = float(config.get('train_profile_fraction', 1.0))
     subset_manifest = config.get('profile_subset_manifest')
     profile_subset = {
@@ -2128,6 +2338,10 @@ def train_fsia(config=None):
         empirical_covariance_targets=empirical_covariance_targets)
 
     model = FSIA_INR_Model(iri_proxy=iri_proxy, config=config).to(device)
+    background_seed = config.get('background_seed_ckpt')
+    if background_seed is None and not config.get('eval_only'):
+        _assert_fresh_background_identity(
+            model, sw_manager, iri_peak_manager, device)
     resume_state = None
     start_epoch = 0
     history = []
@@ -2144,6 +2358,12 @@ def train_fsia(config=None):
             if int(loaded.get('format_version', 0)) != format_version:
                 raise ValueError(
                     f'checkpoint format does not match expected v{format_version}')
+            checkpoint_background_semantics = loaded.get(
+                'background_training_semantics')
+            if checkpoint_background_semantics != config.get(
+                    'background_training_semantics'):
+                raise ValueError(
+                    'checkpoint Background training semantics differ from config')
             if int(loaded['background_epochs']) != background_epochs:
                 raise ValueError('checkpoint background_epochs differs from config')
             checkpoint_r_mode = loaded.get('r_mode')
@@ -2188,6 +2408,22 @@ def train_fsia(config=None):
                 checkpoint_architecture = dict(checkpoint_architecture)
                 checkpoint_architecture.setdefault(
                     'density_basis_semantics', 'query_conditioned')
+                checkpoint_architecture.setdefault(
+                    'background_trust_gate_enabled', False)
+                checkpoint_architecture.setdefault(
+                    'background_trust_gate_semantics', 'disabled')
+                checkpoint_architecture.setdefault(
+                    'background_trust_gate_altitude_core_km', 200.0)
+                checkpoint_architecture.setdefault(
+                    'background_trust_gate_altitude_transition_km', 100.0)
+                checkpoint_architecture.setdefault(
+                    'background_trust_gate_night_cosine_offset', 0.2)
+                checkpoint_architecture.setdefault(
+                    'background_trust_gate_night_cosine_scale', 0.2)
+                checkpoint_architecture.setdefault(
+                    'background_trust_gate_dip_core', 0.25)
+                checkpoint_architecture.setdefault(
+                    'background_trust_gate_dip_transition', 0.25)
             if (checkpoint_architecture is not None
                     and checkpoint_architecture != architecture):
                 raise ValueError(
@@ -2212,6 +2448,8 @@ def train_fsia(config=None):
             if loaded.get('gram_gradient_calibration') is not None:
                 config['gram_gradient_calibration'] = loaded[
                     'gram_gradient_calibration']
+            config['background_update_steps'] = list(
+                loaded.get('background_update_steps', []))
             resume_state = loaded
             if loaded.get('torch_rng_state') is not None:
                 torch.set_rng_state(loaded['torch_rng_state'].cpu())
@@ -2245,9 +2483,16 @@ def train_fsia(config=None):
         seeded_background = True
         print(f'  已迁移冻结Background: {background_seed}')
 
-    current_stage = 'background' if start_epoch < background_epochs else 'analysis'
-    if (seeded_background or _resume_needs_analysis_setup(
-            resume_state, start_epoch, background_epochs)):
+    current_stage = (
+        'background' if background_only or start_epoch < background_epochs
+        else 'analysis')
+    if background_only and (
+            start_epoch > background_epochs
+            or (resume_state is not None and resume_state.get('stage') != 'background')):
+        raise ValueError(
+            'background-only cannot resume an Analysis-stage checkpoint')
+    if (not background_only and (seeded_background or _resume_needs_analysis_setup(
+            resume_state, start_epoch, background_epochs))):
         if not os.path.exists(best_background):
             raise FileNotFoundError(
                 'cannot enter Analysis: best_background_model.pth is missing')
@@ -2340,6 +2585,9 @@ def train_fsia(config=None):
             model, train_loader, batch_processor, optimizer, device,
             config, epoch, stage, scaler, sw_manager, iri_peak_manager,
             cosmic_train_loader, query_profile_partitions['train'])
+        if stage == 'background':
+            config.setdefault('background_update_steps', []).append(
+                int(train_metrics['processed_batches']))
         if batch_diagnostics:
             diagnostics_path = os.path.join(
                 config['save_dir'], 'batch_diagnostics.jsonl')
@@ -2406,7 +2654,7 @@ def train_fsia(config=None):
         if val_score < best_scores[stage]:
             best_scores[stage] = val_score
             best_epochs[stage] = epoch + 1
-            torch.save(
+            _atomic_torch_save(
                 model.state_dict(),
                 best_background if stage == 'background' else best_analysis)
         if stage == 'analysis':
@@ -2421,6 +2669,28 @@ def train_fsia(config=None):
             'completed_epochs': epoch + 1,
             'background_epochs': background_epochs,
             'analysis_epochs': analysis_epochs,
+            'background_training_semantics': config.get(
+                'background_training_semantics'),
+            'background_trust_gate_enabled': bool(config.get(
+                'background_trust_gate_enabled', False)),
+            'background_trust_gate_semantics': config.get(
+                'background_trust_gate_semantics', 'disabled'),
+            'background_trust_gate_parameters': {
+                key: float(config.get(key, default))
+                for key, default in (
+                    ('background_trust_gate_altitude_core_km', 200.0),
+                    ('background_trust_gate_altitude_transition_km', 100.0),
+                    ('background_trust_gate_night_cosine_offset', 0.2),
+                    ('background_trust_gate_night_cosine_scale', 0.2),
+                    ('background_trust_gate_dip_core', 0.25),
+                    ('background_trust_gate_dip_transition', 0.25),
+                )
+            },
+            'background_only': background_only,
+            'background_loader_schedule': config.get(
+                'background_loader_schedule'),
+            'background_update_steps': config.get(
+                'background_update_steps', []),
             'r_mode': config.get('r_mode', 'global'),
             'use_distance_localization': bool(
                 config.get('use_distance_localization', False)),
@@ -2468,20 +2738,68 @@ def train_fsia(config=None):
             'cuda_rng_state_all': (
                 torch.cuda.get_rng_state_all() if device.type == 'cuda' else None),
         }, last_state)
-        plot_training_curves(
-            history,
-            save_path=os.path.join(config['save_dir'], 'fsia_training_curves.png'))
+        if not background_only:
+            plot_training_curves(
+                history,
+                save_path=os.path.join(
+                    config['save_dir'], 'fsia_training_curves.png'))
 
     with open(os.path.join(config['save_dir'], 'fsia_training_history.json'),
               'w', encoding='utf-8') as stream:
         json.dump(history, stream, ensure_ascii=False, indent=2)
+    _record_resolved_training_config(config, covariance_strata)
+    background_validation = None
+    background_gate_passed = None
+    if background_only:
+        model.load_state_dict(
+            torch.load(best_background, map_location=device, weights_only=True),
+            strict=True)
+        _, background_validation = validate(
+            model, val_loader, batch_processor, device, config,
+            sw_manager, iri_peak_manager, cosmic_val_loader, 'background',
+            query_profile_partitions['development'])
+        comparisons = [
+            background_validation['fy_rmse_change_M00_minus_raw'],
+            background_validation['cosmic_rmse_change_M00_minus_raw'],
+        ]
+        background_gate_passed = all(
+            value is not None and np.isfinite(value) and value <= 0.0
+            for value in comparisons)
+        print(
+            f'[Background development gate] FY ΔRMSE={comparisons[0]:.6g}, '
+            f'COSMIC ΔRMSE={comparisons[1]:.6g}, '
+            f'passed={background_gate_passed}')
     summary = {
+        'completed_stage': 'background' if background_only else 'analysis',
         'best_scores': {
             stage: (score if np.isfinite(score) else None)
             for stage, score in best_scores.items()},
         'best_epochs': best_epochs,
-        'checkpoint': best_analysis,
-        'checkpoint_sha256': _sha256_file(best_analysis),
+        'checkpoint': best_background if background_only else best_analysis,
+        'checkpoint_sha256': _sha256_file(
+            best_background if background_only else best_analysis),
+        'checkpoint_stage': 'background' if background_only else 'analysis',
+        'background_training_semantics': config.get(
+            'background_training_semantics'),
+        'background_trust_gate_enabled': bool(config.get(
+            'background_trust_gate_enabled', False)),
+        'background_trust_gate_semantics': config.get(
+            'background_trust_gate_semantics', 'disabled'),
+        'background_trust_gate_parameters': {
+            key: float(config.get(key, default))
+            for key, default in (
+                ('background_trust_gate_altitude_core_km', 200.0),
+                ('background_trust_gate_altitude_transition_km', 100.0),
+                ('background_trust_gate_night_cosine_offset', 0.2),
+                ('background_trust_gate_night_cosine_scale', 0.2),
+                ('background_trust_gate_dip_core', 0.25),
+                ('background_trust_gate_dip_transition', 0.25),
+            )
+        },
+        'background_development': background_validation,
+        'background_development_gate_passed': background_gate_passed,
+        'background_loader_schedule': config.get('background_loader_schedule'),
+        'background_update_steps': config.get('background_update_steps', []),
         'r_mode': config.get('r_mode', 'global'),
         'use_distance_localization': bool(
             config.get('use_distance_localization', False)),
@@ -2504,9 +2822,13 @@ def train_fsia(config=None):
         'use_observation_gram_loss': bool(
             config.get('use_observation_gram_loss', False)),
         'representativeness_kernel': representativeness_identity,
-        'r_fy': model.kalman_layer.r_fy.item(),
-        'r_cosmic': model.kalman_layer.r_cosmic.item(),
-        'r_calibration': os.path.join(config['save_dir'], 'r_calibration.json'),
+        'r_fy': (model.kalman_layer.r_fy.item()
+                 if not background_only else None),
+        'r_cosmic': (model.kalman_layer.r_cosmic.item()
+                     if not background_only else None),
+        'r_calibration': (
+            os.path.join(config['save_dir'], 'r_calibration.json')
+            if not background_only else None),
         'architecture': architecture,
         'profile_subset': profile_subset,
         'profile_subset_manifest': profile_subset_identity,
@@ -2541,8 +2863,17 @@ def train_fsia(config=None):
               'w', encoding='utf-8') as stream:
         json.dump(summary, stream, ensure_ascii=False, indent=2)
 
+    if background_only and not background_gate_passed:
+        raise RuntimeError(
+            'Background development gate failed: M00 is worse than Raw IRI '
+            'for at least one source')
+
+    selected_checkpoint = best_background if background_only else best_analysis
+    if not os.path.isfile(selected_checkpoint):
+        raise FileNotFoundError(
+            f'completed {summary["completed_stage"]} stage lacks checkpoint')
     model.load_state_dict(
-        torch.load(best_analysis, map_location=device, weights_only=True),
+        torch.load(selected_checkpoint, map_location=device, weights_only=True),
         strict=True)
     return (
         model, train_losses, val_losses, train_loader, val_loader,

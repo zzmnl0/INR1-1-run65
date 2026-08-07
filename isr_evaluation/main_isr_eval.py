@@ -11,10 +11,10 @@ FSIA-INR × ISR 独立验证主程序
 
 运行方式：
     cd FSIA_INR
-    python isr_evaluation/main_isr_eval.py
+    python isr_evaluation/main_isr_eval.py --checkpoint <M2-V v12 checkpoint>
 
 配置项在下方 CONFIG 区块修改。
-  model_type: 'fsia' → 加载 FSIA_INR_Model  + best_fsia_model.pth（默认）
+  model_type: 'fsia' → 加载 FSIA_INR_Model + 显式冻结的M2-V checkpoint（默认）
               'mdia' → 加载 MDIA_INR_Model + best_mdia_model.pth（备用）
 """
 
@@ -44,8 +44,8 @@ CONFIG = {
     # ---- 模型类型：'fsia'（默认）或 'mdia' ----
     'model_type': 'fsia',
 
-    # ---- 默认评估本次M2-O训练的RMSE-best；--checkpoint可覆盖 ----
-    'checkpoint_path': r"D:\code11\IRI01\IRI03\INR1-1-run65\checkpoints_fsia\run66-m2o-full-15epoch\best_fsia_model.pth",
+    # ---- M2-V必须显式指定完整Analysis checkpoint ----
+    'checkpoint_path': None,
 
     # ---- ISR 数据目录 ----
     # 每个目录下应包含 .hdf5 / .h5 文件（可多个文件，同站同月）
@@ -65,8 +65,7 @@ CONFIG = {
     'batch_size':      2048,    # 单次推理点数
 
     # ---- 输出目录 ----
-    'save_dir': os.path.join(
-        _FSIA_DIR, r'isr_validation_outputs\run66-m2o-full-15epoch-isr'),
+    'save_dir': None,
 
     # ---- 是否处理各站点（可单独关闭）----
     'run_jicamarca':  True,
@@ -78,8 +77,8 @@ CONFIG = {
 # ─────────────────────────────────────────────
 # 分层指标工具（分高度 × 分昼夜）
 # ─────────────────────────────────────────────
-_STRAT_ALT_BINS  = [(120.0, 300.0), (300.0, 500.0)]
-_STRAT_ALT_NAMES = ['120-300km', '300-500km']
+_STRAT_ALT_BINS  = [(120.0, 200.0), (200.0, 300.0), (300.0, 500.0)]
+_STRAT_ALT_NAMES = ['120-200km', '200-300km', '300-500km']
 _DAY_LT_RANGE    = (6.0, 18.0)   # 白天：LT 06-18h
 
 
@@ -137,7 +136,7 @@ def _compute_stratified_metrics(alt_all, lon_all, rh_all,
 
     Returns
     -------
-    dict  键形如  'model_alt_120-300km_day', 'iri_alt_300-500km_night', ...
+    dict  键形如  'model_alt_120-200km_day', 'iri_alt_300-500km_night', ...
           每个值为 {'n', 'rmse', 'bias', 'mae', 'pearson_r'}
     """
     lt = _lt_from_relhour_lon(rh_all, lon_all)
@@ -160,8 +159,11 @@ def _compute_stratified_metrics(alt_all, lon_all, rh_all,
                 obs_all[m].astype(np.float64),
             )
         # 分高度层 × 分昼夜
-        for (lo, hi), alt_name in zip(_STRAT_ALT_BINS, _STRAT_ALT_NAMES):
-            alt_mask = (alt_all >= lo) & (alt_all < hi)
+        for bin_index, ((lo, hi), alt_name) in enumerate(
+                zip(_STRAT_ALT_BINS, _STRAT_ALT_NAMES)):
+            upper_mask = (alt_all <= hi if bin_index == len(_STRAT_ALT_BINS) - 1
+                          else alt_all < hi)
+            alt_mask = (alt_all >= lo) & upper_mask
             for dn_label, dn_mask in [('day', day_mask), ('night', ~day_mask), ('all', np.ones(len(alt_all), bool))]:
                 m = alt_mask & dn_mask
                 key = f'{src_name}_alt_{alt_name}_{dn_label}'
@@ -221,7 +223,7 @@ def _resolve_checkpoint(config, mdia_cfg):
         return config['checkpoint_path']
     model_type = config.get('model_type', 'fsia')
     if model_type == 'fsia':
-        raise ValueError('M2-V ISR验证缺少通过development门禁的checkpoint路径')
+        raise ValueError('M2-V ISR验证缺少显式完整Analysis checkpoint路径')
     return os.path.join(mdia_cfg['save_dir'], 'best_mdia_model.pth')
 
 
@@ -253,25 +255,14 @@ def _require_m2v_config(config):
     if config.get('representativeness_kernel_path') is not None:
         mismatches['representativeness_kernel_path'] = (
             config.get('representativeness_kernel_path'), None)
+    if config.get('background_trust_gate_enabled', False):
+        if config.get('background_trust_gate_semantics') != (
+                'fixed_altitude_localtime_dip_smoothstep_v1'):
+            mismatches['background_trust_gate_semantics'] = (
+                config.get('background_trust_gate_semantics'),
+                'fixed_altitude_localtime_dip_smoothstep_v1')
     if mismatches:
         raise ValueError(f'checkpoint不是M2-V推理语义: {mismatches}')
-
-
-def _require_m2o_config(config):
-    """Legacy unit-test helper; ISR production loading uses M2-V checks."""
-    expected = {
-        'basis_dim': 64,
-        'enkf_n_members': 8,
-        'enkf_anomaly_parameterization': 'orthogonal_factor',
-        'density_basis_semantics': 'endpoint_context_symmetric',
-        'r_mode': 'global',
-        'use_distance_localization': True,
-    }
-    mismatches = {
-        key: (config.get(key), value)
-        for key, value in expected.items() if config.get(key) != value}
-    if mismatches:
-        raise ValueError(f'legacy M2-O configuration mismatch: {mismatches}')
 
 
 def _load_state_compat(model, state_dict):
@@ -335,23 +326,21 @@ def _load_model_and_managers(config, device):
         if not os.path.isfile(manifest_path):
             raise FileNotFoundError(f'M2-V checkpoint缺少run manifest: {manifest_path}')
         with open(manifest_path, encoding='utf-8') as stream:
-            trained_config = json.load(stream).get('config', {})
-        for key in (
-                'fy_path', 'fy_profile_path', 'fy_profile_index_path',
-                'cosmic_path', 'cosmic_profile_index_path', 'iri_proxy_path',
-                'iri_hmf2_path', 'iri_nmf2_path', 'sw_path',
-                'basis_dim', 'enkf_n_members', 'enkf_pert_hidden',
-                'enkf_anomaly_parameterization', 'enkf_scale_init',
-                'enkf_scale_condition_max', 'density_basis_semantics',
-                'r_mode', 'use_distance_localization',
-                'checkpoint_format_version', 'assimilation_semantics',
-                'neighbor_directory_semantics',
-                'physical_localization_space_km',
-                'physical_localization_time_hours',
-                'representativeness_kernel_path',
-                'observation_chunk_size'):
-            if key in trained_config:
-                cfg[key] = trained_config[key]
+            trained_config = json.load(stream).get('config')
+        if not isinstance(trained_config, dict):
+            raise ValueError(f'M2-V run manifest缺少config对象: {manifest_path}')
+        cfg.update(trained_config)
+        summary_path = os.path.join(os.path.dirname(ckpt), 'training_summary.json')
+        if not config.get('allow_background_stage', False):
+            if not os.path.isfile(summary_path):
+                raise ValueError(
+                    '正式M2-V ISR评估要求training_summary.json')
+            with open(summary_path, encoding='utf-8') as stream:
+                summary = json.load(stream)
+            if summary.get('completed_stage') != 'analysis':
+                raise ValueError(
+                    '正式M2-V ISR评估拒绝Background-only checkpoint；'
+                    '需使用completed_stage=analysis的完整模型')
         _require_m2v_config(cfg)
 
     # IRI 代理
@@ -660,11 +649,18 @@ def _process_station(station_name, day_records, model, sw_manager,
     return report
 
 
-def main(checkpoint=None, save_dir=None):
+def main(checkpoint=None, save_dir=None, preflight_only=False):
     if checkpoint is not None:
         CONFIG['checkpoint_path'] = checkpoint
     if save_dir is not None:
         CONFIG['save_dir'] = save_dir
+    if CONFIG['save_dir'] is None and CONFIG['checkpoint_path'] is not None:
+        checkpoint_path = os.path.abspath(CONFIG['checkpoint_path'])
+        run_name = os.path.basename(os.path.dirname(checkpoint_path))
+        epoch_name = os.path.splitext(os.path.basename(checkpoint_path))[0]
+        CONFIG['save_dir'] = os.path.join(
+            _FSIA_DIR, 'isr_validation_outputs',
+            f'{run_name}-{epoch_name}-isr')
     # ==================== 设备 ====================
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f'[main] 使用设备: {device}')
@@ -679,6 +675,10 @@ def main(checkpoint=None, save_dir=None):
      fy_nb_index, cosmic_nb_index) = \
         _load_model_and_managers(CONFIG, device)
     print(f'[main] 模型类型: {model_name}')
+
+    if preflight_only:
+        print('[preflight] M2-V checkpoint、配置和模型依赖加载通过；未读取ISR数据')
+        return
 
     # ==================== 加载 ISR 数据 ====================
     from isr_evaluation.isr_loader import load_jicamarca, load_poker_flat
@@ -783,8 +783,12 @@ def main(checkpoint=None, save_dir=None):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        '--checkpoint', default=None,
-        help='可选：覆盖CONFIG中的M2-O checkpoint路径')
+        '--checkpoint', required=True,
+        help='必需：完整Analysis阶段的M2-V v12 checkpoint路径')
     parser.add_argument('--save-dir', default=None)
+    parser.add_argument(
+        '--preflight-only', action='store_true',
+        help='只加载并核验模型与配置，不读取ISR数据或生成评估输出')
     args = parser.parse_args()
-    main(checkpoint=args.checkpoint, save_dir=args.save_dir)
+    main(checkpoint=args.checkpoint, save_dir=args.save_dir,
+         preflight_only=args.preflight_only)

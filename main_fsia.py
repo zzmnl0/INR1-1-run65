@@ -21,10 +21,11 @@ from inr_modules.mdia.evaluation_mdia import evaluate_and_save_report, evaluate_
 from inr_modules.mdia.visualization_mdia import (plot_global_slice, plot_altitude_profile,
                                                   plot_hmf2_nmf2_map)
 
-_DEFAULT_RUN_NAME = 'run66-m2v-continuous-physical-letkf'
-_DEFAULT_BACKGROUND_SEED = (
-    Path(current_dir) / 'checkpoints_fsia' / 'run66-etkf-loss'
-    / 'best_background_model.pth')
+_DEFAULT_RUN_NAME = 'run66-m2v-qcv2-dateblocked-background'
+_TRUST_GATE_SEMANTICS = 'fixed_altitude_localtime_dip_smoothstep_v1'
+_TRUST_GATE_BACKGROUND_SEMANTICS = (
+    'qc_v2_date_blocked_train_only_continuous_trust_gate_v1')
+_UNSET = object()
 _OLD_RUN65_CKPT = Path(current_dir) / 'checkpoints_fsia' / 'run65' / 'best_fsia_model.pth'
 
 
@@ -107,6 +108,13 @@ def _record_resume_manifest(config):
         'created_utc': datetime.now(timezone.utc).isoformat(),
         'checkpoint': _file_identity(config['resume_ckpt']),
         'code_identity': _code_identity(current_dir),
+        'target_stage': (
+            'background' if config.get('background_only', False)
+            else 'analysis'),
+        'background_trust_gate_enabled': bool(
+            config.get('background_trust_gate_enabled', False)),
+        'background_trust_gate_semantics': config.get(
+            'background_trust_gate_semantics', 'disabled'),
     })
     temp_path = path.with_suffix('.json.tmp')
     with temp_path.open('w', encoding='utf-8') as stream:
@@ -124,7 +132,7 @@ def _strict_load_finite(model, checkpoint, device):
 
 
 def main(eval_only=False, resume_ckpt=None, run_name=_DEFAULT_RUN_NAME,
-         r_mode='global', background_seed=None, qc_data=True,
+         r_mode='global', background_seed=_UNSET, qc_data=True,
          distance_localization=True, basis_dim=None, enkf_members=None,
          anomaly_parameterization=None, density_basis_semantics=None,
          train_profile_fraction=None,
@@ -139,7 +147,8 @@ def main(eval_only=False, resume_ckpt=None, run_name=_DEFAULT_RUN_NAME,
          max_validation_batches=None,
          w_time_analysis=None, analysis_active_only_loss=None,
          analysis_exact_mode_loss=None, representativeness_kernel=None,
-         include_isr_overlay=False):
+         background_only=False,
+         include_isr_overlay=False, background_trust_gate=None):
     # ==================== 加载配置 ====================
     config = get_config_mdia()
     run_dir = _run_directory(run_name)
@@ -245,9 +254,43 @@ def main(eval_only=False, resume_ckpt=None, run_name=_DEFAULT_RUN_NAME,
             config.get('representativeness_floor', 0.25)))
     if not 0.0 < representativeness_floor <= 1.0:
         raise ValueError('representativeness_floor must be in (0, 1]')
-    background_seed = (
-        str(_DEFAULT_BACKGROUND_SEED)
-        if background_seed is None else background_seed)
+    recorded_gate = bool(prior_config.get(
+        'background_trust_gate_enabled', False))
+    if background_trust_gate is None:
+        background_trust_gate = recorded_gate
+    else:
+        background_trust_gate = bool(background_trust_gate)
+        if prior_config and background_trust_gate != recorded_gate:
+            raise ValueError(
+                'background trust-gate flag differs from the run manifest')
+    if background_trust_gate:
+        recorded_gate_semantics = prior_config.get(
+            'background_trust_gate_semantics', _TRUST_GATE_SEMANTICS)
+        if recorded_gate_semantics != _TRUST_GATE_SEMANTICS:
+            raise ValueError('unsupported Background trust-gate semantics')
+        background_gate_semantics = _TRUST_GATE_SEMANTICS
+        background_training_semantics = _TRUST_GATE_BACKGROUND_SEMANTICS
+    else:
+        background_gate_semantics = 'disabled'
+    if background_seed is _UNSET:
+        # Resume/evaluation inherits the target run's recorded semantics;
+        # a fresh QC-v2 run intentionally has no external Background seed.
+        background_seed = prior_config.get('background_seed_ckpt')
+    prior_background_semantics = prior_config.get(
+        'background_training_semantics')
+    if background_seed is not None:
+        background_seed = str(background_seed)
+        if (background_trust_gate
+                or prior_background_semantics == 'qc_v2_date_blocked_train_only'
+                or (not prior_config and run_name == _DEFAULT_RUN_NAME)):
+            raise ValueError(
+                'QC-v2 Background run cannot be combined with an external seed')
+        background_training_semantics = 'frozen_external_seed'
+    else:
+        if not background_trust_gate:
+            background_training_semantics = prior_background_semantics or config.get(
+                'background_training_semantics',
+                'qc_v2_date_blocked_train_only')
 
     # FSIA 检查点目录（每次新训练实验递增 run 编号）
     update_config_mdia(
@@ -257,6 +300,10 @@ def main(eval_only=False, resume_ckpt=None, run_name=_DEFAULT_RUN_NAME,
         r_mode=r_mode,
         use_distance_localization=distance_localization,
         background_seed_ckpt=background_seed,
+        background_training_semantics=background_training_semantics,
+        background_only=bool(background_only),
+        background_trust_gate_enabled=bool(background_trust_gate),
+        background_trust_gate_semantics=background_gate_semantics,
         basis_dim=basis_dim,
         enkf_n_members=enkf_members,
         enkf_anomaly_parameterization=anomaly_parameterization,
@@ -301,6 +348,14 @@ def main(eval_only=False, resume_ckpt=None, run_name=_DEFAULT_RUN_NAME,
                 r'\cosmic_september_2024_qc_report.json'),
         )
     if eval_only:
+        summary_path = run_dir / 'training_summary.json'
+        if summary_path.is_file():
+            with summary_path.open(encoding='utf-8') as stream:
+                training_summary = json.load(stream)
+            if training_summary.get('completed_stage') != 'analysis':
+                raise ValueError(
+                    'eval-only requires a completed Analysis checkpoint; '
+                    'Background-only artifacts are not valid Analysis models')
         update_config_mdia(
             eval_only=True,
             resume_ckpt=os.path.join(config['save_dir'], 'best_fsia_model.pth'))
@@ -384,7 +439,10 @@ def main(eval_only=False, resume_ckpt=None, run_name=_DEFAULT_RUN_NAME,
 
     if val_losses:
         print(f'\n训练完成！最终验证损失: {val_losses[-1]:.6f}')
-    best_ckpt = os.path.join(config['save_dir'], 'best_fsia_model.pth')
+    best_ckpt = os.path.join(
+        config['save_dir'],
+        'best_background_model.pth' if background_only
+        else 'best_fsia_model.pth')
     print(f'最佳模型保存于: {best_ckpt}')
 
     # ==================== 加载最佳模型 ====================
@@ -397,7 +455,7 @@ def main(eval_only=False, resume_ckpt=None, run_name=_DEFAULT_RUN_NAME,
     print(f'\n最终 EWMA 时间常数:')
     print(f'  τ_kp:    {model.sw_encoder.tau_kp.item():.2f} h')
     print(f'  τ_solar: {model.sw_encoder.tau_solar.item():.2f} h')
-    if not post_train_evaluation:
+    if background_only or not post_train_evaluation:
         return
 
     # ==================== 评估 ====================
@@ -497,7 +555,7 @@ if __name__ == '__main__':
     parser.add_argument('--distance-localization',
                         action=argparse.BooleanOptionalAction, default=True,
                         help='enable continuous physical localization')
-    parser.add_argument('--background-seed', default=None,
+    parser.add_argument('--background-seed', default=argparse.SUPPRESS,
                         help='shared Background checkpoint for Analysis-only runs')
     parser.add_argument('--basis-dim', type=int, default=None,
                         help='low-dimensional ETKF state size')
@@ -530,6 +588,13 @@ if __name__ == '__main__':
     parser.add_argument(
         '--train-only', action='store_true',
         help='stop after strict-loading the best checkpoint')
+    parser.add_argument(
+        '--background-only', action='store_true',
+        help='run or resume only the QC-v2 Background stage; never enter Analysis')
+    parser.add_argument(
+        '--background-trust-gate', action=argparse.BooleanOptionalAction,
+        default=None,
+        help='enable the fixed low-altitude nighttime Background trust gate')
     parser.add_argument(
         '--covariance-moment', action='store_true', default=None,
         help='train Analysis with profile-balanced covariance moment matching')
@@ -585,7 +650,12 @@ if __name__ == '__main__':
     run_dir = _run_directory(args.run_name)
     run_dir.mkdir(parents=True, exist_ok=True)
     log_path = run_dir / 'training.log'
-    log_mode = 'a' if args.eval_only or args.resume else 'x'
+    stale_preflight_log = (
+        log_path.exists()
+        and not (run_dir / 'run_manifest.json').exists()
+        and not (run_dir / 'best_background_model.pth').exists()
+        and not (run_dir / 'best_fsia_model.pth').exists())
+    log_mode = 'a' if args.eval_only or args.resume or stale_preflight_log else 'x'
     with log_path.open(log_mode, encoding='utf-8', buffering=1) as log_stream:
         with contextlib.redirect_stdout(_Tee(sys.stdout, log_stream)), \
                 contextlib.redirect_stderr(_Tee(sys.stderr, log_stream)):
@@ -594,7 +664,7 @@ if __name__ == '__main__':
                 resume_ckpt=args.resume,
                 run_name=args.run_name,
                 r_mode=args.r_mode,
-                background_seed=args.background_seed,
+                background_seed=getattr(args, 'background_seed', _UNSET),
                 qc_data=args.qc_data,
                 distance_localization=args.distance_localization,
                 basis_dim=args.basis_dim,
@@ -620,5 +690,7 @@ if __name__ == '__main__':
                 analysis_exact_mode_loss=args.analysis_exact_mode_loss,
                 direction_loss=args.direction_loss,
                 representativeness_kernel=args.representativeness_kernel,
+                background_only=args.background_only,
                 include_isr_overlay=args.include_isr_overlay,
+                background_trust_gate=args.background_trust_gate,
             )

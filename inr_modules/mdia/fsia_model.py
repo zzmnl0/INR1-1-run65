@@ -178,6 +178,42 @@ def _compute_local_time_features(lon_deg, rel_hour):
     return torch.sin(phase), torch.cos(phase)
 
 
+def _smoothstep01(value):
+    """C1 smoothstep after clipping to the unit interval."""
+    value = value.clamp(0.0, 1.0)
+    return value * value * (3.0 - 2.0 * value)
+
+
+def background_trust_gate(coords, enabled=False, altitude_core_km=200.0,
+                          altitude_transition_km=100.0,
+                          night_cosine_offset=0.2,
+                          night_cosine_scale=0.2, dip_core=0.25,
+                          dip_transition=0.25):
+    """Return the fixed continuous physical Background trust multiplier.
+
+    The multiplier is one outside the specified physical support and smoothly
+    suppresses the learned Background residual in the low-altitude nighttime
+    magnetic-equator core.  ``coords`` is ``[B, 4]`` = lat, lon, altitude,
+    relative UTC hour.
+    """
+    if not enabled:
+        return coords.new_ones(coords.shape[0])
+    if altitude_transition_km <= 0 or night_cosine_scale <= 0 or dip_transition <= 0:
+        raise ValueError('trust-gate transition scales must be positive')
+    lat, lon, altitude, rel_hour = (coords[:, i] for i in range(4))
+    sin_i, _ = _compute_dip_features(lat, lon)
+    local_time = torch.remainder(rel_hour + lon / 15.0, 24.0)
+    local_cosine = torch.cos(2.0 * math.pi * local_time / 24.0)
+    height_weight = 1.0 - _smoothstep01(
+        (altitude - altitude_core_km) / altitude_transition_km)
+    night_weight = _smoothstep01(
+        (local_cosine + night_cosine_offset) / night_cosine_scale)
+    magnetic_weight = 1.0 - _smoothstep01(
+        (sin_i.abs() - dip_core) / dip_transition)
+    gate = 1.0 - height_weight * night_weight * magnetic_weight
+    return gate.clamp(0.0, 1.0)
+
+
 # ======================== NeuralETKFLayer 辅助函数 ========================
 
 def _build_kalman_b_input(h_sw, lat_n, cos_SZA, sin_doy, cos_doy, sin_I):
@@ -627,7 +663,9 @@ class NeuralETKFLayer(nn.Module):
                 energy * torch.log(energy.clamp_min(1e-12)), dim=-1))
             denominator = torch.maximum(
                 eigenvalues[:, 0], 1e-12 * hx_max)
-            condition = (hx_max / denominator).clamp(max=1e6)
+            # G = F^T W F, so eig(G) contains squared singular values of
+            # W^(1/2) F.  Report kappa(HX), not the squared Gram condition.
+            condition = torch.sqrt(hx_max / denominator).clamp(max=1e6)
             valid = torch.isfinite(gram).all(dim=-1).all(dim=-1) & (hx_max > 0)
             return singular, rank, effective, condition, valid
 
@@ -871,6 +909,26 @@ class FSIA_INR_Model(nn.Module):
 
         self.background_residual_cap = float(
             config.get('background_residual_cap', 0.5))
+        self.background_trust_gate_enabled = bool(
+            config.get('background_trust_gate_enabled', False))
+        self.background_trust_gate_semantics = config.get(
+            'background_trust_gate_semantics', 'disabled')
+        if (self.background_trust_gate_enabled
+                and self.background_trust_gate_semantics
+                != 'fixed_altitude_localtime_dip_smoothstep_v1'):
+            raise ValueError('unknown enabled Background trust-gate semantics')
+        self.background_trust_gate_altitude_core_km = float(config.get(
+            'background_trust_gate_altitude_core_km', 200.0))
+        self.background_trust_gate_altitude_transition_km = float(config.get(
+            'background_trust_gate_altitude_transition_km', 100.0))
+        self.background_trust_gate_night_cosine_offset = float(config.get(
+            'background_trust_gate_night_cosine_offset', 0.2))
+        self.background_trust_gate_night_cosine_scale = float(config.get(
+            'background_trust_gate_night_cosine_scale', 0.2))
+        self.background_trust_gate_dip_core = float(config.get(
+            'background_trust_gate_dip_core', 0.25))
+        self.background_trust_gate_dip_transition = float(config.get(
+            'background_trust_gate_dip_transition', 0.25))
         self.fy_dlon_window = float(config.get('fy_nb_dlon', 15.0))
         self.cosmic_dlon_window = float(
             config.get('cosmic_nb_dlon', 15.0))
@@ -1007,15 +1065,28 @@ class FSIA_INR_Model(nn.Module):
             h_iri, delta_alt.unsqueeze(-1),
             ((nmf2 - 11.0) / 2.0).unsqueeze(-1),
         ], dim=-1))
-        background_residual = self.background_residual_cap * torch.tanh(
+        background_residual_raw = self.background_residual_cap * torch.tanh(
             self.background_decoder(torch.cat([
                 z_background, h_sw, alt_n.unsqueeze(-1),
                 delta_alt.unsqueeze(-1),
             ], dim=-1)))
+        background_trust = background_trust_gate(
+            coords,
+            enabled=self.background_trust_gate_enabled,
+            altitude_core_km=self.background_trust_gate_altitude_core_km,
+            altitude_transition_km=self.background_trust_gate_altitude_transition_km,
+            night_cosine_offset=self.background_trust_gate_night_cosine_offset,
+            night_cosine_scale=self.background_trust_gate_night_cosine_scale,
+            dip_core=self.background_trust_gate_dip_core,
+            dip_transition=self.background_trust_gate_dip_transition,
+        )
+        background_residual = background_residual_raw * background_trust.unsqueeze(-1)
         return {
             'ne_bkg': ne_iri + background_residual,
             'ne_iri': ne_iri,
             'background_residual': background_residual,
+            'background_residual_raw': background_residual_raw,
+            'background_trust_gate': background_trust,
             'z_background': z_background,
             'h_sw': h_sw,
             'h_sw_freq': h_sw_freq,
@@ -1341,6 +1412,8 @@ class FSIA_INR_Model(nn.Module):
         extras = {
             'ne_bkg': background['ne_bkg'], 'ne_iri': background['ne_iri'],
             'background_residual': background['background_residual'],
+            'background_residual_raw': background['background_residual_raw'],
+            'background_trust_gate': background['background_trust_gate'],
             'ne_residual': ne_delta,
             'h_iri_aligned': background['z_background'],
             'hmF2_det': hmf2.detach(),
@@ -1552,6 +1625,8 @@ class FSIA_INR_Model(nn.Module):
             'ne_bkg':         ne_bkg,
             'ne_iri':         ne_iri,
             'background_residual': background_residual,
+            'background_residual_raw': background['background_residual_raw'],
+            'background_trust_gate': background['background_trust_gate'],
             'ne_residual':    Ne_delta,
             'h_iri_aligned':  f_iri,
             'hmF2_det':       hmF2_det,

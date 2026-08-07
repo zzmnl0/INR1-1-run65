@@ -183,6 +183,15 @@ def query_observation_payload(index, coords, device, exclude_profile_ids=None,
     }
 
 
+def observation_query_coverage(payload):
+    """Return one observation-coverage flag per query for dense or ragged payloads."""
+    valid = payload['valid_mask']
+    if valid.ndim == 1:
+        row_ptr = payload['row_ptr']
+        return row_ptr[1:] > row_ptr[:-1]
+    return valid.any(dim=1)
+
+
 def attach_observation_background(
         payload, model, sw_manager, iri_peak_manager=None, chunk_size=4096):
     """Evaluate shared Background and optional endpoint context at valid tokens."""

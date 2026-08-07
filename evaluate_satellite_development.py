@@ -11,6 +11,7 @@ from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
+import psutil
 import torch
 from torch.utils.data import DataLoader
 
@@ -472,8 +473,11 @@ def _query_payload(
             'continuous_physical_local_letkf'):
         valid = payload['valid_mask'].bool()
         row_ptr = payload.get('row_ptr')
+        tokens = int(valid.sum().item())
+        chunk_size = int(model.kalman_layer.observation_chunk_size)
         counts = {
-            'tokens': int(valid.sum().item()),
+            'tokens': tokens,
+            'chunks': (tokens + chunk_size - 1) // chunk_size,
             'queries': int((row_ptr[1:] > row_ptr[:-1]).sum().item())
             if row_ptr is not None else 0,
             'retained_tokens': int(valid.sum().item()),
@@ -551,6 +555,7 @@ def _evaluate_source(
     stable_filter_counts = {
         source_name: {
             "tokens": 0,
+            "chunks": 0,
             "queries": 0,
             "retained_tokens": 0,
             "retained_queries": 0,
@@ -562,6 +567,7 @@ def _evaluate_source(
         if source == "FY" else model.kalman_layer.r_cosmic
     )
     started = time.perf_counter()
+    process = psutil.Process()
 
     with torch.no_grad():
         for batch in loader:
@@ -902,6 +908,19 @@ def _evaluate_source(
             }
             for observation_source, counts in stable_filter_counts.items()
         },
+        "resources": {
+            "observation_tokens": {
+                source_name: counts["tokens"]
+                for source_name, counts in stable_filter_counts.items()
+            },
+            "observation_chunks": {
+                source_name: counts["chunks"]
+                for source_name, counts in stable_filter_counts.items()
+            },
+            "process_peak_working_set_bytes": int(
+                getattr(process.memory_info(), "peak_wset", process.memory_info().rss)
+            ),
+        },
         "invariants": {
             "M00_max_abs_difference_from_background": m00_max_error,
             "M00_passed": m00_max_error < 1e-7,
@@ -983,10 +1002,28 @@ def main():
         checkpoint = run_dir / checkpoint
     checkpoint = checkpoint.resolve()
     manifest_path = run_dir / "run_manifest.json"
+    if (not checkpoint.is_file()
+            and (run_dir / "best_background_model.pth").is_file()):
+        raise ValueError(
+            "satellite Analysis evaluation cannot use a Background-only checkpoint")
     if not checkpoint.is_file() or not manifest_path.is_file():
         raise FileNotFoundError("run directory lacks checkpoint or manifest")
     with manifest_path.open(encoding="utf-8") as stream:
         run_manifest = json.load(stream)
+    summary_path = run_dir / "training_summary.json"
+    if summary_path.is_file():
+        with summary_path.open(encoding="utf-8") as stream:
+            training_summary = json.load(stream)
+        if training_summary.get("completed_stage") != "analysis":
+            raise ValueError(
+                "satellite Analysis evaluation requires a completed Analysis "
+                "checkpoint; Background-only artifacts are not valid M11 models")
+        if training_summary.get("checkpoint_stage") not in (None, "analysis"):
+            raise ValueError("checkpoint stage is not Analysis")
+    elif (run_dir / "best_background_model.pth").is_file():
+        raise ValueError(
+            "run directory contains a Background-only artifact without a "
+            "completed Analysis summary")
     config = dict(run_manifest["config"])
     required_m2v = {
         "assimilation_semantics": "continuous_physical_local_letkf",
@@ -1156,6 +1193,10 @@ def main():
         "COSMIC", cosmic_loader, model, sw_manager, iri_peak_manager,
         fy_index, cosmic_index, allowed, device, stable_cells,
         representativeness_grid, representativeness_floor,
+    )
+    report["m2v_physical_localization"]["peak_memory_bytes"] = max(
+        result["resources"]["process_peak_working_set_bytes"]
+        for result in report["sources"].values()
     )
     report["passed_hard_invariants"] = all(
         result["invariants"]["M00_passed"]

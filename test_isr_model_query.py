@@ -6,9 +6,10 @@ import torch
 from isr_evaluation.model_query import query_model_grid
 from isr_evaluation.main_isr_eval import (
     _compute_stratified_metrics,
-    _require_m2o_config,
+    _require_m2v_config,
     _resolve_checkpoint,
 )
+from inr_modules.mdia.sliding_dataset import observation_query_coverage
 from inr_modules.mdia.visualization_mdia import _infer_grid
 
 
@@ -152,26 +153,61 @@ def test_stratified_metrics_keep_three_model_stages():
     assert 'iri_all_alt_all' in metrics
 
 
-def test_isr_requires_explicit_frozen_m2o_epoch():
+def test_stratified_metrics_use_three_height_bins_with_inclusive_top_boundary():
+    alt = np.array([120.0, 199.999, 200.0, 299.999, 300.0, 500.0])
+    metrics = _compute_stratified_metrics(
+        alt_all=alt,
+        lon_all=np.zeros_like(alt),
+        rh_all=np.zeros_like(alt),
+        pred_all=np.zeros_like(alt),
+        obs_all=np.zeros_like(alt),
+        background_all=np.zeros_like(alt),
+        iri_all=np.zeros_like(alt),
+    )
+    assert metrics['analysis_alt_120-200km_all']['n'] == 2
+    assert metrics['analysis_alt_200-300km_all']['n'] == 2
+    assert metrics['analysis_alt_300-500km_all']['n'] == 2
+
+
+def test_isr_requires_explicit_frozen_m2v_epoch():
     try:
         _resolve_checkpoint({'checkpoint_path': None, 'model_type': 'fsia'}, {})
     except ValueError as error:
-        assert 'development' in str(error)
+        assert '完整Analysis checkpoint' in str(error)
     else:
         raise AssertionError('ambiguous RMSE-best checkpoint was accepted')
 
-    _require_m2o_config({
+    _require_m2v_config({
+        'checkpoint_format_version': 12,
         'basis_dim': 64,
         'enkf_n_members': 8,
         'enkf_anomaly_parameterization': 'orthogonal_factor',
         'density_basis_semantics': 'endpoint_context_symmetric',
         'r_mode': 'global',
         'use_distance_localization': True,
+        'use_physical_localization': True,
+        'assimilation_semantics': 'continuous_physical_local_letkf',
+        'neighbor_directory_semantics': 'token_exact_positive_support_v1',
+        'physical_localization_space_km': 1800.0,
+        'physical_localization_time_hours': 1.5,
+        'representativeness_floor': 1.0,
+        'representativeness_kernel_path': None,
+        'use_empirical_covariance_loss': False,
     })
+
+
+def test_observation_query_coverage_supports_ragged_m2v_payload():
+    coverage = observation_query_coverage({
+        'valid_mask': torch.ones(3, dtype=torch.bool),
+        'row_ptr': torch.tensor([0, 2, 2, 3]),
+    })
+    torch.testing.assert_close(
+        coverage, torch.tensor([True, False, True]))
 
 
 if __name__ == '__main__':
     test_query_model_grid_passes_both_sources()
     test_infer_grid_reports_raw_background_and_four_modes()
     test_stratified_metrics_keep_three_model_stages()
-    test_isr_requires_explicit_frozen_m2o_epoch()
+    test_isr_requires_explicit_frozen_m2v_epoch()
+    test_observation_query_coverage_supports_ragged_m2v_payload()

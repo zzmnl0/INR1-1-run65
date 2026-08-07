@@ -585,7 +585,7 @@ def get_dataloaders(
     # 验证集关闭 Shuffle (顺序评估)
     val_sampler = ProfileTimeBinSampler(
         val_dataset, batch_size=batch_size,
-        points_per_profile=None, shuffle=False)
+        points_per_profile=points_per_profile, shuffle=False)
     
     # DataLoader 必须使用 batch_sampler 参数
     train_loader = DataLoader(train_dataset, batch_sampler=train_sampler, num_workers=num_workers, pin_memory=False)
@@ -1123,7 +1123,7 @@ def get_cosmic_dataloader(cosmic_path, batch_size, bin_size_hours=0.5,
         points_per_profile=points_per_profile, shuffle=True)
     val_sampler = ProfileTimeBinSampler(
         val_dataset, batch_size=batch_size,
-        points_per_profile=None, shuffle=False)
+        points_per_profile=points_per_profile, shuffle=False)
     train_loader  = DataLoader(train_dataset, batch_sampler=train_sampler,
                                num_workers=num_workers, pin_memory=False)
     val_loader    = DataLoader(val_dataset,   batch_sampler=val_sampler,

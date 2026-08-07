@@ -15,6 +15,7 @@ import matplotlib
 import matplotlib.pyplot as plt
 from .sliding_dataset import (
     attach_observation_background,
+    observation_query_coverage,
     query_observation_payload,
 )
 import matplotlib.colors as mcolors
@@ -117,15 +118,15 @@ def _infer_grid(model, coords_np, sw_seq_single, device, sw_manager,
             if fy_nb_index is not None:
                 observations = query_observation_payload(
                     fy_nb_index, chunk, device)
-                fy_coverage[start:end] = observations[
-                    'valid_mask'].any(dim=1).float().cpu().numpy()
+                fy_coverage[start:end] = observation_query_coverage(
+                    observations).float().cpu().numpy()
                 fy_kwargs = {'observations_fy': attach_observation_background(
                     observations, model, sw_manager, iri_peak_manager)}
             if cosmic_nb_index is not None:
                 observations = query_observation_payload(
                     cosmic_nb_index, chunk, device)
-                cosmic_coverage[start:end] = observations[
-                    'valid_mask'].any(dim=1).float().cpu().numpy()
+                cosmic_coverage[start:end] = observation_query_coverage(
+                    observations).float().cpu().numpy()
                 cosmic_kwargs = {
                     'observations_cosmic': attach_observation_background(
                         observations, model, sw_manager, iri_peak_manager)}
@@ -435,7 +436,7 @@ def plot_global_slice(model, sw_manager, device, target_day, target_hour,
                 tick_vals = np.linspace(-_dl_max, _dl_max, 5)
                 cb.set_ticks(tick_vals)
                 cb.set_ticklabels([f'{v:+.2f}' for v in tick_vals], fontsize=7)
-                cb.set_label('ΔNe (log₁₀)', fontsize=8)
+                cb.set_label(r'$\Delta \log_{10} N_e$', fontsize=8)
 
     plt.suptitle(
         f'{model_name} 全球切片  Day {target_day}  {target_hour:02d}:00 UT\n'
