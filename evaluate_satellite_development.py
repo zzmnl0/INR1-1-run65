@@ -22,9 +22,12 @@ from inr_modules.data_managers.FY_dataloader import (
     FYNeighborhoodIndex,
     ProfileTimeBinSampler,
 )
-from inr_modules.data_managers.irinc_neural_proxy import IRINeuralProxy
 from inr_modules.data_managers.space_weather_manager import SpaceWeatherManager
-from inr_modules.mdia.fsia_model import FSIA_INR_Model, solve_density_mode
+from inr_modules.mdia.fsia_model import solve_density_mode
+from inr_modules.mdia.evaluation_stats import (
+    paired_group_bootstrap_from_statistics,
+    paired_group_sufficient_statistics,
+)
 from inr_modules.mdia.sliding_dataset import (
     attach_representativeness_weight,
     attach_observation_background,
@@ -545,6 +548,7 @@ def _evaluate_source(
         for source_name in ("FY", "COSMIC")
     }
     rank_records = defaultdict(list)
+    bootstrap_statistics = []
     mode_seconds = {mode: 0.0 for mode in MODES}
     m00_max_error = 0.0
     joint_formula_max_error = 0.0
@@ -679,6 +683,9 @@ def _evaluate_source(
             coords_np = coords.cpu().numpy()
             profile_np = profile_ids.cpu().numpy()
             background = joint_extras["ne_bkg"].squeeze(-1).cpu().numpy()
+            raw_iri = joint_extras["ne_iri"].squeeze(-1).cpu().numpy()
+            bootstrap_statistics.append(paired_group_sufficient_statistics(
+                target_np, predictions["M11"], raw_iri, profile_np))
             desired = target_np - background
             attribution = {}
             for observation_source, mode in (
@@ -847,6 +854,9 @@ def _evaluate_source(
         "target_source": source,
         "profiles": len(global_records["M00"]),
         "points": len(loader.dataset),
+        "m11_vs_raw_iri_bootstrap": paired_group_bootstrap_from_statistics(
+            np.concatenate(bootstrap_statistics, axis=0),
+            replicates=2000, seed=42),
         "modes": summaries,
         "strata": cells,
         "direction_attribution": {
@@ -965,6 +975,7 @@ def _partition_loader(dataset_class, config, split_days, partition):
         val_ratio=None,
         split_seed=config["seed"],
         split_days=split_days,
+        alt_range=config.get("alt_range"),
         **kwargs,
     )
     sampler = ProfileTimeBinSampler(
@@ -1025,9 +1036,18 @@ def main():
             "run directory contains a Background-only artifact without a "
             "completed Analysis summary")
     config = dict(run_manifest["config"])
+    domain = config.get(
+        "model_domain_semantics", "legacy_120_500_domain_v1")
+    domain_contracts = {
+        "legacy_120_500_domain_v1": (12, (120.0, 500.0)),
+        "strict_200_500_domain_v1": (13, (200.0, 500.0)),
+    }
+    if domain not in domain_contracts:
+        raise ValueError(f"unsupported model-domain semantics: {domain}")
+    checkpoint_version, expected_alt_range = domain_contracts[domain]
     required_m2v = {
         "assimilation_semantics": "continuous_physical_local_letkf",
-        "checkpoint_format_version": 12,
+        "checkpoint_format_version": checkpoint_version,
         "basis_dim": 64,
         "enkf_n_members": 8,
         "enkf_anomaly_parameterization": "orthogonal_factor",
@@ -1052,6 +1072,8 @@ def main():
                 f"got {actual!r}")
     if config.get("representativeness_kernel_path") is not None:
         raise ValueError("M2-V development evaluation forbids representativeness tables")
+    if tuple(map(float, config.get("alt_range", ()))) != expected_alt_range:
+        raise ValueError("development evaluator model-domain bounds mismatch")
     date_manifest_path = Path(config["date_split_manifest"])
     if not date_manifest_path.is_absolute():
         date_manifest_path = ROOT / date_manifest_path
@@ -1062,20 +1084,11 @@ def main():
         raise ValueError("date manifest partitions are incomplete")
 
     device = torch.device("cpu")
-    iri_proxy = IRINeuralProxy(layers=[4, 128, 128, 128, 128, 1]).to(device)
-    iri_proxy.load_state_dict(torch.load(
-        config["iri_proxy_path"], map_location=device, weights_only=True
-    ))
-    iri_proxy.eval()
-    model = FSIA_INR_Model(iri_proxy=iri_proxy, config=config).to(device)
-    state = torch.load(checkpoint, map_location=device, weights_only=True)
-    model.load_state_dict(state, strict=True)
-    if not all(
-        torch.isfinite(value).all()
-        for value in state.values() if torch.is_tensor(value)
-    ):
-        raise ValueError("checkpoint contains non-finite tensors")
-    model.eval()
+    from inr_modules.mdia.checkpoint_io import load_fsia_analysis_checkpoint
+    model, loaded_config, _, _ = load_fsia_analysis_checkpoint(
+        checkpoint, device, require_domain=domain)
+    if loaded_config != config:
+        raise ValueError("shared checkpoint loader config differs from run manifest")
     sw_manager = SpaceWeatherManager(
         txt_path=config["sw_path"],
         start_date_str=config["start_date_str"],
@@ -1208,6 +1221,13 @@ def main():
     report["development_gates"] = _development_gate(
         report["sources"], report["passed_hard_invariants"])
     report["passed_development_gates"] = report["development_gates"]["passed"]
+    report["m2w_m11_vs_raw_iri_gate"] = {
+        source: result["m11_vs_raw_iri_bootstrap"]["decision"]
+        for source, result in report["sources"].items()
+    }
+    report["passed_m2w_m11_vs_raw_iri_gate"] = all(
+        decision == "pass"
+        for decision in report["m2w_m11_vs_raw_iri_gate"].values())
     args.output.parent.mkdir(parents=True, exist_ok=True)
     temporary = args.output.with_suffix(args.output.suffix + ".tmp")
     with temporary.open("w", encoding="utf-8") as stream:

@@ -119,7 +119,10 @@ def plot_vertical_slice_lt(
 
     # ---- 坐标网格 ----
     lat_grid = np.linspace(-90, 90,  n_lat, dtype=np.float32)   # S→N
-    alt_grid = np.linspace(120, 500, n_alt, dtype=np.float32)   # 120–500 km
+    alt_min, alt_max = map(float, config.get('alt_range', (120.0, 500.0)))
+    alt_grid = np.linspace(alt_min, alt_max, n_alt, dtype=np.float32)
+    alt_ticks = np.arange(np.ceil(alt_min / 50.0) * 50.0,
+                          alt_max + 1.0, 50.0)
     LAT_2D, ALT_2D = np.meshgrid(lat_grid, alt_grid, indexing='ij')  # [n_lat, n_alt]
 
     # ---- 固定色标（与 plot_global_slice 一致）----
@@ -206,11 +209,11 @@ def plot_vertical_slice_lt(
 
         # ---- 坐标轴：横轴 -90→90（北极在右）----
         ax.set_xlim(-90, 90)
-        ax.set_ylim(120, 500)
+        ax.set_ylim(alt_min, alt_max)
         ax.set_xticks([-60, -30, 0, 30, 60])
         ax.set_xticklabels(['60°N', '30°N', '0°', '30°S', '60°S'], fontsize=8)
-        ax.set_yticks([150, 200, 250, 300, 350, 400, 450, 500])
-        ax.set_yticklabels(['150', '200', '250', '300', '350', '400', '450', '500'], fontsize=8)
+        ax.set_yticks(alt_ticks)
+        ax.tick_params(axis='y', labelsize=8)
 
         if idx >= 3:
             ax.set_xlabel('Latitude', fontsize=10)
@@ -238,7 +241,7 @@ def plot_vertical_slice_lt(
         f'{model_name}  垂直电子密度切片\n'
         f'经度扇区 Lon = {lon_sector:.1f}°   LT 范围 {lt_str0}–{lt_str1}   '
         f'参考日期 2024-09-{1 + _ref_day:02d}（第 {_ref_day} 日）\n'
-        f'横轴：纬度 90°N → 90°S     纵轴：高度 120–500 km     虚线：Ne_fused hmF2',
+        f'横轴：纬度 90°N → 90°S     纵轴：高度 {alt_min:g}–{alt_max:g} km     虚线：Ne_fused hmF2',
         fontsize=11, fontweight='bold', y=0.995,
     )
 
@@ -276,11 +279,11 @@ def plot_vertical_slice_lt(
         )
 
         ax2.set_xlim(-90, 90)
-        ax2.set_ylim(120, 500)
+        ax2.set_ylim(alt_min, alt_max)
         ax2.set_xticks([-60, -30, 0, 30, 60])
         ax2.set_xticklabels(['60°N', '30°N', '0°', '30°S', '60°S'], fontsize=8)
-        ax2.set_yticks([150, 200, 250, 300, 350, 400, 450, 500])
-        ax2.set_yticklabels(['150', '200', '250', '300', '350', '400', '450', '500'], fontsize=8)
+        ax2.set_yticks(alt_ticks)
+        ax2.tick_params(axis='y', labelsize=8)
 
         if idx >= 3:
             ax2.set_xlabel('Latitude', fontsize=10)
@@ -303,7 +306,7 @@ def plot_vertical_slice_lt(
         f'IRI 背景  垂直电子密度切片\n'
         f'经度扇区 Lon = {lon_sector:.1f}°   LT 范围 {lt_str0}–{lt_str1}   '
         f'参考日期 2024-09-{1 + _ref_day:02d}（第 {_ref_day} 日）\n'
-        f'横轴：纬度 90°N → 90°S     纵轴：高度 120–500 km     虚线：IRI hmF2',
+        f'横轴：纬度 90°N → 90°S     纵轴：高度 {alt_min:g}–{alt_max:g} km     虚线：IRI hmF2',
         fontsize=11, fontweight='bold', y=0.995,
     )
 
@@ -327,6 +330,7 @@ def plot_lt_lat_map(
         n_alt=77,
         n_lt=49,
         iri_peak_manager=None,
+        alt_range=(120.0, 500.0),
 ):
     """
     绘制固定经度扇区、某一日全天地方时-纬度分布图（2 行 × 2 列）。
@@ -351,7 +355,8 @@ def plot_lt_lat_map(
     os.makedirs(save_dir, exist_ok=True)
 
     lat_grid = np.linspace(-90, 90,  n_lat, dtype=np.float32)
-    alt_grid = np.linspace(120, 500, n_alt, dtype=np.float32)
+    alt_min, alt_max = map(float, alt_range)
+    alt_grid = np.linspace(alt_min, alt_max, n_alt, dtype=np.float32)
     lt_grid  = np.linspace(0,   24,  n_lt,  dtype=np.float32)
     LAT_2D, ALT_2D = np.meshgrid(lat_grid, alt_grid, indexing='ij')  # [n_lat, n_alt]
 
@@ -403,7 +408,7 @@ def plot_lt_lat_map(
     ne_cmap, ne_norm, ne_bounds = _discrete_norm_log('jet', _ne_lo, _ne_hi, n=20)
 
     # hmF2：线性离散 plasma，200–500 km，15 级（20 km/级）
-    _hm_bounds = np.linspace(200, 500, 21)                  # 16 边界 → 15 区间
+    _hm_bounds = np.linspace(alt_min, alt_max, 21)
     _hm_cmap   = plt.get_cmap('plasma', 20)
     _hm_norm   = _mcolors.BoundaryNorm(_hm_bounds, ncolors=_hm_cmap.N)
 
@@ -432,7 +437,7 @@ def plot_lt_lat_map(
     def _add_hmf2_cb(im, ax):
         cb = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
         cb.set_label('hmF2 (km)', fontsize=9, labelpad=5)
-        cb.set_ticks([200, 250, 300, 350, 400, 450, 500])
+        cb.set_ticks(np.linspace(alt_min, alt_max, 7))
         cb.ax.tick_params(labelsize=7)
 
     # 行 0：IRI

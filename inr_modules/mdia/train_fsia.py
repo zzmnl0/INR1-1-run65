@@ -1520,6 +1520,18 @@ def _profile_metrics(predictions, targets, profile_ids):
     starts = np.r_[0, np.flatnonzero(np.diff(sorted_ids)) + 1]
     counts = np.diff(np.r_[starts, len(sorted_ids)])
     profile_mse = np.add.reduceat(squared, starts) / counts
+    pred_std = float(np.std(predictions))
+    target_std = float(np.std(targets))
+    pearson_r = (float(np.corrcoef(targets, predictions)[0, 1])
+                 if min(pred_std, target_std) > 1e-12 else float('nan'))
+    pred_mean = float(np.mean(predictions))
+    target_mean = float(np.mean(targets))
+    covariance = float(np.mean(
+        (predictions - pred_mean) * (targets - target_mean)))
+    ccc = float(
+        2.0 * covariance
+        / (pred_std ** 2 + target_std ** 2
+           + (pred_mean - target_mean) ** 2 + 1e-12))
     return {
         'profile_rmse': float(np.sqrt(profile_mse).mean()),
         'mae': float(np.mean(np.abs(predictions - targets))),
@@ -1527,11 +1539,14 @@ def _profile_metrics(predictions, targets, profile_ids):
         'r2': float(
             1.0 - np.sum((predictions - targets) ** 2)
             / (np.sum((targets - targets.mean()) ** 2) + 1e-12)),
+        'pearson_r': pearson_r,
+        'ccc': ccc,
     }
 
 
 def _background_stratified_metrics(prediction, raw_prediction, target, coords,
-                                   residual_raw, residual, trust_gate):
+                                   residual_raw, residual, trust_gate,
+                                   alt_range=(120.0, 500.0)):
     """Pointwise Background diagnostics by altitude and local day/night."""
     prediction = np.asarray(prediction, dtype=np.float64).reshape(-1)
     raw_prediction = np.asarray(raw_prediction, dtype=np.float64).reshape(-1)
@@ -1559,11 +1574,15 @@ def _background_stratified_metrics(prediction, raw_prediction, target, coords,
         }
 
     cells = {}
-    for lower, upper, label in (
-            (120.0, 200.0, '120-200'),
-            (200.0, 300.0, '200-300'),
-            (300.0, 500.0, '300-500')):
-        altitude = (coords[:, 2] >= lower) & (coords[:, 2] < upper)
+    domain_min, domain_max = map(float, alt_range)
+    edges = [domain_min] + [
+        edge for edge in (200.0, 300.0)
+        if domain_min < edge < domain_max] + [domain_max]
+    for index, (lower, upper) in enumerate(zip(edges[:-1], edges[1:])):
+        label = f'{lower:g}-{upper:g}'
+        altitude = (coords[:, 2] >= lower) & (
+            coords[:, 2] <= upper if index == len(edges) - 2
+            else coords[:, 2] < upper)
         for period, period_mask in (('night', night), ('day', ~night)):
             selected = altitude & period_mask
             raw = point_metrics(raw_prediction, selected)
@@ -1653,6 +1672,8 @@ def _evaluate_source(model, loader, batch_processor, device, stage, source,
             'raw_iri_profile_rmse': raw['profile_rmse'],
             'raw_iri_rmse': raw['rmse'],
             'raw_iri_mae': raw['mae'],
+            'raw_iri_ccc': raw['ccc'],
+            'raw_iri_pearson_r': raw['pearson_r'],
             'rmse_change_M00_minus_raw': result['rmse'] - raw['rmse'],
             'profile_rmse_change_M00_minus_raw': (
                 result['profile_rmse'] - raw['profile_rmse']),
@@ -1662,7 +1683,8 @@ def _evaluate_source(model, loader, batch_processor, device, stage, source,
         result['background_stratified'] = _background_stratified_metrics(
             residual, raw_values, np.concatenate(targets).reshape(-1),
             np.concatenate(coords_all), np.concatenate(raw_residuals),
-            np.concatenate(residuals), np.concatenate(trust_gates))
+            np.concatenate(residuals), np.concatenate(trust_gates),
+            config.get('alt_range', (120.0, 500.0)))
     return result
 
 
@@ -1684,6 +1706,12 @@ def validate(model, val_loader, batch_processor, device, config,
         'mae': 0.5 * (fy['mae'] + cosmic['mae']),
         'rmse': 0.5 * (fy['rmse'] + cosmic['rmse']),
         'r2': 0.5 * (fy['r2'] + cosmic['r2']),
+        'fy_ccc': fy['ccc'],
+        'cosmic_ccc': cosmic['ccc'],
+        'ccc': 0.5 * (fy['ccc'] + cosmic['ccc']),
+        'fy_pearson_r': fy['pearson_r'],
+        'cosmic_pearson_r': cosmic['pearson_r'],
+        'pearson_r': 0.5 * (fy['pearson_r'] + cosmic['pearson_r']),
     }
     if stage == 'background':
         metrics.update({
@@ -1691,6 +1719,10 @@ def validate(model, val_loader, batch_processor, device, config,
             'cosmic_raw_iri_profile_rmse': cosmic['raw_iri_profile_rmse'],
             'fy_raw_iri_rmse': fy['raw_iri_rmse'],
             'cosmic_raw_iri_rmse': cosmic['raw_iri_rmse'],
+            'fy_raw_iri_ccc': fy['raw_iri_ccc'],
+            'cosmic_raw_iri_ccc': cosmic['raw_iri_ccc'],
+            'fy_raw_iri_pearson_r': fy['raw_iri_pearson_r'],
+            'cosmic_raw_iri_pearson_r': cosmic['raw_iri_pearson_r'],
             'fy_rmse_change_M00_minus_raw': fy[
                 'rmse_change_M00_minus_raw'],
             'cosmic_rmse_change_M00_minus_raw': cosmic[
@@ -1706,6 +1738,21 @@ def validate(model, val_loader, batch_processor, device, config,
             'cosmic_background_stratified': cosmic['background_stratified'],
         })
     return score, metrics
+
+
+def _development_selection_key(metrics, config):
+    """Return a JSON-safe lexicographic key; larger is always better."""
+    semantics = config.get(
+        'checkpoint_selection_semantics', 'mean_profile_rmse_v1')
+    if semantics == 'mean_profile_rmse_v1':
+        values = (-float(metrics['score']),)
+    elif semantics == 'mean_ccc_then_rmse_then_pearson_v1':
+        values = (
+            float(metrics['ccc']), -float(metrics['rmse']),
+            float(metrics['pearson_r']))
+    else:
+        raise ValueError(f'unsupported checkpoint selection semantics: {semantics}')
+    return list(values) if np.isfinite(values).all() else None
 
 
 def _mad_variance(values, sigma_min=0.05, sigma_max=0.40):
@@ -1747,12 +1794,18 @@ def _stratified_variance_table(data, config):
         raise ValueError('R profile thresholds must be non-negative')
 
     global_variance = _mad_variance(residual, sigma_min, sigma_max)
-    table = np.full((3, 2), global_variance, dtype=np.float64)
+    domain_min, domain_max = map(float, config.get(
+        'alt_range', (120.0, 500.0)))
+    altitude_edges = [domain_min] + [
+        edge for edge in (200.0, 300.0)
+        if domain_min < edge < domain_max] + [domain_max]
+    table = np.full((len(altitude_edges) - 1, 2), global_variance,
+                    dtype=np.float64)
     altitude_index = np.searchsorted(
-        np.asarray([200.0, 300.0]), altitude, side='right')
+        np.asarray(altitude_edges[1:-1]), altitude, side='right')
     day_index = ((local_time >= 6.0) & (local_time < 18.0)).astype(np.int64)
     cells = []
-    for altitude_cell in range(3):
+    for altitude_cell in range(len(altitude_edges) - 1):
         row = []
         for day_cell in range(2):
             cell_mask = (
@@ -1784,7 +1837,9 @@ def _stratified_variance_table(data, config):
         cells.append(row)
 
     metadata = {
-        'altitude_bins_km': [[120.0, 200.0], [200.0, 300.0], [300.0, 500.0]],
+        'altitude_bins_km': [
+            [float(lower), float(upper)]
+            for lower, upper in zip(altitude_edges[:-1], altitude_edges[1:])],
         'local_time_columns': ['night', 'day'],
         'day_definition': '06:00 <= LT < 18:00',
         'global': {
@@ -1925,6 +1980,10 @@ def _reset_random_seeds(seed, device):
 
 def _architecture_signature(config):
     signature = {
+        'alt_range': [float(value) for value in config.get(
+            'alt_range', (120.0, 500.0))],
+        'model_domain_semantics': config.get(
+            'model_domain_semantics', 'legacy_120_500_domain_v1'),
         'basis_dim': int(config.get('basis_dim', 64)),
         'enkf_n_members': int(config.get('enkf_n_members', 8)),
         'enkf_pert_hidden': int(config.get('enkf_pert_hidden', 64)),
@@ -2099,8 +2158,11 @@ def _background_epoch_length(fy_loader, cosmic_loader, stage):
 
 def _assert_fresh_background_identity(model, sw_manager, iri_peak_manager, device):
     """The zero-initialized Background must start exactly at raw IRI."""
+    lower = float(model.alt_min)
+    upper = float(model.alt_max)
     coords = torch.tensor(
-        [[-11.9, -76.0, 150.0, 4.0], [0.0, 120.0, 280.0, 240.0]],
+        [[-11.9, -76.0, lower, 4.0],
+         [0.0, 120.0, 0.5 * (lower + upper), 240.0]],
         dtype=torch.float32, device=device)
     sw_seq = sw_manager.get_drivers_sequence(coords[:, 3])
     peak = (iri_peak_manager.get_iri_peak(coords)
@@ -2137,11 +2199,30 @@ def train_fsia(config=None):
             raise ValueError('M2-V requires the exact token directory')
         if int(config.get('observation_chunk_size', 4096)) < 1:
             raise ValueError('M2-V observation_chunk_size must be positive')
+        model_domain = config.get(
+            'model_domain_semantics', 'legacy_120_500_domain_v1')
+        if model_domain not in (
+                'legacy_120_500_domain_v1', 'strict_200_500_domain_v1'):
+            raise ValueError('unrecognized model-domain semantics')
+        expected_alt_range = (
+            (200.0, 500.0) if model_domain == 'strict_200_500_domain_v1'
+            else (120.0, 500.0))
+        if tuple(map(float, config.get('alt_range', ()))) != expected_alt_range:
+            raise ValueError('model-domain semantics and alt_range disagree')
+        expected_format = 13 if model_domain == 'strict_200_500_domain_v1' else 12
+        if int(config.get('checkpoint_format_version', 0)) != expected_format:
+            raise ValueError('model-domain semantics and checkpoint format disagree')
         if not config.get('eval_only'):
-            expected_background_semantics = (
-                'qc_v2_date_blocked_train_only_continuous_trust_gate_v1'
-                if config.get('background_trust_gate_enabled', False)
-                else 'qc_v2_date_blocked_train_only')
+            if model_domain == 'strict_200_500_domain_v1':
+                expected_background_semantics = (
+                    'qc_v2_date_blocked_train_only_m2w_200_500_continuous_trust_gate_v1'
+                    if config.get('background_trust_gate_enabled', False)
+                    else 'qc_v2_date_blocked_train_only_m2w_200_500_v1')
+            else:
+                expected_background_semantics = (
+                    'qc_v2_date_blocked_train_only_continuous_trust_gate_v1'
+                    if config.get('background_trust_gate_enabled', False)
+                    else 'qc_v2_date_blocked_train_only')
             if config.get('background_training_semantics') != expected_background_semantics:
                 raise ValueError(
                     'M2-V training requires the configured QC-v2 Background semantics')
@@ -2235,7 +2316,11 @@ def train_fsia(config=None):
             else config.get('val_ratio', 0.1)),
         split_seed=config['seed'],
         points_per_profile=config.get('profile_points_per_epoch', 8),
+        full_validation_profiles=(
+            config.get('model_domain_semantics') ==
+            'strict_200_500_domain_v1'),
         split_days=loader_split_days,
+        alt_range=config.get('alt_range'),
     )
     train_loader, val_loader = get_dataloaders(
         npy_path=config['fy_path'],
@@ -2254,6 +2339,26 @@ def train_fsia(config=None):
         'background_epoch_batches': int(
             max(len(train_loader), len(cosmic_train_loader))),
         'pairing': 'cycle_shorter_source_max_loader_length',
+    }
+    config['model_domain_data_summary'] = {
+        'alt_range_km': [float(value) for value in config['alt_range']],
+        'development_sampling': (
+            'all_domain_points' if config.get('model_domain_semantics') ==
+            'strict_200_500_domain_v1' else 'stable_8_points_per_profile'),
+        'FY': {
+            'train_points': int(len(train_loader.dataset)),
+            'development_points': int(len(val_loader.dataset)),
+            'all_domain_points': int(train_loader.dataset.domain_row_count),
+            'all_domain_profiles': int(
+                train_loader.dataset.domain_profile_count),
+        },
+        'COSMIC': {
+            'train_points': int(len(cosmic_train_loader.dataset)),
+            'development_points': int(len(cosmic_val_loader.dataset)),
+            'all_domain_points': int(cosmic_train_loader.dataset.domain_row_count),
+            'all_domain_profiles': int(
+                cosmic_train_loader.dataset.domain_profile_count),
+        },
     }
     print(f"[Background批次覆盖] {config['background_loader_schedule']}")
     subset_fraction = float(config.get('train_profile_fraction', 1.0))
@@ -2347,6 +2452,7 @@ def train_fsia(config=None):
     history = []
     best_scores = {'background': float('inf'), 'analysis': float('inf')}
     best_epochs = {'background': None, 'analysis': None}
+    best_selection_keys = {'background': None, 'analysis': None}
     resume_path = config.get('resume_ckpt')
     if resume_path:
         loaded = torch.load(resume_path, map_location=device, weights_only=False)
@@ -2424,6 +2530,10 @@ def train_fsia(config=None):
                     'background_trust_gate_dip_core', 0.25)
                 checkpoint_architecture.setdefault(
                     'background_trust_gate_dip_transition', 0.25)
+                checkpoint_architecture.setdefault(
+                    'alt_range', [120.0, 500.0])
+                checkpoint_architecture.setdefault(
+                    'model_domain_semantics', 'legacy_120_500_domain_v1')
             if (checkpoint_architecture is not None
                     and checkpoint_architecture != architecture):
                 raise ValueError(
@@ -2436,6 +2546,8 @@ def train_fsia(config=None):
             history = list(loaded.get('history', []))
             best_scores.update(loaded.get('best_scores', {}))
             best_epochs.update(loaded.get('best_epochs', {}))
+            best_selection_keys.update(loaded.get(
+                'best_selection_keys', {}))
             if loaded.get('resolved_covariance_weight') is not None:
                 config['resolved_covariance_weight'] = float(
                     loaded['resolved_covariance_weight'])
@@ -2651,9 +2763,14 @@ def train_fsia(config=None):
             f"FY={val_metrics['fy_profile_rmse']:.6f} "
             f"COSMIC={val_metrics['cosmic_profile_rmse']:.6f}")
 
-        if val_score < best_scores[stage]:
+        selection_key = _development_selection_key(val_metrics, config)
+        previous_key = best_selection_keys[stage]
+        if (selection_key is not None
+                and (previous_key is None
+                     or tuple(selection_key) > tuple(previous_key))):
             best_scores[stage] = val_score
             best_epochs[stage] = epoch + 1
+            best_selection_keys[stage] = selection_key
             _atomic_torch_save(
                 model.state_dict(),
                 best_background if stage == 'background' else best_analysis)
@@ -2666,6 +2783,10 @@ def train_fsia(config=None):
         _atomic_torch_save({
             'checkpoint_type': 'run66_training_state',
             'format_version': format_version,
+            'model_domain_semantics': config.get(
+                'model_domain_semantics', 'legacy_120_500_domain_v1'),
+            'alt_range': [float(value) for value in config.get(
+                'alt_range', (120.0, 500.0))],
             'completed_epochs': epoch + 1,
             'background_epochs': background_epochs,
             'analysis_epochs': analysis_epochs,
@@ -2718,6 +2839,8 @@ def train_fsia(config=None):
             'profile_subset_identity': profile_subset_identity,
             'date_split_identity': date_split_identity,
             'allowed_profile_summary': allowed_profile_summary,
+            'model_domain_data_summary': config.get(
+                'model_domain_data_summary'),
             'resolved_covariance_weight': config.get(
                 'resolved_covariance_weight'),
             'resolved_direction_weight': config.get(
@@ -2732,6 +2855,7 @@ def train_fsia(config=None):
             'scaler_state_dict': scaler.state_dict() if scaler else None,
             'best_scores': best_scores,
             'best_epochs': best_epochs,
+            'best_selection_keys': best_selection_keys,
             'history': history,
             'torch_rng_state': torch.get_rng_state(),
             'numpy_rng_state': np.random.get_state(),
@@ -2771,10 +2895,20 @@ def train_fsia(config=None):
             f'passed={background_gate_passed}')
     summary = {
         'completed_stage': 'background' if background_only else 'analysis',
+        'checkpoint_format_version': format_version,
+        'model_domain_semantics': config.get(
+            'model_domain_semantics', 'legacy_120_500_domain_v1'),
+        'alt_range': [float(value) for value in config.get(
+            'alt_range', (120.0, 500.0))],
+        'model_domain_data_summary': config.get(
+            'model_domain_data_summary'),
         'best_scores': {
             stage: (score if np.isfinite(score) else None)
             for stage, score in best_scores.items()},
         'best_epochs': best_epochs,
+        'best_selection_keys': best_selection_keys,
+        'checkpoint_selection_semantics': config.get(
+            'checkpoint_selection_semantics', 'mean_profile_rmse_v1'),
         'checkpoint': best_background if background_only else best_analysis,
         'checkpoint_sha256': _sha256_file(
             best_background if background_only else best_analysis),

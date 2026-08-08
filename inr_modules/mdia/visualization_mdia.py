@@ -70,7 +70,8 @@ def _extract_isr_profile(isr_record, rel_hour, tol_sec=1800):
 def _infer_grid(model, coords_np, sw_seq_single, device, sw_manager,
                 vis_batch=1024,
                 iri_peak_manager=None, fy_nb_index=None,
-                cosmic_nb_index=None, include_single_source=True):
+                cosmic_nb_index=None, include_single_source=True,
+                allowed_profile_ids=None):
     """
     在大网格上分批推理，返回各分量 numpy 数组。
 
@@ -117,14 +118,16 @@ def _infer_grid(model, coords_np, sw_seq_single, device, sw_manager,
             cosmic_kwargs = {}
             if fy_nb_index is not None:
                 observations = query_observation_payload(
-                    fy_nb_index, chunk, device)
+                    fy_nb_index, chunk, device,
+                    allowed_profile_ids=(allowed_profile_ids or {}).get('FY'))
                 fy_coverage[start:end] = observation_query_coverage(
                     observations).float().cpu().numpy()
                 fy_kwargs = {'observations_fy': attach_observation_background(
                     observations, model, sw_manager, iri_peak_manager)}
             if cosmic_nb_index is not None:
                 observations = query_observation_payload(
-                    cosmic_nb_index, chunk, device)
+                    cosmic_nb_index, chunk, device,
+                    allowed_profile_ids=(allowed_profile_ids or {}).get('COSMIC'))
                 cosmic_coverage[start:end] = observation_query_coverage(
                     observations).float().cpu().numpy()
                 cosmic_kwargs = {
@@ -166,7 +169,8 @@ def _infer_grid(model, coords_np, sw_seq_single, device, sw_manager,
 
 def _infer_analysis_peaks(model, lat_flat, lon_flat, global_time,
                           sw_seq_single, device, sw_manager, iri_peak_manager,
-                          fy_nb_index, cosmic_nb_index):
+                          fy_nb_index, cosmic_nb_index,
+                          allowed_profile_ids=None):
     """Derive hmF2/NmF2 from the final M11 density columns."""
     alts = np.arange(model.alt_min, model.alt_max + 0.1, 10.0, dtype=np.float32)
     n_points = len(lat_flat)
@@ -180,7 +184,8 @@ def _infer_analysis_peaks(model, lat_flat, lon_flat, global_time,
         model, coords, sw_seq_single, device, sw_manager, vis_batch=4096,
         iri_peak_manager=iri_peak_manager,
         fy_nb_index=fy_nb_index, cosmic_nb_index=cosmic_nb_index,
-        include_single_source=False)
+        include_single_source=False,
+        allowed_profile_ids=allowed_profile_ids)
     columns = result['m11'].reshape(len(alts), n_points)
     peak_index = np.argmax(columns, axis=0)
     return alts[peak_index], columns[peak_index, np.arange(n_points)]
@@ -321,7 +326,7 @@ def _fmt_log_ticks(cb, bounds):
 def plot_global_slice(model, sw_manager, device, target_day, target_hour,
                       save_dir, alt_levels=None, model_name='MDIA-INR',
                       iri_peak_manager=None, fy_nb_index=None,
-                      cosmic_nb_index=None):
+                      cosmic_nb_index=None, allowed_profile_ids=None):
     """
     绘制全球纬经度切片图（多高度层）。
 
@@ -389,7 +394,8 @@ def plot_global_slice(model, sw_manager, device, target_day, target_hour,
                                 sw_manager,
                                 iri_peak_manager=iri_peak_manager,
                                 fy_nb_index=fy_nb_index,
-                                cosmic_nb_index=cosmic_nb_index)
+                                cosmic_nb_index=cosmic_nb_index,
+                                allowed_profile_ids=allowed_profile_ids)
         iri_map   = result['ne_iri'].reshape(LAT.shape)
         bkg_map   = result['background'].reshape(LAT.shape)
         m10_map   = result['m10'].reshape(LAT.shape)
@@ -458,7 +464,7 @@ def plot_altitude_profile(model, sw_manager, device, lat, lon, time_hour,
                           save_dir, config, model_name='MDIA-INR',
                           iri_peak_manager=None, isr_record=None,
                           time_hours=None, fy_nb_index=None,
-                          cosmic_nb_index=None):
+                          cosmic_nb_index=None, allowed_profile_ids=None):
     """
     绘制指定位置的垂直 EDP 廓线。
 
@@ -510,7 +516,8 @@ def plot_altitude_profile(model, sw_manager, device, lat, lon, time_hour,
                              sw_manager,
                              iri_peak_manager=iri_peak_manager,
                              fy_nb_index=fy_nb_index,
-                             cosmic_nb_index=cosmic_nb_index)
+                             cosmic_nb_index=cosmic_nb_index,
+                             allowed_profile_ids=allowed_profile_ids)
 
         day = int(t_hour // 24)
         hr  = int(t_hour % 24)
@@ -584,7 +591,8 @@ def plot_altitude_profile(model, sw_manager, device, lat, lon, time_hour,
 
 def plot_hmf2_nmf2_map(model, sw_manager, device, time_steps, save_dir,
                        label=None, model_name='MDIA-INR', iri_peak_manager=None,
-                       fy_nb_index=None, cosmic_nb_index=None):
+                       fy_nb_index=None, cosmic_nb_index=None,
+                       allowed_profile_ids=None):
     """
     绘制 hmF2 + NmF2 全球分布合并图（所有时间步纵向排列，每行左右两列）。
 
@@ -632,7 +640,7 @@ def plot_hmf2_nmf2_map(model, sw_manager, device, time_steps, save_dir,
             model, LAT.flatten().astype(np.float32),
             LON.flatten().astype(np.float32), global_time,
             sw_seq_single, device, sw_manager, iri_peak_manager,
-            fy_nb_index, cosmic_nb_index)
+            fy_nb_index, cosmic_nb_index, allowed_profile_ids)
         hmf2_map = hmf2.reshape(LAT.shape)
         nmf2_map = (10.0 ** nmf2).reshape(LAT.shape)
 

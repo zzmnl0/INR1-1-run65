@@ -23,7 +23,8 @@ def _unix_to_relhour(unix_times, start_unix):
 
 def query_model_grid(model, sw_manager, day_record, start_unix, device,
                      batch_size=2048, iri_peak_manager=None,
-                     fy_nb_index=None, cosmic_nb_index=None):
+                     fy_nb_index=None, cosmic_nb_index=None,
+                     allowed_profile_ids=None):
     """
     在 DayRecord 的 (alt, time) 网格上推理 FSIA-INR，返回 log10(Ne) 网格。
 
@@ -123,14 +124,16 @@ def query_model_grid(model, sw_manager, day_record, start_unix, device,
             model_kwargs = {'iri_peak': iri_peak}
             if fy_nb_index is not None:
                 observations = query_observation_payload(
-                    fy_nb_index, chunk, device)
+                    fy_nb_index, chunk, device,
+                    allowed_profile_ids=(allowed_profile_ids or {}).get('FY'))
                 fy_covered += int(
                     observation_query_coverage(observations).sum().item())
                 model_kwargs['observations_fy'] = attach_observation_background(
                     observations, model, sw_manager, iri_peak_manager)
             if cosmic_nb_index is not None:
                 observations = query_observation_payload(
-                    cosmic_nb_index, chunk, device)
+                    cosmic_nb_index, chunk, device,
+                    allowed_profile_ids=(allowed_profile_ids or {}).get('COSMIC'))
                 cosmic_covered += int(
                     observation_query_coverage(observations).sum().item())
                 model_kwargs['observations_cosmic'] = (

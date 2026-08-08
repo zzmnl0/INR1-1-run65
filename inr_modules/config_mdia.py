@@ -43,6 +43,8 @@ CONFIG_MDIA = {
     'run_semantics': 'M2-V_continuous_physical_local_letkf',
     'assimilation_semantics': 'continuous_physical_local_letkf',
     'checkpoint_format_version': 12,
+    'model_domain_semantics': 'legacy_120_500_domain_v1',
+    'checkpoint_selection_semantics': 'mean_profile_rmse_v1',
     'background_training_semantics': 'qc_v2_date_blocked_train_only',
     'background_only': False,
     # Fixed physical trust gate for the new QC-v2 Background run.  It is

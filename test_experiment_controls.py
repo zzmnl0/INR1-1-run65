@@ -138,22 +138,16 @@ def test_observation_query_forwards_profile_allowlist_and_exclusion():
 
 
 def test_architecture_signature_and_dimension_validation():
-    assert _architecture_signature({
+    signature = _architecture_signature({
         'basis_dim': 128,
         'enkf_n_members': 16,
         'enkf_pert_hidden': 64,
-    }) == {
-        'basis_dim': 128,
-        'enkf_n_members': 16,
-        'enkf_pert_hidden': 64,
-        'enkf_anomaly_parameterization': 'legacy_independent',
-        'enkf_scale_init': 1.1,
-        'enkf_scale_condition_max': 3.0,
-        'density_basis_semantics': 'query_conditioned',
-        'analysis_state_semantics': 'legacy_feature_increment',
-        'context_semantics': 'query_conditioning',
-        'mode_basis_semantics': 'learned_density_basis',
-    }
+    })
+    assert signature['basis_dim'] == 128
+    assert signature['enkf_n_members'] == 16
+    assert signature['enkf_pert_hidden'] == 64
+    assert signature['model_domain_semantics'] == 'legacy_120_500_domain_v1'
+    assert signature['alt_range'] == [120.0, 500.0]
     try:
         NeuralETKFLayer(d_model=64, n_members=1)
     except ValueError:

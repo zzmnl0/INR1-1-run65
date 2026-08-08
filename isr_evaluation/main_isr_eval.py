@@ -11,7 +11,7 @@ FSIA-INR × ISR 独立验证主程序
 
 运行方式：
     cd FSIA_INR
-    python isr_evaluation/main_isr_eval.py --checkpoint <M2-V v12 checkpoint>
+    python isr_evaluation/main_isr_eval.py --checkpoint <complete v12/v13 checkpoint>
 
 配置项在下方 CONFIG 区块修改。
   model_type: 'fsia' → 加载 FSIA_INR_Model + 显式冻结的M2-V checkpoint（默认）
@@ -37,6 +37,8 @@ for _p in [_FSIA_DIR, _INR_MODULES]:
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+from inr_modules.mdia.evaluation_stats import paired_group_bootstrap
+
 # ─────────────────────────────────────────────
 # ==================== 配置 ====================
 # ─────────────────────────────────────────────
@@ -44,7 +46,7 @@ CONFIG = {
     # ---- 模型类型：'fsia'（默认）或 'mdia' ----
     'model_type': 'fsia',
 
-    # ---- M2-V必须显式指定完整Analysis checkpoint ----
+    # ---- FSIA必须显式指定完整Analysis checkpoint ----
     'checkpoint_path': None,
 
     # ---- ISR 数据目录 ----
@@ -77,8 +79,6 @@ CONFIG = {
 # ─────────────────────────────────────────────
 # 分层指标工具（分高度 × 分昼夜）
 # ─────────────────────────────────────────────
-_STRAT_ALT_BINS  = [(120.0, 200.0), (200.0, 300.0), (300.0, 500.0)]
-_STRAT_ALT_NAMES = ['120-200km', '200-300km', '300-500km']
 _DAY_LT_RANGE    = (6.0, 18.0)   # 白天：LT 06-18h
 
 
@@ -101,6 +101,9 @@ def _ccc(obs, pred):
 
 def _strat_metrics_1d(pred_log10, obs_log10):
     """计算单个分层内的统计指标（log10 空间）。"""
+    finite = np.isfinite(pred_log10) & np.isfinite(obs_log10)
+    pred_log10 = pred_log10[finite]
+    obs_log10 = obs_log10[finite]
     n = len(pred_log10)
     if n < 5:
         return {'n': n, 'rmse': np.nan, 'bias': np.nan,
@@ -118,9 +121,15 @@ def _strat_metrics_1d(pred_log10, obs_log10):
             'pearson_r': r, 'ccc': ccc}
 
 
+def _analysis_common_mask(observation, analysis, raw_iri):
+    """Pair M11 and Raw IRI without consulting diagnostic M00 values."""
+    return (np.isfinite(observation) & (observation > 0)
+            & np.isfinite(analysis) & np.isfinite(raw_iri))
+
+
 def _compute_stratified_metrics(alt_all, lon_all, rh_all,
                                 pred_all, obs_all, background_all=None,
-                                iri_all=None):
+                                iri_all=None, alt_range=(120.0, 500.0)):
     """
     按高度层（120-300 / 300-500 km）× 昼夜（LT 06-18 / 其余）计算分层指标。
 
@@ -149,6 +158,13 @@ def _compute_stratified_metrics(alt_all, lon_all, rh_all,
     if iri_all is not None:
         sources.append(('iri', iri_all))
 
+    domain_min, domain_max = map(float, alt_range)
+    edges = [domain_min] + [
+        edge for edge in (200.0, 300.0)
+        if domain_min < edge < domain_max] + [domain_max]
+    altitude_bins = list(zip(edges[:-1], edges[1:]))
+    altitude_names = [f'{lower:g}-{upper:g}km'
+                      for lower, upper in altitude_bins]
     for src_name, src_pred in sources:
         # 全高度分昼夜
         for dn_label, dn_mask in [('day', day_mask), ('night', ~day_mask), ('all', np.ones(len(alt_all), bool))]:
@@ -160,8 +176,8 @@ def _compute_stratified_metrics(alt_all, lon_all, rh_all,
             )
         # 分高度层 × 分昼夜
         for bin_index, ((lo, hi), alt_name) in enumerate(
-                zip(_STRAT_ALT_BINS, _STRAT_ALT_NAMES)):
-            upper_mask = (alt_all <= hi if bin_index == len(_STRAT_ALT_BINS) - 1
+                zip(altitude_bins, altitude_names)):
+            upper_mask = (alt_all <= hi if bin_index == len(altitude_bins) - 1
                           else alt_all < hi)
             alt_mask = (alt_all >= lo) & upper_mask
             for dn_label, dn_mask in [('day', day_mask), ('night', ~day_mask), ('all', np.ones(len(alt_all), bool))]:
@@ -172,6 +188,35 @@ def _compute_stratified_metrics(alt_all, lon_all, rh_all,
                     obs_all[m].astype(np.float64),
                 )
 
+    return result
+
+
+def _compute_stratified_bootstrap(altitude, longitude, rel_hour,
+                                  observation, analysis, raw_iri, unit_ids,
+                                  alt_range):
+    """Paired time-profile bootstrap for each M2-W altitude/day stratum."""
+    domain_min, domain_max = map(float, alt_range)
+    edges = [domain_min] + [
+        edge for edge in (200.0, 300.0)
+        if domain_min < edge < domain_max] + [domain_max]
+    local_time = _lt_from_relhour_lon(rel_hour, longitude)
+    day = (local_time >= _DAY_LT_RANGE[0]) & (local_time < _DAY_LT_RANGE[1])
+    masks = {'all_alt_day': day, 'all_alt_night': ~day,
+             'all_alt_all': np.ones(len(altitude), dtype=bool)}
+    for index, (lower, upper) in enumerate(zip(edges[:-1], edges[1:])):
+        in_altitude = (altitude >= lower) & (
+            altitude <= upper if index == len(edges) - 2
+            else altitude < upper)
+        label = f'alt_{lower:g}-{upper:g}km'
+        masks.update({f'{label}_day': in_altitude & day,
+                      f'{label}_night': in_altitude & ~day,
+                      f'{label}_all': in_altitude})
+    result = {}
+    for name, selected in masks.items():
+        if selected.sum() >= 2 and np.unique(unit_ids[selected]).size >= 2:
+            result[name] = paired_group_bootstrap(
+                observation[selected], analysis[selected], raw_iri[selected],
+                unit_ids[selected], replicates=2000, seed=42)
     return result
 
 
@@ -217,6 +262,18 @@ def _parse_unix(date_str):
     return dt.replace(tzinfo=datetime.timezone.utc).timestamp()
 
 
+def _json_safe(value):
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, (np.floating, float)):
+        return float(value) if np.isfinite(value) else None
+    if isinstance(value, np.integer):
+        return int(value)
+    return value
+
+
 def _resolve_checkpoint(config, mdia_cfg):
     """Resolve the configured or CLI-provided checkpoint."""
     if config['checkpoint_path'] is not None:
@@ -228,8 +285,17 @@ def _resolve_checkpoint(config, mdia_cfg):
 
 
 def _require_m2v_config(config):
+    domain = config.get(
+        'model_domain_semantics', 'legacy_120_500_domain_v1')
+    contracts = {
+        'legacy_120_500_domain_v1': (12, (120.0, 500.0)),
+        'strict_200_500_domain_v1': (13, (200.0, 500.0)),
+    }
+    if domain not in contracts:
+        raise ValueError(f'unsupported FSIA model domain: {domain}')
+    checkpoint_version, alt_range = contracts[domain]
     expected = {
-        'checkpoint_format_version': 12,
+        'checkpoint_format_version': checkpoint_version,
         'basis_dim': 64,
         'enkf_n_members': 8,
         'enkf_anomaly_parameterization': 'orthogonal_factor',
@@ -255,6 +321,10 @@ def _require_m2v_config(config):
     if config.get('representativeness_kernel_path') is not None:
         mismatches['representativeness_kernel_path'] = (
             config.get('representativeness_kernel_path'), None)
+    configured_alt_range = config.get(
+        'alt_range', alt_range if domain == 'legacy_120_500_domain_v1' else ())
+    if tuple(map(float, configured_alt_range)) != alt_range:
+        mismatches['alt_range'] = (config.get('alt_range'), alt_range)
     if config.get('background_trust_gate_enabled', False):
         if config.get('background_trust_gate_semantics') != (
                 'fixed_altitude_localtime_dip_smoothstep_v1'):
@@ -316,61 +386,30 @@ def _load_model_and_managers(config, device):
     """
     from inr_modules.config_mdia import get_config_mdia
     from inr_modules.data_managers.space_weather_manager import SpaceWeatherManager
-    from inr_modules.data_managers.irinc_neural_proxy import IRINeuralProxy
 
     cfg = dict(get_config_mdia())
     model_type = config.get('model_type', 'mdia')
     ckpt = _resolve_checkpoint(config, cfg)
-    manifest_path = os.path.join(os.path.dirname(ckpt), 'run_manifest.json')
     if model_type == 'fsia':
-        if not os.path.isfile(manifest_path):
-            raise FileNotFoundError(f'M2-V checkpoint缺少run manifest: {manifest_path}')
-        with open(manifest_path, encoding='utf-8') as stream:
-            trained_config = json.load(stream).get('config')
-        if not isinstance(trained_config, dict):
-            raise ValueError(f'M2-V run manifest缺少config对象: {manifest_path}')
-        cfg.update(trained_config)
-        summary_path = os.path.join(os.path.dirname(ckpt), 'training_summary.json')
-        if not config.get('allow_background_stage', False):
-            if not os.path.isfile(summary_path):
-                raise ValueError(
-                    '正式M2-V ISR评估要求training_summary.json')
-            with open(summary_path, encoding='utf-8') as stream:
-                summary = json.load(stream)
-            if summary.get('completed_stage') != 'analysis':
-                raise ValueError(
-                    '正式M2-V ISR评估拒绝Background-only checkpoint；'
-                    '需使用completed_stage=analysis的完整模型')
-        _require_m2v_config(cfg)
-
-    # IRI 代理
-    iri_proxy = IRINeuralProxy(layers=[4, 128, 128, 128, 128, 1]).to(device)
-    proxy_state = torch.load(cfg['iri_proxy_path'], map_location=device)
-    iri_proxy.load_state_dict(proxy_state)
-    iri_proxy.eval()
-
-    if not os.path.exists(ckpt):
-        raise FileNotFoundError(f'模型权重文件不存在: {ckpt}')
-
-    if model_type == 'fsia':
-        from inr_modules.mdia.fsia_model import FSIA_INR_Model
-        model = FSIA_INR_Model(iri_proxy=iri_proxy, config=cfg).to(device)
+        from inr_modules.mdia.checkpoint_io import (
+            allowed_observation_profile_ids,
+            load_fsia_analysis_checkpoint,
+        )
+        model, cfg, _, _ = load_fsia_analysis_checkpoint(ckpt, device)
+        allowed_profile_ids = allowed_observation_profile_ids(cfg)
         model_name = 'FSIA-INR'
     else:
+        from inr_modules.data_managers.irinc_neural_proxy import IRINeuralProxy
         from inr_modules.mdia.mdia_model import MDIA_INR_Model
+        iri_proxy = IRINeuralProxy(layers=[4, 128, 128, 128, 128, 1]).to(device)
+        proxy_state = torch.load(cfg['iri_proxy_path'], map_location=device)
+        iri_proxy.load_state_dict(proxy_state)
+        iri_proxy.eval()
         model = MDIA_INR_Model(iri_proxy=iri_proxy, config=cfg).to(device)
         model_name = 'MDIA-INR'
-
-    state = torch.load(ckpt, map_location=device, weights_only=True)
-
-    if model_type == 'fsia':
-        model.load_state_dict(state, strict=True)
-        if not all(torch.isfinite(value).all() for value in state.values()
-                   if torch.is_tensor(value)):
-            raise ValueError('FSIA checkpoint contains non-finite values')
-    else:
+        state = torch.load(ckpt, map_location=device, weights_only=True)
         _load_state_compat(model, state)
-    model.eval()
+        model.eval()
     print(f'[main] {model_name} 模型加载完成: {ckpt}')
 
     sw_manager = SpaceWeatherManager(
@@ -411,14 +450,18 @@ def _load_model_and_managers(config, device):
         cosmic_nb_index = COSMICNeighborhoodIndex(cosmic_path, cfg)
         print('[main] FY/COSMIC 正式局部邻域索引加载完成')
 
+        print('[main] ISR观测token已排除locked-test profile')
+    else:
+        allowed_profile_ids = None
+
     return (model, sw_manager, cfg, model_name, iri_peak_manager,
-            fy_nb_index, cosmic_nb_index)
+            fy_nb_index, cosmic_nb_index, allowed_profile_ids)
 
 
 def _process_station(station_name, day_records, model, sw_manager,
                      start_unix, config, device, model_name='MDIA-INR',
                      iri_peak_manager=None, fy_nb_index=None,
-                     cosmic_nb_index=None):
+                     cosmic_nb_index=None, allowed_profile_ids=None):
     """
     对单个站点的所有 DayRecord 完成推理、指标计算、绘图。
 
@@ -442,13 +485,18 @@ def _process_station(station_name, day_records, model, sw_manager,
     # 逐点：分别存 obs/mdia/iri，三者用同一公共有效掩码对齐
     all_obs_log10  = []
     all_pred_log10 = []
-    all_bkg_log10  = []
+    all_bkg_obs_log10 = []
+    all_bkg_point_log10 = []
     all_iri_log10  = []
 
     # 分层指标用坐标（高度、经度、相对UT小时）
     all_strat_alt = []
     all_strat_lon = []
     all_strat_rh  = []
+    all_strat_unit = []
+    all_bkg_strat_alt = []
+    all_bkg_strat_lon = []
+    all_bkg_strat_rh = []
 
     all_isr_nmf2 = []; all_model_nmf2 = []; all_bkg_nmf2 = []; all_iri_nmf2 = []
     all_isr_hmf2 = []; all_model_hmf2 = []; all_bkg_hmf2 = []; all_iri_hmf2 = []
@@ -466,6 +514,7 @@ def _process_station(station_name, day_records, model, sw_manager,
             iri_peak_manager=iri_peak_manager,
             fy_nb_index=fy_nb_index,
             cosmic_nb_index=cosmic_nb_index,
+            allowed_profile_ids=allowed_profile_ids,
         )
 
         # 六列时间-高度对比图。
@@ -481,40 +530,53 @@ def _process_station(station_name, day_records, model, sw_manager,
                              np.log10(rec['ne_2d'].astype(np.float64)), np.nan
                              ).astype(np.float32)
 
-        # 三者公共有效掩码（确保 obs/mdia/iri 长度完全一致）
-        common_mask = (
-            _valid_pair(isr_l, ne_pred)
-            & np.isfinite(ne_bkg) & np.isfinite(ne_iri))
+        n_alt_r = len(rec['alt_1d'])
+        n_time_r = len(rec['ts_1d'])
+        alts_2d_r = np.tile(rec['alt_1d'][:, None], (1, n_time_r))
+        rh_2d_r = np.tile(
+            ((rec['ts_1d'] - start_unix) / 3600.0)[None, :],
+            (n_alt_r, 1)).astype(np.float32)
+        geo_lon_2d_r = rec.get('geo_lon_2d')
+        lon_2d_r = (geo_lon_2d_r if geo_lon_2d_r is not None else
+                    np.full((n_alt_r, n_time_r), rec.get('lon', 0.0),
+                            dtype=np.float32))
+
+        # Analysis有效性只与M11和Raw IRI对齐；M00使用独立诊断掩码。
+        common_mask = _analysis_common_mask(isr_l, ne_pred, ne_iri)
         if common_mask.sum() >= 10:
             all_obs_log10.append(isr_l[common_mask])
             all_pred_log10.append(ne_pred[common_mask])
-            all_bkg_log10.append(ne_bkg[common_mask])
             all_iri_log10.append(ne_iri[common_mask])
 
             # ── 分层指标所需坐标 ──────────────────────────────
-            n_alt_r  = len(rec['alt_1d'])
-            n_time_r = len(rec['ts_1d'])
-            alts_2d_r = np.tile(rec['alt_1d'][:, None], (1, n_time_r))   # [n_alt, n_time]
-            rh_2d_r   = np.tile(
-                ((rec['ts_1d'] - start_unix) / 3600.0)[None, :],
-                (n_alt_r, 1)
-            ).astype(np.float32)
-            geo_lon_2d_r = rec.get('geo_lon_2d')
-            if geo_lon_2d_r is not None:
-                lon_2d_r = geo_lon_2d_r
-            else:
-                lon_2d_r = np.full((n_alt_r, n_time_r),
-                                   rec.get('lon', 0.0), dtype=np.float32)
             all_strat_alt.append(alts_2d_r[common_mask].astype(np.float32))
             all_strat_lon.append(lon_2d_r[common_mask].astype(np.float32))
             all_strat_rh.append(rh_2d_r[common_mask].astype(np.float32))
+            ts_2d_r = np.tile(rec['ts_1d'][None, :], (n_alt_r, 1))
+            all_strat_unit.append(ts_2d_r[common_mask].astype(np.int64))
             # ────────────────────────────────────────────────
 
+        background_mask = _valid_pair(isr_l, ne_bkg)
+        if background_mask.sum() >= 10:
+            all_bkg_obs_log10.append(isr_l[background_mask])
+            all_bkg_point_log10.append(ne_bkg[background_mask])
+            all_bkg_strat_alt.append(
+                alts_2d_r[background_mask].astype(np.float32))
+            all_bkg_strat_lon.append(
+                lon_2d_r[background_mask].astype(np.float32))
+            all_bkg_strat_rh.append(
+                rh_2d_r[background_mask].astype(np.float32))
+
         # NmF2 / hmF2
-        isr_nmf2,   isr_hmf2   = extract_isr_nmf2_hmf2(rec['ne_2d'], rec['alt_1d'])
-        model_nmf2, model_hmf2 = extract_model_nmf2_hmf2(ne_pred,    rec['alt_1d'])
-        bkg_nmf2,   bkg_hmf2   = extract_model_nmf2_hmf2(ne_bkg,     rec['alt_1d'])
-        iri_nmf2,   iri_hmf2   = extract_model_nmf2_hmf2(ne_iri,     rec['alt_1d'])
+        peak_min = float(config.get('alt_range', (120.0, 500.0))[0])
+        isr_nmf2, isr_hmf2 = extract_isr_nmf2_hmf2(
+            rec['ne_2d'], rec['alt_1d'], f2_alt_min=peak_min)
+        model_nmf2, model_hmf2 = extract_model_nmf2_hmf2(
+            ne_pred, rec['alt_1d'], f2_alt_min=peak_min)
+        bkg_nmf2, bkg_hmf2 = extract_model_nmf2_hmf2(
+            ne_bkg, rec['alt_1d'], f2_alt_min=peak_min)
+        iri_nmf2, iri_hmf2 = extract_model_nmf2_hmf2(
+            ne_iri, rec['alt_1d'], f2_alt_min=peak_min)
 
         all_isr_nmf2.append(isr_nmf2);   all_model_nmf2.append(model_nmf2)
         all_bkg_nmf2.append(bkg_nmf2)
@@ -556,7 +618,8 @@ def _process_station(station_name, day_records, model, sw_manager,
                 f'{prefix}point_ccc': ccc, f'{prefix}point_bias': bias}
 
     model_pt = _point_stats(all_obs_log10, all_pred_log10, prefix='')
-    bkg_pt   = _point_stats(all_obs_log10, all_bkg_log10, prefix='background_')
+    bkg_pt   = _point_stats(
+        all_bkg_obs_log10, all_bkg_point_log10, prefix='background_')
     iri_pt   = _point_stats(all_obs_log10, all_iri_log10,  prefix='iri_')
 
     # ---- NmF2 / hmF2 全局指标 ----
@@ -569,17 +632,28 @@ def _process_station(station_name, day_records, model, sw_manager,
     bkg_hmf2_cat   = np.concatenate(all_bkg_hmf2)
     iri_hmf2_cat   = np.concatenate(all_iri_hmf2)
 
-    model_peak = compute_nmf2_hmf2_metrics(isr_nmf2_cat, isr_hmf2_cat,
-                                           model_nmf2_cat, model_hmf2_cat)
+    nmf2_common = (np.isfinite(isr_nmf2_cat) & np.isfinite(model_nmf2_cat)
+                   & np.isfinite(iri_nmf2_cat))
+    hmf2_common = (np.isfinite(isr_hmf2_cat) & np.isfinite(model_hmf2_cat)
+                   & np.isfinite(iri_hmf2_cat))
+    model_peak = compute_nmf2_hmf2_metrics(
+        np.where(nmf2_common, isr_nmf2_cat, np.nan),
+        np.where(hmf2_common, isr_hmf2_cat, np.nan),
+        np.where(nmf2_common, model_nmf2_cat, np.nan),
+        np.where(hmf2_common, model_hmf2_cat, np.nan))
     bkg_peak   = compute_nmf2_hmf2_metrics(isr_nmf2_cat, isr_hmf2_cat,
                                            bkg_nmf2_cat, bkg_hmf2_cat)
-    iri_peak   = compute_nmf2_hmf2_metrics(isr_nmf2_cat, isr_hmf2_cat,
-                                           iri_nmf2_cat,  iri_hmf2_cat)
+    iri_peak = compute_nmf2_hmf2_metrics(
+        np.where(nmf2_common, isr_nmf2_cat, np.nan),
+        np.where(hmf2_common, isr_hmf2_cat, np.nan),
+        np.where(nmf2_common, iri_nmf2_cat, np.nan),
+        np.where(hmf2_common, iri_hmf2_cat, np.nan))
 
     # ---- NmF2 散点图 ----
     model_tag = model_name.lower().replace('-', '_').replace(' ', '_')
     plot_nmf2_scatter(
-        isr_nmf2_cat, model_nmf2_cat,
+        np.where(nmf2_common, isr_nmf2_cat, np.nan),
+        np.where(nmf2_common, model_nmf2_cat, np.nan),
         station=f'{station_name} {model_name}',
         save_path=os.path.join(station_dir, f'{station_name}_nmf2_scatter_{model_tag}.png')
     )
@@ -589,7 +663,8 @@ def _process_station(station_name, day_records, model, sw_manager,
         save_path=os.path.join(station_dir, f'{station_name}_nmf2_scatter_background.png')
     )
     plot_nmf2_scatter(
-        isr_nmf2_cat, iri_nmf2_cat,
+        np.where(nmf2_common, isr_nmf2_cat, np.nan),
+        np.where(nmf2_common, iri_nmf2_cat, np.nan),
         station=f'{station_name} IRI',
         save_path=os.path.join(station_dir, f'{station_name}_nmf2_scatter_iri.png')
     )
@@ -614,19 +689,35 @@ def _process_station(station_name, day_records, model, sw_manager,
 
     # ---- 分高度 × 分昼夜 分层指标 ----
     strat_metrics = {}
+    strat_bootstrap = {}
     if all_strat_alt:
         alt_cat  = np.concatenate(all_strat_alt)
         lon_cat  = np.concatenate(all_strat_lon)
         rh_cat   = np.concatenate(all_strat_rh)
         pred_cat = np.concatenate(all_pred_log10).astype(np.float64)
-        bkg_cat  = np.concatenate(all_bkg_log10).astype(np.float64)
         obs_cat  = np.concatenate(all_obs_log10).astype(np.float64)
         iri_cat  = np.concatenate(all_iri_log10).astype(np.float64)
         strat_metrics = _compute_stratified_metrics(
             alt_cat, lon_cat, rh_cat,
-            pred_cat, obs_cat, background_all=bkg_cat, iri_all=iri_cat,
+            pred_cat, obs_cat, iri_all=iri_cat,
+            alt_range=config.get('alt_range', (120.0, 500.0)),
         )
+        if all_bkg_strat_alt:
+            background_strata = _compute_stratified_metrics(
+                np.concatenate(all_bkg_strat_alt),
+                np.concatenate(all_bkg_strat_lon),
+                np.concatenate(all_bkg_strat_rh),
+                np.concatenate(all_bkg_point_log10).astype(np.float64),
+                np.concatenate(all_bkg_obs_log10).astype(np.float64),
+                alt_range=config.get('alt_range', (120.0, 500.0)))
+            strat_metrics.update({
+                key.replace('analysis_', 'background_', 1): value
+                for key, value in background_strata.items()})
         _print_stratified_table(strat_metrics, station_name)
+        unit_cat = np.concatenate(all_strat_unit)
+        strat_bootstrap = _compute_stratified_bootstrap(
+            alt_cat, lon_cat, rh_cat, obs_cat, pred_cat, iri_cat, unit_cat,
+            config.get('alt_range', (120.0, 500.0)))
 
         # CSV 输出
         csv_path = os.path.join(station_dir,
@@ -634,6 +725,9 @@ def _process_station(station_name, day_records, model, sw_manager,
         _save_stratified_csv(strat_metrics, csv_path)
         print(f'  [{station_name}] 分层指标已保存: {csv_path}')
 
+    overall_bootstrap = (paired_group_bootstrap(
+        obs_cat, pred_cat, iri_cat, unit_cat, replicates=2000, seed=42)
+        if all_strat_alt else None)
     report = {
         'station':    station_name,
         'model_name': model_name,
@@ -645,6 +739,11 @@ def _process_station(station_name, day_records, model, sw_manager,
         **iri_pt,
         **iri_peak_prefixed,
         'stratified': strat_metrics,
+        'm11_vs_raw_iri_bootstrap': overall_bootstrap,
+        'passed_m2w_m11_vs_raw_iri_gate': (
+            overall_bootstrap is not None
+            and overall_bootstrap['decision'] == 'pass'),
+        'stratified_m11_vs_raw_iri_bootstrap': strat_bootstrap,
     }
     return report
 
@@ -672,12 +771,13 @@ def main(checkpoint=None, save_dir=None, preflight_only=False):
 
     # ==================== 加载模型 ====================
     (model, sw_manager, mdia_cfg, model_name, iri_peak_manager,
-     fy_nb_index, cosmic_nb_index) = \
+     fy_nb_index, cosmic_nb_index, allowed_profile_ids) = \
         _load_model_and_managers(CONFIG, device)
+    CONFIG['alt_min'], CONFIG['alt_max'] = map(float, mdia_cfg['alt_range'])
     print(f'[main] 模型类型: {model_name}')
 
     if preflight_only:
-        print('[preflight] M2-V checkpoint、配置和模型依赖加载通过；未读取ISR数据')
+        print('[preflight] FSIA checkpoint、配置和模型依赖加载通过；未读取ISR数据')
         return
 
     # ==================== 加载 ISR 数据 ====================
@@ -709,6 +809,7 @@ def main(checkpoint=None, save_dir=None, preflight_only=False):
                 iri_peak_manager=iri_peak_manager,
                 fy_nb_index=fy_nb_index,
                 cosmic_nb_index=cosmic_nb_index,
+                allowed_profile_ids=allowed_profile_ids,
             )
             if rep is not None:
                 station_reports.append(rep)
@@ -739,6 +840,7 @@ def main(checkpoint=None, save_dir=None, preflight_only=False):
                 iri_peak_manager=iri_peak_manager,
                 fy_nb_index=fy_nb_index,
                 cosmic_nb_index=cosmic_nb_index,
+                allowed_profile_ids=allowed_profile_ids,
             )
             if rep is not None:
                 station_reports.append(rep)
@@ -748,6 +850,15 @@ def main(checkpoint=None, save_dir=None, preflight_only=False):
         from isr_evaluation.plots import save_metrics_report
         report_path = os.path.join(save_dir, 'isr_validation_report.txt')
         save_metrics_report(station_reports, report_path)
+        with open(os.path.join(save_dir, 'isr_validation_report.json'),
+                  'w', encoding='utf-8') as stream:
+            json.dump(_json_safe(station_reports), stream,
+                      ensure_ascii=False, indent=2, allow_nan=False)
+        gate_summary = {
+            report['station']: bool(
+                report['passed_m2w_m11_vs_raw_iri_gate'])
+            for report in station_reports}
+        print(f'[M2-W M11 vs Raw IRI] {gate_summary}')
 
         print('\n' + '=' * 80)
         print('验证完成。汇总指标：')
@@ -784,7 +895,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument(
         '--checkpoint', required=True,
-        help='必需：完整Analysis阶段的M2-V v12 checkpoint路径')
+        help='必需：完整Analysis阶段的FSIA v12/v13 checkpoint路径')
     parser.add_argument('--save-dir', default=None)
     parser.add_argument(
         '--preflight-only', action='store_true',

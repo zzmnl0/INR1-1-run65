@@ -25,6 +25,12 @@ _DEFAULT_RUN_NAME = 'run66-m2v-qcv2-dateblocked-background'
 _TRUST_GATE_SEMANTICS = 'fixed_altitude_localtime_dip_smoothstep_v1'
 _TRUST_GATE_BACKGROUND_SEMANTICS = (
     'qc_v2_date_blocked_train_only_continuous_trust_gate_v1')
+_M2W_DOMAIN_SEMANTICS = 'strict_200_500_domain_v1'
+_M2W_RUN_SEMANTICS = 'M2-W_continuous_physical_local_letkf_200_500'
+_M2W_BACKGROUND_SEMANTICS = 'qc_v2_date_blocked_train_only_m2w_200_500_v1'
+_M2W_GATE_BACKGROUND_SEMANTICS = (
+    'qc_v2_date_blocked_train_only_m2w_200_500_continuous_trust_gate_v1')
+_M2V_DOMAIN_SEMANTICS = 'legacy_120_500_domain_v1'
 _UNSET = object()
 _OLD_RUN65_CKPT = Path(current_dir) / 'checkpoints_fsia' / 'run65' / 'best_fsia_model.pth'
 
@@ -148,7 +154,8 @@ def main(eval_only=False, resume_ckpt=None, run_name=_DEFAULT_RUN_NAME,
          w_time_analysis=None, analysis_active_only_loss=None,
          analysis_exact_mode_loss=None, representativeness_kernel=None,
          background_only=False,
-         include_isr_overlay=False, background_trust_gate=None):
+         include_isr_overlay=False, background_trust_gate=None,
+         model_domain=None):
     # ==================== 加载配置 ====================
     config = get_config_mdia()
     run_dir = _run_directory(run_name)
@@ -157,6 +164,25 @@ def main(eval_only=False, resume_ckpt=None, run_name=_DEFAULT_RUN_NAME,
     if (eval_only or resume_ckpt is not None) and manifest_path.is_file():
         with manifest_path.open(encoding='utf-8') as stream:
             prior_config = json.load(stream).get('config', {})
+    recorded_domain = prior_config.get(
+        'model_domain_semantics', _M2V_DOMAIN_SEMANTICS)
+    if model_domain is None:
+        m2w_domain = recorded_domain == _M2W_DOMAIN_SEMANTICS
+    else:
+        m2w_domain = model_domain == '200-500'
+        if prior_config and m2w_domain != (
+                recorded_domain == _M2W_DOMAIN_SEMANTICS):
+            raise ValueError('model domain differs from the run manifest')
+    model_domain_semantics = (
+        _M2W_DOMAIN_SEMANTICS if m2w_domain else _M2V_DOMAIN_SEMANTICS)
+    alt_range = (200.0, 500.0) if m2w_domain else tuple(
+        prior_config.get('alt_range', config['alt_range']))
+    checkpoint_format_version = (
+        13 if m2w_domain else int(prior_config.get(
+            'checkpoint_format_version', config['checkpoint_format_version'])))
+    run_semantics = (
+        _M2W_RUN_SEMANTICS if m2w_domain else prior_config.get(
+            'run_semantics', config['run_semantics']))
     basis_dim = int(
         prior_config.get('basis_dim', config['basis_dim'])
         if basis_dim is None else basis_dim)
@@ -269,7 +295,9 @@ def main(eval_only=False, resume_ckpt=None, run_name=_DEFAULT_RUN_NAME,
         if recorded_gate_semantics != _TRUST_GATE_SEMANTICS:
             raise ValueError('unsupported Background trust-gate semantics')
         background_gate_semantics = _TRUST_GATE_SEMANTICS
-        background_training_semantics = _TRUST_GATE_BACKGROUND_SEMANTICS
+        background_training_semantics = (
+            _M2W_GATE_BACKGROUND_SEMANTICS if m2w_domain
+            else _TRUST_GATE_BACKGROUND_SEMANTICS)
     else:
         background_gate_semantics = 'disabled'
     if background_seed is _UNSET:
@@ -280,7 +308,7 @@ def main(eval_only=False, resume_ckpt=None, run_name=_DEFAULT_RUN_NAME,
         'background_training_semantics')
     if background_seed is not None:
         background_seed = str(background_seed)
-        if (background_trust_gate
+        if (m2w_domain or background_trust_gate
                 or prior_background_semantics == 'qc_v2_date_blocked_train_only'
                 or (not prior_config and run_name == _DEFAULT_RUN_NAME)):
             raise ValueError(
@@ -288,9 +316,11 @@ def main(eval_only=False, resume_ckpt=None, run_name=_DEFAULT_RUN_NAME,
         background_training_semantics = 'frozen_external_seed'
     else:
         if not background_trust_gate:
-            background_training_semantics = prior_background_semantics or config.get(
-                'background_training_semantics',
-                'qc_v2_date_blocked_train_only')
+            background_training_semantics = (
+                prior_background_semantics
+                or (_M2W_BACKGROUND_SEMANTICS if m2w_domain else config.get(
+                    'background_training_semantics',
+                    'qc_v2_date_blocked_train_only')))
 
     # FSIA 检查点目录（每次新训练实验递增 run 编号）
     update_config_mdia(
@@ -328,6 +358,14 @@ def main(eval_only=False, resume_ckpt=None, run_name=_DEFAULT_RUN_NAME,
         representativeness_kernel_path=representativeness_kernel,
         representativeness_floor=representativeness_floor,
         include_isr_overlay=bool(include_isr_overlay),
+        model_domain_semantics=model_domain_semantics,
+        alt_range=alt_range,
+        checkpoint_format_version=checkpoint_format_version,
+        run_semantics=run_semantics,
+        checkpoint_selection_semantics=(
+            'mean_ccc_then_rmse_then_pearson_v1' if m2w_domain
+            else prior_config.get('checkpoint_selection_semantics',
+                                  'mean_profile_rmse_v1')),
     )
     if qc_data:
         update_config_mdia(
@@ -475,6 +513,8 @@ def main(eval_only=False, resume_ckpt=None, run_name=_DEFAULT_RUN_NAME,
     print('\n' + '=' * 60)
     print('开始可视化')
     print('=' * 60)
+    from inr_modules.mdia.checkpoint_io import allowed_observation_profile_ids
+    visualization_profiles = allowed_observation_profile_ids(config)
 
     _vis_days   = [4, 14, 24]
     _vis_hours  = [6, 12, 18]
@@ -489,7 +529,8 @@ def main(eval_only=False, resume_ckpt=None, run_name=_DEFAULT_RUN_NAME,
                 alt_levels=_alt_levels, model_name='FSIA-INR',
                 iri_peak_manager=iri_peak_manager,
                 fy_nb_index=batch_processor.fy_nb_index,
-                cosmic_nb_index=batch_processor.cosmic_nb_index)
+                cosmic_nb_index=batch_processor.cosmic_nb_index,
+                allowed_profile_ids=visualization_profiles)
 
         plot_hmf2_nmf2_map(
             model, sw_manager, device,
@@ -498,7 +539,8 @@ def main(eval_only=False, resume_ckpt=None, run_name=_DEFAULT_RUN_NAME,
             label=f'day{vis_day:02d}', model_name='FSIA-INR',
             iri_peak_manager=iri_peak_manager,
             fy_nb_index=batch_processor.fy_nb_index,
-            cosmic_nb_index=batch_processor.cosmic_nb_index)
+            cosmic_nb_index=batch_processor.cosmic_nb_index,
+            allowed_profile_ids=visualization_profiles)
 
     # ---- Jicamarca EDP + ISR 真值（Sep 5, 05/10/15/20 UT）----
     _jic_record = None
@@ -538,7 +580,8 @@ def main(eval_only=False, resume_ckpt=None, run_name=_DEFAULT_RUN_NAME,
         iri_peak_manager=iri_peak_manager,
         isr_record=_jic_record,
         fy_nb_index=batch_processor.fy_nb_index,
-        cosmic_nb_index=batch_processor.cosmic_nb_index)
+        cosmic_nb_index=batch_processor.cosmic_nb_index,
+        allowed_profile_ids=visualization_profiles)
 
 
 if __name__ == '__main__':
@@ -595,6 +638,9 @@ if __name__ == '__main__':
         '--background-trust-gate', action=argparse.BooleanOptionalAction,
         default=None,
         help='enable the fixed low-altitude nighttime Background trust gate')
+    parser.add_argument(
+        '--model-domain', choices=('200-500',), default=None,
+        help='explicitly enable the M2-W strict 200-500 km model domain')
     parser.add_argument(
         '--covariance-moment', action='store_true', default=None,
         help='train Analysis with profile-balanced covariance moment matching')
@@ -693,4 +739,5 @@ if __name__ == '__main__':
                 background_only=args.background_only,
                 include_isr_overlay=args.include_isr_overlay,
                 background_trust_gate=args.background_trust_gate,
+                model_domain=args.model_domain,
             )

@@ -11,6 +11,7 @@ FSIA-INR 独立绘图脚本
 可在下方 CONFIG 区块自定义检查点路径、输出目录、绘图时刻和高度层。
 """
 
+import argparse
 import os
 import sys
 import matplotlib
@@ -68,45 +69,26 @@ CONFIG = {
 def _resolve_paths(config):
     """解析检查点路径和输出目录，填充 None 值。"""
     if config['checkpoint_path'] is None:
-        config['checkpoint_path'] = os.path.join(
-            _SCRIPT_DIR, 'checkpoints_fsia', 'run66-etkf-loss',
-            'best_fsia_model.pth'
-        )
+        raise ValueError('plot_fsia.py requires an explicit --checkpoint')
     if config['save_dir'] is None:
         config['save_dir'] = os.path.join(
             os.path.dirname(config['checkpoint_path']), 'plots'
         )
 
 
-def _build_iri_proxy(mdia_cfg, device):
-    from inr_modules.data_managers.irinc_neural_proxy import IRINeuralProxy
-    iri_proxy = IRINeuralProxy(layers=[4, 128, 128, 128, 128, 1]).to(device)
-    proxy_state = torch.load(mdia_cfg['iri_proxy_path'], map_location=device)
-    iri_proxy.load_state_dict(proxy_state)
-    iri_proxy.eval()
-    return iri_proxy
-
-
-def _load_model(config, mdia_cfg, device):
+def _load_model(config, device):
     ckpt = config['checkpoint_path']
     if not os.path.exists(ckpt):
         raise FileNotFoundError(
             f'检查点文件不存在: {ckpt}\n'
             f'请先运行 main_fsia.py 完成训练（至少一个 epoch 保存 best_fsia_model.pth）。'
         )
-    iri_proxy = _build_iri_proxy(mdia_cfg, device)
-    from inr_modules.mdia.fsia_model import FSIA_INR_Model
-    model = FSIA_INR_Model(iri_proxy=iri_proxy, config=mdia_cfg).to(device)
-    state = torch.load(ckpt, map_location=device, weights_only=True)
-    model.load_state_dict(state, strict=True)
-    if not all(torch.isfinite(value).all() for value in state.values()
-               if torch.is_tensor(value)):
-        raise ValueError('FSIA checkpoint contains non-finite values')
-    model.eval()
+    from inr_modules.mdia.checkpoint_io import load_fsia_analysis_checkpoint
+    model, mdia_cfg, _, _ = load_fsia_analysis_checkpoint(ckpt, device)
     print(f'[plot] FSIA-INR 模型已加载: {ckpt}')
     print(f'       τ_kp = {model.sw_encoder.tau_kp.item():.2f} h   '
           f'τ_solar = {model.sw_encoder.tau_solar.item():.2f} h')
-    return model
+    return model, mdia_cfg
 
 
 def _load_sw_manager(mdia_cfg, device):
@@ -172,12 +154,11 @@ def _load_jicamarca_record(data_dir, date_str='20240905'):
         return None
 
 
-def main():
+def main(checkpoint=None, save_dir=None, include_isr_overlay=False):
+    CONFIG['checkpoint_path'] = checkpoint
+    CONFIG['save_dir'] = save_dir
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f'[plot] 使用设备: {device}')
-
-    from inr_modules.config_mdia import get_config_mdia
-    mdia_cfg = get_config_mdia()
 
     _resolve_paths(CONFIG)
     os.makedirs(CONFIG['save_dir'], exist_ok=True)
@@ -185,7 +166,7 @@ def main():
     print(f'[plot] 检查点:   {CONFIG["checkpoint_path"]}')
     print(f'[plot] 输出目录: {CONFIG["save_dir"]}')
 
-    model           = _load_model(CONFIG, mdia_cfg, device)
+    model, mdia_cfg = _load_model(CONFIG, device)
     sw_manager      = _load_sw_manager(mdia_cfg, device)
     iri_peak_manager = _build_iri_peak_manager(mdia_cfg, device)
     from inr_modules.data_managers.FY_dataloader import (
@@ -193,6 +174,8 @@ def main():
     fy_nb_index = FYNeighborhoodIndex(mdia_cfg['fy_path'], mdia_cfg)
     cosmic_nb_index = COSMICNeighborhoodIndex(
         mdia_cfg['cosmic_path'], mdia_cfg)
+    from inr_modules.mdia.checkpoint_io import allowed_observation_profile_ids
+    allowed_profiles = allowed_observation_profile_ids(mdia_cfg)
 
     from inr_modules.mdia.visualization_mdia import (
         plot_global_slice,
@@ -224,6 +207,7 @@ def main():
                     iri_peak_manager=iri_peak_manager,
                     fy_nb_index=fy_nb_index,
                     cosmic_nb_index=cosmic_nb_index,
+                    allowed_profile_ids=allowed_profiles,
                 )
                 done += 1
 
@@ -237,11 +221,13 @@ def main():
                 iri_peak_manager=iri_peak_manager,
                 fy_nb_index=fy_nb_index,
                 cosmic_nb_index=cosmic_nb_index,
+                allowed_profile_ids=allowed_profiles,
             )
             done += 1
 
     if CONFIG['plot_edp_profile']:
-        jic_record = _load_jicamarca_record(CONFIG.get('jic_data_dir'))
+        jic_record = (_load_jicamarca_record(CONFIG.get('jic_data_dir'))
+                      if include_isr_overlay else None)
         for edp_h in CONFIG['edp_hours']:
             t_hour = CONFIG['edp_day'] * 24.0 + edp_h
             _lt = (edp_h + CONFIG['edp_lon'] / 15.0) % 24.0
@@ -261,6 +247,7 @@ def main():
                 isr_record=jic_record,
                 fy_nb_index=fy_nb_index,
                 cosmic_nb_index=cosmic_nb_index,
+                allowed_profile_ids=allowed_profiles,
             )
             done += 1
 
@@ -268,4 +255,9 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--checkpoint', required=True)
+    parser.add_argument('--save-dir')
+    parser.add_argument('--include-isr-overlay', action='store_true')
+    args = parser.parse_args()
+    main(args.checkpoint, args.save_dir, args.include_isr_overlay)

@@ -21,6 +21,19 @@ def _allowed_profile_mask(profile_ids, allowed_profile_ids):
     return result
 
 
+def _altitude_mask(altitude, alt_range):
+    """Return the inclusive configured model-domain mask."""
+    if alt_range is None:
+        return np.ones(np.asarray(altitude).shape, dtype=bool)
+    if len(alt_range) != 2:
+        raise ValueError('alt_range must contain exactly two bounds')
+    lower, upper = map(float, alt_range)
+    if not np.isfinite([lower, upper]).all() or lower >= upper:
+        raise ValueError('alt_range must contain finite increasing bounds')
+    altitude = np.asarray(altitude)
+    return (altitude >= lower) & (altitude <= upper)
+
+
 def _normalized_profile_distance(dlat, dlon, dt, dlat_limit, dlon_limit,
                                  dt_limit):
     """Shared FY/COSMIC normalized space-time L1 profile distance."""
@@ -242,7 +255,7 @@ class FY3D_Dataset(Dataset):
                  bin_size_hours: float = 3.0, use_memmap: bool = False,
                  profile_path: str = None, val_ratio: float = None,
                  split_seed: int = 42, profile_index_path: str = None,
-                 split_days=None):
+                 split_days=None, alt_range=None):
         super().__init__()
 
         if val_days is None:
@@ -313,6 +326,7 @@ class FY3D_Dataset(Dataset):
             else:
                 # 全量模式：复制有效数据
                 self.data = raw_data[~isnan_mask]
+                self.raw_profile_ids = self.raw_profile_ids[~isnan_mask]
                 self.valid_indices = None
         else:
             self.data = raw_data
@@ -325,6 +339,16 @@ class FY3D_Dataset(Dataset):
         else:
             working_indices = np.arange(len(self.data))
             working_data = self.data
+
+        domain_mask = _altitude_mask(working_data[:, 2], alt_range)
+        working_indices = working_indices[domain_mask]
+        working_data = working_data[domain_mask]
+        if len(working_indices) == 0:
+            raise ValueError('configured altitude domain contains no data rows')
+        self.alt_range = (None if alt_range is None else tuple(map(float, alt_range)))
+        self.domain_row_count = int(len(working_indices))
+        self.domain_profile_count = int(np.unique(
+            self.raw_profile_ids[working_indices]).size)
 
         # --- Sanity Check: 验证时间格式 ---
         print(f"  验证时间格式...")
@@ -551,6 +575,8 @@ def get_dataloaders(
     split_seed: int = 42,
     points_per_profile: int = 8,
     split_days=None,
+    alt_range=None,
+    full_validation_profiles=False,
 ):
     """
     工厂函数: 组装 Dataset 和 Time-Aware Sampler
@@ -570,13 +596,15 @@ def get_dataloaders(
         npy_path, mode='train', val_days=val_days, bin_size_hours=bin_size_hours,
         use_memmap=use_memmap, profile_path=profile_path,
         val_ratio=val_ratio, split_seed=split_seed,
-        profile_index_path=profile_index_path, split_days=split_days)
+        profile_index_path=profile_index_path, split_days=split_days,
+        alt_range=alt_range)
     val_dataset = FY3D_Dataset(
         npy_path, mode=('development' if split_days is not None else 'val'),
         val_days=val_days, bin_size_hours=bin_size_hours,
         use_memmap=use_memmap, profile_path=profile_path,
         val_ratio=val_ratio, split_seed=split_seed,
-        profile_index_path=profile_index_path, split_days=split_days)
+        profile_index_path=profile_index_path, split_days=split_days,
+        alt_range=alt_range)
     
     # 训练集开启 Shuffle (Time-Aware Shuffle)
     train_sampler = ProfileTimeBinSampler(
@@ -585,7 +613,8 @@ def get_dataloaders(
     # 验证集关闭 Shuffle (顺序评估)
     val_sampler = ProfileTimeBinSampler(
         val_dataset, batch_size=batch_size,
-        points_per_profile=points_per_profile, shuffle=False)
+        points_per_profile=(None if full_validation_profiles
+                            else points_per_profile), shuffle=False)
     
     # DataLoader 必须使用 batch_sampler 参数
     train_loader = DataLoader(train_dataset, batch_sampler=train_sampler, num_workers=num_workers, pin_memory=False)
@@ -642,7 +671,8 @@ class FYNeighborhoodIndex:
             profile_ids_raw = profile_raw[:, 6]
         if raw.ndim != 2 or raw.shape[1] < 5:
             raise ValueError('FY physical data must have at least five columns')
-        valid = np.isfinite(raw[:, :5]).all(axis=1)
+        valid = (np.isfinite(raw[:, :5]).all(axis=1)
+                 & _altitude_mask(raw[:, 2], config.get('alt_range')))
         if not np.isfinite(profile_ids_raw).all() or not np.array_equal(
                 profile_ids_raw, np.rint(profile_ids_raw)):
             raise ValueError('FY profile_id must contain finite integers')
@@ -932,7 +962,8 @@ class COSMICNeighborhoodIndex:
         profile_index_path = config.get('cosmic_profile_index_path')
         if raw.ndim != 2 or raw.shape[1] < 5:
             raise ValueError('COSMIC physical data must have at least five columns')
-        valid = np.isfinite(raw[:, :5]).all(axis=1)
+        valid = (np.isfinite(raw[:, :5]).all(axis=1)
+                 & _altitude_mask(raw[:, 2], config.get('alt_range')))
         if profile_index_path:
             pid_raw, _ = _load_profile_index(profile_index_path, len(raw))
         elif raw.shape[1] > 5:
@@ -1107,23 +1138,27 @@ class COSMICNeighborhoodIndex:
 def get_cosmic_dataloader(cosmic_path, batch_size, bin_size_hours=0.5,
                            num_workers=0, use_memmap=True, val_ratio=0.1,
                            split_seed=42, points_per_profile=8,
-                           profile_index_path=None, split_days=None):
+                           profile_index_path=None, split_days=None,
+                           alt_range=None, full_validation_profiles=False):
     """COSMIC-2 DataLoader 工厂函数（接口与 get_dataloaders 对称）。"""
     train_dataset = COSMICDataset(
         cosmic_path, mode='train', val_days=[], bin_size_hours=bin_size_hours,
         use_memmap=use_memmap, val_ratio=val_ratio, split_seed=split_seed,
-        profile_index_path=profile_index_path, split_days=split_days)
+        profile_index_path=profile_index_path, split_days=split_days,
+        alt_range=alt_range)
     val_dataset = COSMICDataset(
         cosmic_path, mode=('development' if split_days is not None else 'val'),
         val_days=[], bin_size_hours=bin_size_hours,
         use_memmap=use_memmap, val_ratio=val_ratio, split_seed=split_seed,
-        profile_index_path=profile_index_path, split_days=split_days)
+        profile_index_path=profile_index_path, split_days=split_days,
+        alt_range=alt_range)
     train_sampler = ProfileTimeBinSampler(
         train_dataset, batch_size=batch_size,
         points_per_profile=points_per_profile, shuffle=True)
     val_sampler = ProfileTimeBinSampler(
         val_dataset, batch_size=batch_size,
-        points_per_profile=points_per_profile, shuffle=False)
+        points_per_profile=(None if full_validation_profiles
+                            else points_per_profile), shuffle=False)
     train_loader  = DataLoader(train_dataset, batch_sampler=train_sampler,
                                num_workers=num_workers, pin_memory=False)
     val_loader    = DataLoader(val_dataset,   batch_sampler=val_sampler,
