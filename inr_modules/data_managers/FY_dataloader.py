@@ -671,8 +671,10 @@ class FYNeighborhoodIndex:
             profile_ids_raw = profile_raw[:, 6]
         if raw.ndim != 2 or raw.shape[1] < 5:
             raise ValueError('FY physical data must have at least five columns')
+        observation_alt_range = (
+            config.get('observation_alt_range') or config.get('alt_range'))
         valid = (np.isfinite(raw[:, :5]).all(axis=1)
-                 & _altitude_mask(raw[:, 2], config.get('alt_range')))
+                 & _altitude_mask(raw[:, 2], observation_alt_range))
         if not np.isfinite(profile_ids_raw).all() or not np.array_equal(
                 profile_ids_raw, np.rint(profile_ids_raw)):
             raise ValueError('FY profile_id must contain finite integers')
@@ -962,8 +964,10 @@ class COSMICNeighborhoodIndex:
         profile_index_path = config.get('cosmic_profile_index_path')
         if raw.ndim != 2 or raw.shape[1] < 5:
             raise ValueError('COSMIC physical data must have at least five columns')
+        observation_alt_range = (
+            config.get('observation_alt_range') or config.get('alt_range'))
         valid = (np.isfinite(raw[:, :5]).all(axis=1)
-                 & _altitude_mask(raw[:, 2], config.get('alt_range')))
+                 & _altitude_mask(raw[:, 2], observation_alt_range))
         if profile_index_path:
             pid_raw, _ = _load_profile_index(profile_index_path, len(raw))
         elif raw.shape[1] > 5:

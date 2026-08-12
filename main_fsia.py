@@ -31,6 +31,42 @@ _M2W_BACKGROUND_SEMANTICS = 'qc_v2_date_blocked_train_only_m2w_200_500_v1'
 _M2W_GATE_BACKGROUND_SEMANTICS = (
     'qc_v2_date_blocked_train_only_m2w_200_500_continuous_trust_gate_v1')
 _M2V_DOMAIN_SEMANTICS = 'legacy_120_500_domain_v1'
+_M2W_HYBRID_DOMAIN_SEMANTICS = (
+    'hybrid_120_500_model_200_500_observation_v1')
+_M2W_HYBRID_RUN_SEMANTICS = (
+    'M2-W_continuous_physical_local_letkf_120_500_obs_200_500')
+_M2W_HYBRID_BACKGROUND_SEMANTICS = (
+    'qc_v2_date_blocked_train_only_m2w_120_500_obs_200_500_low_alt_prior_v1')
+_LOW_ALTITUDE_PRIOR_SEMANTICS = (
+    'soft_iri_background_zero_analysis_increment_v1')
+_HYBRID_LOW_ALTITUDE_LEVELS = tuple(float(value) for value in range(120, 200, 10))
+_DOMAIN_SPECS = {
+    _M2V_DOMAIN_SEMANTICS: {
+        'checkpoint_format_version': 12,
+        'alt_range': (120.0, 500.0),
+        'observation_alt_range': (120.0, 500.0),
+        'peak_search_alt_range': (120.0, 500.0),
+        'run_semantics': None,
+    },
+    _M2W_DOMAIN_SEMANTICS: {
+        'checkpoint_format_version': 13,
+        'alt_range': (200.0, 500.0),
+        'observation_alt_range': (200.0, 500.0),
+        'peak_search_alt_range': (200.0, 500.0),
+        'run_semantics': _M2W_RUN_SEMANTICS,
+    },
+    _M2W_HYBRID_DOMAIN_SEMANTICS: {
+        'checkpoint_format_version': 14,
+        'alt_range': (120.0, 500.0),
+        'observation_alt_range': (200.0, 500.0),
+        'peak_search_alt_range': (200.0, 500.0),
+        'run_semantics': _M2W_HYBRID_RUN_SEMANTICS,
+    },
+}
+_CLI_DOMAIN_SPECS = {
+    '200-500': _M2W_DOMAIN_SEMANTICS,
+    '120-500-obs-200-500': _M2W_HYBRID_DOMAIN_SEMANTICS,
+}
 _UNSET = object()
 _OLD_RUN65_CKPT = Path(current_dir) / 'checkpoints_fsia' / 'run65' / 'best_fsia_model.pth'
 
@@ -149,13 +185,13 @@ def main(eval_only=False, resume_ckpt=None, run_name=_DEFAULT_RUN_NAME,
          direction_loss=None,
          post_train_evaluation=True, date_blocked_split=None,
          date_split_manifest=None, source_mode_schedule=None,
-         analysis_epochs=None, max_train_batches=None,
+         analysis_epochs=None, background_epochs=None, max_train_batches=None,
          max_validation_batches=None,
          w_time_analysis=None, analysis_active_only_loss=None,
          analysis_exact_mode_loss=None, representativeness_kernel=None,
          background_only=False,
          include_isr_overlay=False, background_trust_gate=None,
-         model_domain=None):
+         model_domain=None, smoke_run=False):
     # ==================== 加载配置 ====================
     config = get_config_mdia()
     run_dir = _run_directory(run_name)
@@ -166,23 +202,31 @@ def main(eval_only=False, resume_ckpt=None, run_name=_DEFAULT_RUN_NAME,
             prior_config = json.load(stream).get('config', {})
     recorded_domain = prior_config.get(
         'model_domain_semantics', _M2V_DOMAIN_SEMANTICS)
-    if model_domain is None:
-        m2w_domain = recorded_domain == _M2W_DOMAIN_SEMANTICS
-    else:
-        m2w_domain = model_domain == '200-500'
-        if prior_config and m2w_domain != (
-                recorded_domain == _M2W_DOMAIN_SEMANTICS):
-            raise ValueError('model domain differs from the run manifest')
     model_domain_semantics = (
-        _M2W_DOMAIN_SEMANTICS if m2w_domain else _M2V_DOMAIN_SEMANTICS)
-    alt_range = (200.0, 500.0) if m2w_domain else tuple(
-        prior_config.get('alt_range', config['alt_range']))
-    checkpoint_format_version = (
-        13 if m2w_domain else int(prior_config.get(
-            'checkpoint_format_version', config['checkpoint_format_version'])))
-    run_semantics = (
-        _M2W_RUN_SEMANTICS if m2w_domain else prior_config.get(
-            'run_semantics', config['run_semantics']))
+        _CLI_DOMAIN_SPECS[model_domain] if model_domain is not None
+        else recorded_domain)
+    if model_domain_semantics not in _DOMAIN_SPECS:
+        raise ValueError(f'unsupported model-domain semantics: {model_domain_semantics}')
+    if prior_config and model_domain_semantics != recorded_domain:
+        raise ValueError('model domain differs from the run manifest')
+    domain_spec = _DOMAIN_SPECS[model_domain_semantics]
+    m2w_domain = model_domain_semantics != _M2V_DOMAIN_SEMANTICS
+    hybrid_domain = model_domain_semantics == _M2W_HYBRID_DOMAIN_SEMANTICS
+    if model_domain_semantics == _M2V_DOMAIN_SEMANTICS:
+        alt_range = tuple(prior_config.get('alt_range', config['alt_range']))
+        observation_alt_range = tuple(prior_config.get(
+            'observation_alt_range') or alt_range)
+        peak_search_alt_range = tuple(prior_config.get(
+            'peak_search_alt_range') or alt_range)
+        checkpoint_format_version = int(prior_config.get(
+            'checkpoint_format_version', config['checkpoint_format_version']))
+        run_semantics = prior_config.get('run_semantics', config['run_semantics'])
+    else:
+        alt_range = domain_spec['alt_range']
+        observation_alt_range = domain_spec['observation_alt_range']
+        peak_search_alt_range = domain_spec['peak_search_alt_range']
+        checkpoint_format_version = domain_spec['checkpoint_format_version']
+        run_semantics = domain_spec['run_semantics']
     basis_dim = int(
         prior_config.get('basis_dim', config['basis_dim'])
         if basis_dim is None else basis_dim)
@@ -248,6 +292,20 @@ def main(eval_only=False, resume_ckpt=None, run_name=_DEFAULT_RUN_NAME,
     analysis_epochs = int(
         prior_config.get('analysis_epochs', config['analysis_epochs'])
         if analysis_epochs is None else analysis_epochs)
+    background_epochs = int(
+        prior_config.get('background_epochs', config['background_epochs'])
+        if background_epochs is None else background_epochs)
+    if background_epochs <= 0 or analysis_epochs <= 0:
+        raise ValueError('background_epochs and analysis_epochs must be positive')
+    if smoke_run:
+        if max_train_batches not in (None, 1) or max_validation_batches not in (None, 1):
+            raise ValueError('v14 smoke runs require one train and one validation batch')
+        max_train_batches = 1
+        max_validation_batches = 1
+    if smoke_run and (background_epochs, analysis_epochs) != (1, 1):
+        raise ValueError('v14 smoke runs require exactly 1 Background and 1 Analysis epoch')
+    if hybrid_domain and not smoke_run and (background_epochs, analysis_epochs) != (5, 10):
+        raise ValueError('v14 full training requires exactly 5 Background and 10 Analysis epochs')
     max_validation_batches = (
         prior_config.get('max_validation_batches')
         if max_validation_batches is None else max_validation_batches)
@@ -289,6 +347,8 @@ def main(eval_only=False, resume_ckpt=None, run_name=_DEFAULT_RUN_NAME,
         if prior_config and background_trust_gate != recorded_gate:
             raise ValueError(
                 'background trust-gate flag differs from the run manifest')
+    if hybrid_domain and background_trust_gate:
+        raise ValueError('hybrid v14 training requires gate-off')
     if background_trust_gate:
         recorded_gate_semantics = prior_config.get(
             'background_trust_gate_semantics', _TRUST_GATE_SEMANTICS)
@@ -318,9 +378,10 @@ def main(eval_only=False, resume_ckpt=None, run_name=_DEFAULT_RUN_NAME,
         if not background_trust_gate:
             background_training_semantics = (
                 prior_background_semantics
-                or (_M2W_BACKGROUND_SEMANTICS if m2w_domain else config.get(
-                    'background_training_semantics',
-                    'qc_v2_date_blocked_train_only')))
+                or (_M2W_HYBRID_BACKGROUND_SEMANTICS if hybrid_domain
+                    else _M2W_BACKGROUND_SEMANTICS if m2w_domain
+                    else config.get('background_training_semantics',
+                                    'qc_v2_date_blocked_train_only')))
 
     # FSIA 检查点目录（每次新训练实验递增 run 编号）
     update_config_mdia(
@@ -332,6 +393,7 @@ def main(eval_only=False, resume_ckpt=None, run_name=_DEFAULT_RUN_NAME,
         background_seed_ckpt=background_seed,
         background_training_semantics=background_training_semantics,
         background_only=bool(background_only),
+        smoke_run=bool(smoke_run),
         background_trust_gate_enabled=bool(background_trust_gate),
         background_trust_gate_semantics=background_gate_semantics,
         basis_dim=basis_dim,
@@ -349,6 +411,7 @@ def main(eval_only=False, resume_ckpt=None, run_name=_DEFAULT_RUN_NAME,
         use_date_blocked_split=date_blocked_split,
         date_split_manifest=date_split_manifest,
         source_mode_schedule=source_mode_schedule,
+        background_epochs=background_epochs,
         analysis_epochs=analysis_epochs,
         max_train_batches=max_train_batches,
         max_validation_batches=max_validation_batches,
@@ -360,6 +423,17 @@ def main(eval_only=False, resume_ckpt=None, run_name=_DEFAULT_RUN_NAME,
         include_isr_overlay=bool(include_isr_overlay),
         model_domain_semantics=model_domain_semantics,
         alt_range=alt_range,
+        observation_alt_range=observation_alt_range,
+        peak_search_alt_range=peak_search_alt_range,
+        low_altitude_prior_range=(120.0, 200.0) if hybrid_domain else None,
+        low_altitude_prior_semantics=(
+            _LOW_ALTITUDE_PRIOR_SEMANTICS if hybrid_domain else None),
+        low_altitude_anchor_levels_km=(
+            _HYBRID_LOW_ALTITUDE_LEVELS if hybrid_domain else ()),
+        low_altitude_anchor_profiles_per_source=(16 if hybrid_domain else 0),
+        w_low_altitude_background_iri=(0.02 if hybrid_domain else 0.0),
+        w_low_altitude_analysis_increment=(0.01 if hybrid_domain else 0.0),
+        low_altitude_gradient_ratio_max=(0.25 if hybrid_domain else 0.25),
         checkpoint_format_version=checkpoint_format_version,
         run_semantics=run_semantics,
         checkpoint_selection_semantics=(
@@ -639,8 +713,11 @@ if __name__ == '__main__':
         default=None,
         help='enable the fixed low-altitude nighttime Background trust gate')
     parser.add_argument(
-        '--model-domain', choices=('200-500',), default=None,
-        help='explicitly enable the M2-W strict 200-500 km model domain')
+        '--model-domain', choices=tuple(_CLI_DOMAIN_SPECS), default=None,
+        help=('M2-W domain preset: strict 200-500 km, or 120-500 km model '
+              'with 200-500 km satellite observations'))
+    parser.add_argument('--smoke', action='store_true',
+                        help='strict v14 1+1 epoch preflight; not eligible for evaluation')
     parser.add_argument(
         '--covariance-moment', action='store_true', default=None,
         help='train Analysis with profile-balanced covariance moment matching')
@@ -669,6 +746,9 @@ if __name__ == '__main__':
             'random profiles, repeating M10/M01/M11/M11 batches, or '
             'profile-balanced M10/M01/M11/M11 across Analysis epochs'))
     parser.add_argument(
+        '--background-epochs', type=int, default=None,
+        help='number of Background epochs (default: configured value)')
+    parser.add_argument(
         '--analysis-epochs', type=int, default=None,
         help='number of Analysis epochs (default: configured value)')
     parser.add_argument(
@@ -694,6 +774,10 @@ if __name__ == '__main__':
         help='final-only: load ISR for profile overlays after model freeze')
     args = parser.parse_args()
     run_dir = _run_directory(args.run_name)
+    if not args.eval_only and not args.resume and run_dir.exists():
+        raise FileExistsError(
+            'new training requires a nonexistent run directory; '
+            f'use a new --run-name: {run_dir}')
     run_dir.mkdir(parents=True, exist_ok=True)
     log_path = run_dir / 'training.log'
     stale_preflight_log = (
@@ -729,6 +813,7 @@ if __name__ == '__main__':
                 date_split_manifest=args.date_split_manifest,
                 source_mode_schedule=args.source_mode_schedule,
                 analysis_epochs=args.analysis_epochs,
+                background_epochs=args.background_epochs,
                 max_train_batches=args.max_train_batches,
                 max_validation_batches=args.max_validation_batches,
                 w_time_analysis=args.w_time_analysis,
@@ -740,4 +825,5 @@ if __name__ == '__main__':
                 include_isr_overlay=args.include_isr_overlay,
                 background_trust_gate=args.background_trust_gate,
                 model_domain=args.model_domain,
+                smoke_run=args.smoke,
             )

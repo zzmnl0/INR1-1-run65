@@ -19,6 +19,7 @@ FSIA-INR × ISR 独立验证主程序
 """
 
 import argparse
+import hashlib
 import os
 import sys
 import csv
@@ -125,6 +126,16 @@ def _analysis_common_mask(observation, analysis, raw_iri):
     """Pair M11 and Raw IRI without consulting diagnostic M00 values."""
     return (np.isfinite(observation) & (observation > 0)
             & np.isfinite(analysis) & np.isfinite(raw_iri))
+
+
+def _candidate_baseline_common_mask(observation, candidate, baseline,
+                                    altitude=None):
+    """Strict public mask for a paired 200--500 km checkpoint comparison."""
+    mask = (np.isfinite(observation) & (observation > 0)
+            & np.isfinite(candidate) & np.isfinite(baseline))
+    if altitude is not None:
+        mask &= (np.asarray(altitude) >= 200.0) & (np.asarray(altitude) <= 500.0)
+    return mask
 
 
 def _compute_stratified_metrics(alt_all, lon_all, rh_all,
@@ -274,6 +285,36 @@ def _json_safe(value):
     return value
 
 
+def _sha256(path):
+    digest = hashlib.sha256()
+    with open(path, 'rb') as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b''):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _checkpoint_evaluation_contract(checkpoint, config):
+    checkpoint = os.path.abspath(checkpoint)
+    run_dir = os.path.dirname(checkpoint)
+    with open(os.path.join(run_dir, 'run_manifest.json'), encoding='utf-8') as stream:
+        manifest = json.load(stream)
+    with open(os.path.join(run_dir, 'training_summary.json'), encoding='utf-8') as stream:
+        summary = json.load(stream)
+    return {
+        'path': checkpoint,
+        'sha256': _sha256(checkpoint),
+        'checkpoint_format_version': int(config['checkpoint_format_version']),
+        'model_domain_semantics': config['model_domain_semantics'],
+        'model_alt_range_km': list(map(float, config['alt_range'])),
+        'observation_alt_range_km': list(map(float, (
+            config.get('observation_alt_range') or config['alt_range']))),
+        'peak_search_alt_range_km': list(map(float, (
+            config.get('peak_search_alt_range') or config['alt_range']))),
+        'date_split': summary.get('date_split'),
+        'input_data_identity': manifest.get('data_identity'),
+    }
+
+
 def _resolve_checkpoint(config, mdia_cfg):
     """Resolve the configured or CLI-provided checkpoint."""
     if config['checkpoint_path'] is not None:
@@ -290,6 +331,8 @@ def _require_m2v_config(config):
     contracts = {
         'legacy_120_500_domain_v1': (12, (120.0, 500.0)),
         'strict_200_500_domain_v1': (13, (200.0, 500.0)),
+        'hybrid_120_500_model_200_500_observation_v1': (
+            14, (120.0, 500.0)),
     }
     if domain not in contracts:
         raise ValueError(f'unsupported FSIA model domain: {domain}')
@@ -325,6 +368,23 @@ def _require_m2v_config(config):
         'alt_range', alt_range if domain == 'legacy_120_500_domain_v1' else ())
     if tuple(map(float, configured_alt_range)) != alt_range:
         mismatches['alt_range'] = (config.get('alt_range'), alt_range)
+    expected_observation = (
+        (200.0, 500.0) if domain in (
+            'strict_200_500_domain_v1',
+            'hybrid_120_500_model_200_500_observation_v1') else alt_range)
+    expected_peak = expected_observation
+    observation = tuple(map(float, config.get('observation_alt_range') or alt_range))
+    peak = tuple(map(float, config.get('peak_search_alt_range') or alt_range))
+    if observation != expected_observation:
+        mismatches['observation_alt_range'] = (observation, expected_observation)
+    if peak != expected_peak:
+        mismatches['peak_search_alt_range'] = (peak, expected_peak)
+    if domain == 'hybrid_120_500_model_200_500_observation_v1':
+        if config.get('background_trust_gate_enabled', False):
+            mismatches['background_trust_gate_enabled'] = (True, False)
+        if config.get('background_seed_ckpt') is not None:
+            mismatches['background_seed_ckpt'] = (
+                config.get('background_seed_ckpt'), None)
     if config.get('background_trust_gate_enabled', False):
         if config.get('background_trust_gate_semantics') != (
                 'fixed_altitude_localtime_dip_smoothstep_v1'):
@@ -377,7 +437,7 @@ def _load_state_compat(model, state_dict):
             print(msg)
 
 
-def _load_model_and_managers(config, device):
+def _load_model_and_managers(config, device, checkpoint=None):
     """加载模型、SpaceWeatherManager 和 IRIPeakManager。
 
     Returns:
@@ -389,13 +449,14 @@ def _load_model_and_managers(config, device):
 
     cfg = dict(get_config_mdia())
     model_type = config.get('model_type', 'mdia')
-    ckpt = _resolve_checkpoint(config, cfg)
+    ckpt = checkpoint or _resolve_checkpoint(config, cfg)
     if model_type == 'fsia':
         from inr_modules.mdia.checkpoint_io import (
             allowed_observation_profile_ids,
             load_fsia_analysis_checkpoint,
         )
         model, cfg, _, _ = load_fsia_analysis_checkpoint(ckpt, device)
+        _require_m2v_config(cfg)
         allowed_profile_ids = allowed_observation_profile_ids(cfg)
         model_name = 'FSIA-INR'
     else:
@@ -461,7 +522,8 @@ def _load_model_and_managers(config, device):
 def _process_station(station_name, day_records, model, sw_manager,
                      start_unix, config, device, model_name='MDIA-INR',
                      iri_peak_manager=None, fy_nb_index=None,
-                     cosmic_nb_index=None, allowed_profile_ids=None):
+                     cosmic_nb_index=None, allowed_profile_ids=None,
+                     baseline_context=None):
     """
     对单个站点的所有 DayRecord 完成推理、指标计算、绘图。
 
@@ -497,10 +559,18 @@ def _process_station(station_name, day_records, model, sw_manager,
     all_bkg_strat_alt = []
     all_bkg_strat_lon = []
     all_bkg_strat_rh = []
+    all_cache_obs = []; all_cache_m11 = []; all_cache_m00 = []; all_cache_iri = []
+    all_cache_alt = []; all_cache_unit = []; all_cache_key = []
+    all_pair_obs = []; all_pair_candidate_m11 = []; all_pair_candidate_m00 = []
+    all_pair_candidate_iri = []; all_pair_baseline_m11 = []
+    all_pair_baseline_m00 = []; all_pair_baseline_iri = []
+    all_pair_alt = []; all_pair_unit = []; all_pair_key = []
 
     all_isr_nmf2 = []; all_model_nmf2 = []; all_bkg_nmf2 = []; all_iri_nmf2 = []
     all_isr_hmf2 = []; all_model_hmf2 = []; all_bkg_hmf2 = []; all_iri_hmf2 = []
     all_peak_lt    = []   # 对应 peak 时刻的地方时
+    all_peak_unit = []
+    all_baseline_nmf2 = []; all_baseline_hmf2 = []
     n_valid_days   = 0
 
     for rec in day_records:
@@ -516,6 +586,19 @@ def _process_station(station_name, day_records, model, sw_manager,
             cosmic_nb_index=cosmic_nb_index,
             allowed_profile_ids=allowed_profile_ids,
         )
+        baseline_pred = baseline_bkg = baseline_iri = None
+        if baseline_context is not None:
+            (baseline_model, baseline_sw, _, baseline_iri_peak,
+             baseline_fy_index, baseline_cosmic_index,
+             baseline_allowed) = baseline_context
+            baseline_pred, baseline_bkg, baseline_iri = query_model_grid(
+                baseline_model, baseline_sw, rec, start_unix, device,
+                batch_size=config['batch_size'],
+                iri_peak_manager=baseline_iri_peak,
+                fy_nb_index=baseline_fy_index,
+                cosmic_nb_index=baseline_cosmic_index,
+                allowed_profile_ids=baseline_allowed,
+            )
 
         # 六列时间-高度对比图。
         fname = f'{station_name}_{date_str}_comparison.png'
@@ -540,6 +623,7 @@ def _process_station(station_name, day_records, model, sw_manager,
         lon_2d_r = (geo_lon_2d_r if geo_lon_2d_r is not None else
                     np.full((n_alt_r, n_time_r), rec.get('lon', 0.0),
                             dtype=np.float32))
+        ts_2d_r = np.tile(rec['ts_1d'][None, :], (n_alt_r, 1))
 
         # Analysis有效性只与M11和Raw IRI对齐；M00使用独立诊断掩码。
         common_mask = _analysis_common_mask(isr_l, ne_pred, ne_iri)
@@ -552,9 +636,40 @@ def _process_station(station_name, day_records, model, sw_manager,
             all_strat_alt.append(alts_2d_r[common_mask].astype(np.float32))
             all_strat_lon.append(lon_2d_r[common_mask].astype(np.float32))
             all_strat_rh.append(rh_2d_r[common_mask].astype(np.float32))
-            ts_2d_r = np.tile(rec['ts_1d'][None, :], (n_alt_r, 1))
             all_strat_unit.append(ts_2d_r[common_mask].astype(np.int64))
+            all_cache_obs.append(isr_l[common_mask])
+            all_cache_m11.append(ne_pred[common_mask])
+            all_cache_m00.append(ne_bkg[common_mask])
+            all_cache_iri.append(ne_iri[common_mask])
+            all_cache_alt.append(alts_2d_r[common_mask].astype(np.float32))
+            all_cache_unit.append(ts_2d_r[common_mask].astype(np.int64))
+            all_cache_key.append(np.asarray([
+                f'{station_name}|{date_str}|{int(timestamp)}|{altitude:.3f}'
+                for timestamp, altitude in zip(
+                    ts_2d_r[common_mask], alts_2d_r[common_mask])
+            ]))
             # ────────────────────────────────────────────────
+
+        if baseline_pred is not None:
+            paired_mask = _candidate_baseline_common_mask(
+                isr_l, ne_pred, baseline_pred, alts_2d_r)
+            if paired_mask.sum() >= 10:
+                all_pair_obs.append(isr_l[paired_mask])
+                all_pair_candidate_m11.append(ne_pred[paired_mask])
+                all_pair_candidate_m00.append(ne_bkg[paired_mask])
+                all_pair_candidate_iri.append(ne_iri[paired_mask])
+                all_pair_alt.append(alts_2d_r[paired_mask].astype(np.float32))
+                all_pair_unit.append(ts_2d_r[paired_mask].astype(np.int64))
+                all_pair_key.append(np.asarray([
+                    f'{station_name}|{date_str}|{int(timestamp)}|{altitude:.3f}'
+                    for timestamp, altitude in zip(
+                        ts_2d_r[paired_mask], alts_2d_r[paired_mask])
+                ]))
+                # Store the candidate and baseline fields side-by-side for a
+                # reproducible public-mask comparison without re-reading ISR.
+                all_pair_baseline_m11.append(baseline_pred[paired_mask])
+                all_pair_baseline_m00.append(baseline_bkg[paired_mask])
+                all_pair_baseline_iri.append(baseline_iri[paired_mask])
 
         background_mask = _valid_pair(isr_l, ne_bkg)
         if background_mask.sum() >= 10:
@@ -568,15 +683,19 @@ def _process_station(station_name, day_records, model, sw_manager,
                 rh_2d_r[background_mask].astype(np.float32))
 
         # NmF2 / hmF2
-        peak_min = float(config.get('alt_range', (120.0, 500.0))[0])
+        peak_range = tuple(map(float, config.get('peak_search_alt_range')
+                               or config.get('alt_range', (120.0, 500.0))))
         isr_nmf2, isr_hmf2 = extract_isr_nmf2_hmf2(
-            rec['ne_2d'], rec['alt_1d'], f2_alt_min=peak_min)
+            rec['ne_2d'], rec['alt_1d'], peak_search_alt_range=peak_range)
         model_nmf2, model_hmf2 = extract_model_nmf2_hmf2(
-            ne_pred, rec['alt_1d'], f2_alt_min=peak_min)
+            ne_pred, rec['alt_1d'], peak_search_alt_range=peak_range)
         bkg_nmf2, bkg_hmf2 = extract_model_nmf2_hmf2(
-            ne_bkg, rec['alt_1d'], f2_alt_min=peak_min)
+            ne_bkg, rec['alt_1d'], peak_search_alt_range=peak_range)
         iri_nmf2, iri_hmf2 = extract_model_nmf2_hmf2(
-            ne_iri, rec['alt_1d'], f2_alt_min=peak_min)
+            ne_iri, rec['alt_1d'], peak_search_alt_range=peak_range)
+        if baseline_pred is not None:
+            baseline_nmf2, baseline_hmf2 = extract_model_nmf2_hmf2(
+                baseline_pred, rec['alt_1d'], peak_search_alt_range=peak_range)
 
         all_isr_nmf2.append(isr_nmf2);   all_model_nmf2.append(model_nmf2)
         all_bkg_nmf2.append(bkg_nmf2)
@@ -584,6 +703,9 @@ def _process_station(station_name, day_records, model, sw_manager,
         all_isr_hmf2.append(isr_hmf2);   all_model_hmf2.append(model_hmf2)
         all_bkg_hmf2.append(bkg_hmf2)
         all_iri_hmf2.append(iri_hmf2)
+        if baseline_pred is not None:
+            all_baseline_nmf2.append(baseline_nmf2)
+            all_baseline_hmf2.append(baseline_hmf2)
 
         # 每个时刻的 LT Unix 时间戳（供 peak-vs-LT 连续时间轴使用）
         lon_1d = float(rec.get('lon') or 0.0)
@@ -591,6 +713,7 @@ def _process_station(station_name, day_records, model, sw_manager,
             lon_1d = float(np.nanmedian(rec['geo_lon_2d'][0, :]))
         lt_unix_1d = rec['ts_1d'] + lon_1d / 15.0 * 3600.0   # UT → LT (Unix s)
         all_peak_lt.append(lt_unix_1d.astype(np.float64))
+        all_peak_unit.append(rec['ts_1d'].astype(np.int64))
 
         n_valid_days += 1
 
@@ -728,6 +851,67 @@ def _process_station(station_name, day_records, model, sw_manager,
     overall_bootstrap = (paired_group_bootstrap(
         obs_cat, pred_cat, iri_cat, unit_cat, replicates=2000, seed=42)
         if all_strat_alt else None)
+    paired_comparison = None
+    if all_pair_obs:
+        pair_obs = np.concatenate(all_pair_obs).astype(np.float64)
+        pair_candidate = np.concatenate(all_pair_candidate_m11).astype(np.float64)
+        pair_baseline = np.concatenate(all_pair_baseline_m11).astype(np.float64)
+        pair_units = np.concatenate(all_pair_unit)
+        paired_comparison = {
+            'public_mask': 'finite(obs,candidate,baseline) & 200<=alt<=500',
+            'point_metrics': {
+                'candidate_m11': _point_stats([pair_obs], [pair_candidate]),
+                'baseline_m11': _point_stats([pair_obs], [pair_baseline]),
+            },
+            'm11_candidate_vs_baseline_bootstrap': paired_group_bootstrap(
+                pair_obs, pair_candidate, pair_baseline, pair_units,
+                replicates=2000, seed=42),
+        }
+    peak_comparison = None
+    if all_baseline_nmf2 and all_peak_unit:
+        peak_units = np.concatenate(all_peak_unit)
+        candidate_nmf2 = np.concatenate(all_model_nmf2)
+        baseline_nmf2 = np.concatenate(all_baseline_nmf2)
+        candidate_hmf2 = np.concatenate(all_model_hmf2)
+        baseline_hmf2 = np.concatenate(all_baseline_hmf2)
+        nmf2_mask = (np.isfinite(isr_nmf2_cat) & np.isfinite(candidate_nmf2)
+                     & np.isfinite(baseline_nmf2))
+        hmf2_mask = (np.isfinite(isr_hmf2_cat) & np.isfinite(candidate_hmf2)
+                     & np.isfinite(baseline_hmf2))
+        peak_comparison = {
+            'NmF2_m11_candidate_vs_baseline_bootstrap': paired_group_bootstrap(
+                isr_nmf2_cat[nmf2_mask], candidate_nmf2[nmf2_mask],
+                baseline_nmf2[nmf2_mask], peak_units[nmf2_mask],
+                replicates=2000, seed=42),
+            'hmF2_m11_candidate_vs_baseline_bootstrap': paired_group_bootstrap(
+                isr_hmf2_cat[hmf2_mask], candidate_hmf2[hmf2_mask],
+                baseline_hmf2[hmf2_mask], peak_units[hmf2_mask],
+                replicates=2000, seed=42),
+        }
+    low_altitude_diagnostic = None
+    if (float(config.get('alt_range', (200.0, 500.0))[0]) < 200.0
+            and all_cache_obs):
+        low_obs = np.concatenate(all_cache_obs).astype(np.float64)
+        low_m11 = np.concatenate(all_cache_m11).astype(np.float64)
+        low_m00 = np.concatenate(all_cache_m00).astype(np.float64)
+        low_iri = np.concatenate(all_cache_iri).astype(np.float64)
+        low_altitude = np.concatenate(all_cache_alt).astype(np.float64)
+        low_units = np.concatenate(all_cache_unit)
+        low_mask = ((low_altitude >= 120.0) & (low_altitude < 200.0)
+                    & np.isfinite(low_obs) & np.isfinite(low_m11)
+                    & np.isfinite(low_m00) & np.isfinite(low_iri))
+        if (low_mask.sum() >= 2
+                and np.unique(low_units[low_mask]).size >= 2):
+            low_altitude_diagnostic = {
+                'altitude_range_km': [120.0, 200.0],
+                'models': ['M11', 'M00', 'Raw IRI'],
+                'm11_vs_m00_bootstrap': paired_group_bootstrap(
+                    low_obs[low_mask], low_m11[low_mask], low_m00[low_mask],
+                    low_units[low_mask], replicates=2000, seed=42),
+                'm11_vs_raw_iri_bootstrap': paired_group_bootstrap(
+                    low_obs[low_mask], low_m11[low_mask], low_iri[low_mask],
+                    low_units[low_mask], replicates=2000, seed=42),
+            }
     report = {
         'station':    station_name,
         'model_name': model_name,
@@ -744,11 +928,42 @@ def _process_station(station_name, day_records, model, sw_manager,
             overall_bootstrap is not None
             and overall_bootstrap['decision'] == 'pass'),
         'stratified_m11_vs_raw_iri_bootstrap': strat_bootstrap,
+        'candidate_vs_baseline': paired_comparison,
+        'peak_candidate_vs_baseline': peak_comparison,
+        'low_altitude_diagnostic': low_altitude_diagnostic,
+        'evaluation_cache': {
+            'keys': np.concatenate(all_cache_key).tolist() if all_cache_key else [],
+            'observation_log10': np.concatenate(all_cache_obs).tolist() if all_cache_obs else [],
+            'M11_log10': np.concatenate(all_cache_m11).tolist() if all_cache_m11 else [],
+            'M00_log10': np.concatenate(all_cache_m00).tolist() if all_cache_m00 else [],
+            'IRI_log10': np.concatenate(all_cache_iri).tolist() if all_cache_iri else [],
+            'altitude_km': np.concatenate(all_cache_alt).tolist() if all_cache_alt else [],
+            'unit_id': np.concatenate(all_cache_unit).tolist() if all_cache_unit else [],
+        },
+        'paired_evaluation_cache': {
+            'keys': np.concatenate(all_pair_key).tolist() if all_pair_key else [],
+            'observation_log10': np.concatenate(all_pair_obs).tolist() if all_pair_obs else [],
+            'candidate_M11_log10': np.concatenate(all_pair_candidate_m11).tolist()
+            if all_pair_candidate_m11 else [],
+            'candidate_M00_log10': np.concatenate(all_pair_candidate_m00).tolist()
+            if all_pair_candidate_m00 else [],
+            'candidate_IRI_log10': np.concatenate(all_pair_candidate_iri).tolist()
+            if all_pair_candidate_iri else [],
+            'baseline_M11_log10': np.concatenate(all_pair_baseline_m11).tolist()
+            if all_pair_baseline_m11 else [],
+            'baseline_M00_log10': np.concatenate(all_pair_baseline_m00).tolist()
+            if all_pair_baseline_m00 else [],
+            'baseline_IRI_log10': np.concatenate(all_pair_baseline_iri).tolist()
+            if all_pair_baseline_iri else [],
+            'altitude_km': np.concatenate(all_pair_alt).tolist() if all_pair_alt else [],
+            'unit_id': np.concatenate(all_pair_unit).tolist() if all_pair_unit else [],
+        },
     }
     return report
 
 
-def main(checkpoint=None, save_dir=None, preflight_only=False):
+def main(checkpoint=None, save_dir=None, preflight_only=False,
+         baseline_checkpoint=None):
     if checkpoint is not None:
         CONFIG['checkpoint_path'] = checkpoint
     if save_dir is not None:
@@ -773,7 +988,34 @@ def main(checkpoint=None, save_dir=None, preflight_only=False):
     (model, sw_manager, mdia_cfg, model_name, iri_peak_manager,
      fy_nb_index, cosmic_nb_index, allowed_profile_ids) = \
         _load_model_and_managers(CONFIG, device)
+    candidate_contract = _checkpoint_evaluation_contract(
+        CONFIG['checkpoint_path'], mdia_cfg)
+    baseline_context = None
+    baseline_contract = None
+    if baseline_checkpoint is not None:
+        (baseline_model, baseline_sw, baseline_cfg, _, baseline_iri_peak,
+         baseline_fy_index, baseline_cosmic_index,
+         baseline_allowed) = _load_model_and_managers(
+            CONFIG, device, checkpoint=baseline_checkpoint)
+        baseline_contract = _checkpoint_evaluation_contract(
+            baseline_checkpoint, baseline_cfg)
+        if (candidate_contract['observation_alt_range_km'] !=
+                baseline_contract['observation_alt_range_km']
+                or candidate_contract['peak_search_alt_range_km'] !=
+                baseline_contract['peak_search_alt_range_km']):
+            raise ValueError(
+                'paired ISR checkpoints require equal observation and peak domains')
+        for key in ('fy_path', 'cosmic_path', 'sw_path', 'iri_hmf2_path',
+                    'iri_nmf2_path'):
+            if mdia_cfg.get(key) != baseline_cfg.get(key):
+                raise ValueError(
+                    f'paired ISR checkpoints require identical input {key}')
+        baseline_context = (
+            baseline_model, baseline_sw, baseline_cfg, baseline_iri_peak,
+            baseline_fy_index, baseline_cosmic_index, baseline_allowed)
     CONFIG['alt_min'], CONFIG['alt_max'] = map(float, mdia_cfg['alt_range'])
+    CONFIG['peak_search_alt_range'] = tuple(map(float, (
+        mdia_cfg.get('peak_search_alt_range') or mdia_cfg['alt_range'])))
     print(f'[main] 模型类型: {model_name}')
 
     if preflight_only:
@@ -810,6 +1052,7 @@ def main(checkpoint=None, save_dir=None, preflight_only=False):
                 fy_nb_index=fy_nb_index,
                 cosmic_nb_index=cosmic_nb_index,
                 allowed_profile_ids=allowed_profile_ids,
+                baseline_context=baseline_context,
             )
             if rep is not None:
                 station_reports.append(rep)
@@ -841,6 +1084,7 @@ def main(checkpoint=None, save_dir=None, preflight_only=False):
                 fy_nb_index=fy_nb_index,
                 cosmic_nb_index=cosmic_nb_index,
                 allowed_profile_ids=allowed_profile_ids,
+                baseline_context=baseline_context,
             )
             if rep is not None:
                 station_reports.append(rep)
@@ -850,6 +1094,73 @@ def main(checkpoint=None, save_dir=None, preflight_only=False):
         from isr_evaluation.plots import save_metrics_report
         report_path = os.path.join(save_dir, 'isr_validation_report.txt')
         save_metrics_report(station_reports, report_path)
+        evaluation_cache = {
+            'station': [], 'key': [], 'observation_log10': [], 'M11_log10': [],
+            'M00_log10': [], 'IRI_log10': [], 'altitude_km': [], 'unit_id': [],
+        }
+        for report in station_reports:
+            cache = report.pop('evaluation_cache', {})
+            count = len(cache.get('keys', []))
+            evaluation_cache['station'].extend([report['station']] * count)
+            for output_key, cache_key in (
+                    ('key', 'keys'), ('observation_log10', 'observation_log10'),
+                    ('M11_log10', 'M11_log10'), ('M00_log10', 'M00_log10'),
+                    ('IRI_log10', 'IRI_log10'), ('altitude_km', 'altitude_km'),
+                    ('unit_id', 'unit_id')):
+                evaluation_cache[output_key].extend(cache.get(cache_key, []))
+        np.savez_compressed(
+            os.path.join(save_dir, 'isr_evaluation_cache.npz'),
+            **{key: np.asarray(value) for key, value in evaluation_cache.items()})
+        paired_cache = {
+            'station': [], 'key': [], 'observation_log10': [],
+            'candidate_M11_log10': [], 'candidate_M00_log10': [],
+            'candidate_IRI_log10': [], 'baseline_M11_log10': [],
+            'baseline_M00_log10': [], 'baseline_IRI_log10': [],
+            'altitude_km': [], 'unit_id': [],
+        }
+        for report in station_reports:
+            cache = report.pop('paired_evaluation_cache', {})
+            count = len(cache.get('keys', []))
+            paired_cache['station'].extend([report['station']] * count)
+            for output_key, cache_key in (
+                    ('key', 'keys'), ('observation_log10', 'observation_log10'),
+                    ('candidate_M11_log10', 'candidate_M11_log10'),
+                    ('candidate_M00_log10', 'candidate_M00_log10'),
+                    ('candidate_IRI_log10', 'candidate_IRI_log10'),
+                    ('baseline_M11_log10', 'baseline_M11_log10'),
+                    ('baseline_M00_log10', 'baseline_M00_log10'),
+                    ('baseline_IRI_log10', 'baseline_IRI_log10'),
+                    ('altitude_km', 'altitude_km'), ('unit_id', 'unit_id')):
+                paired_cache[output_key].extend(cache.get(cache_key, []))
+        if paired_cache['key']:
+            np.savez_compressed(
+                os.path.join(save_dir, 'isr_paired_evaluation_cache.npz'),
+                **{key: np.asarray(value) for key, value in paired_cache.items()})
+        contract = {
+            'schema_version': 14,
+            'candidate_checkpoint': candidate_contract,
+            'baseline_checkpoint': baseline_contract,
+            'token_partitions': ['train', 'development'],
+            'quality_thresholds': {'finite_observation_required': True},
+            'peak_search': {
+                'alt_range_km': list(CONFIG['peak_search_alt_range']),
+                'coarse_step_km': 10.0,
+                'fine_step_km': 1.0,
+                'semantics': 'independent_coarse_10km_then_fine_1km_per_field_v1',
+            },
+            'paired_bootstrap': {
+                'replicates': 2000, 'seed': 42,
+                'group': 'station_time_profile',
+                'positive_deltas': [
+                    'CCC_candidate_minus_baseline',
+                    'RMSE_baseline_minus_candidate',
+                    'PearsonR_candidate_minus_baseline'],
+            },
+        }
+        with open(os.path.join(save_dir, 'isr_evaluation_contract.json'),
+                  'w', encoding='utf-8') as stream:
+            json.dump(_json_safe(contract), stream,
+                      ensure_ascii=False, indent=2, allow_nan=False)
         with open(os.path.join(save_dir, 'isr_validation_report.json'),
                   'w', encoding='utf-8') as stream:
             json.dump(_json_safe(station_reports), stream,
@@ -897,9 +1208,12 @@ if __name__ == '__main__':
         '--checkpoint', required=True,
         help='必需：完整Analysis阶段的FSIA v12/v13 checkpoint路径')
     parser.add_argument('--save-dir', default=None)
+    parser.add_argument('--baseline-checkpoint', default=None,
+                        help='paired M2-W baseline evaluated on the same ISR loop')
     parser.add_argument(
         '--preflight-only', action='store_true',
         help='只加载并核验模型与配置，不读取ISR数据或生成评估输出')
     args = parser.parse_args()
     main(checkpoint=args.checkpoint, save_dir=args.save_dir,
-         preflight_only=args.preflight_only)
+         preflight_only=args.preflight_only,
+         baseline_checkpoint=args.baseline_checkpoint)

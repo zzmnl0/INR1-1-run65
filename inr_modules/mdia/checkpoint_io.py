@@ -9,8 +9,56 @@ import torch
 
 
 _DOMAIN_CONTRACTS = {
-    'legacy_120_500_domain_v1': (12, (120.0, 500.0)),
-    'strict_200_500_domain_v1': (13, (200.0, 500.0)),
+    'legacy_120_500_domain_v1': {
+        'format_version': 12,
+        'alt_range': (120.0, 500.0),
+        'observation_alt_range': (120.0, 500.0),
+        'peak_search_alt_range': (120.0, 500.0),
+    },
+    'strict_200_500_domain_v1': {
+        'format_version': 13,
+        'alt_range': (200.0, 500.0),
+        'observation_alt_range': (200.0, 500.0),
+        'peak_search_alt_range': (200.0, 500.0),
+    },
+    'hybrid_120_500_model_200_500_observation_v1': {
+        'format_version': 14,
+        'alt_range': (120.0, 500.0),
+        'observation_alt_range': (200.0, 500.0),
+        'peak_search_alt_range': (200.0, 500.0),
+    },
+}
+
+_HYBRID_LOW_ALTITUDE_PROTOCOL = {
+    'low_altitude_prior_range': (120.0, 200.0),
+    'low_altitude_prior_semantics': (
+        'soft_iri_background_zero_analysis_increment_v1'),
+    'low_altitude_anchor_levels_km': tuple(float(value) for value in range(120, 200, 10)),
+    'low_altitude_anchor_profiles_per_source': 16,
+    'w_low_altitude_background_iri': 0.02,
+    'w_low_altitude_analysis_increment': 0.01,
+}
+
+_HYBRID_TRAINING_PROTOCOL = {
+    'seed': 42,
+    'smoke_run': False,
+    'background_epochs': 5,
+    'analysis_epochs': 10,
+    'background_trust_gate_enabled': False,
+    'low_altitude_anchor_selection': (
+        'first_16_unique_profiles_per_source_per_batch_first_record_v1'),
+    'low_altitude_anchor_grouping': 'source_profile_id_profile_balanced_v1',
+    'low_altitude_neighbor_profile_semantics': (
+        'synthetic_query_no_target_profile_exclusion_v1'),
+    'low_altitude_prior_protocol': {
+        'range_km': [120.0, 200.0],
+        'semantics': 'soft_iri_background_zero_analysis_increment_v1',
+        'anchor_levels_km': [float(value) for value in range(120, 200, 10)],
+        'profiles_per_source': 16,
+        'background_weight': 0.02,
+        'analysis_weight': 0.01,
+        'gradient_ratio_max': 0.25,
+    },
 }
 
 
@@ -59,10 +107,17 @@ def load_fsia_analysis_checkpoint(checkpoint, device='cpu', require_domain=None,
         raise ValueError(f'checkpoint domain is {domain}, expected {require_domain}')
     if domain not in _DOMAIN_CONTRACTS:
         raise ValueError(f'unsupported model-domain semantics: {domain}')
-    expected_version, expected_alt_range = _DOMAIN_CONTRACTS[domain]
+    domain_contract = _DOMAIN_CONTRACTS[domain]
+    expected_version = domain_contract['format_version']
+    expected_alt_range = domain_contract['alt_range']
     actual_alt_range = tuple(map(float, config.get(
         'alt_range', expected_alt_range if domain ==
         'legacy_120_500_domain_v1' else ())))
+    legacy_domain_fields = domain != 'hybrid_120_500_model_200_500_observation_v1'
+    actual_observation_alt_range = tuple(map(float, config.get(
+        'observation_alt_range', expected_alt_range if legacy_domain_fields else ())))
+    actual_peak_search_alt_range = tuple(map(float, config.get(
+        'peak_search_alt_range', expected_alt_range if legacy_domain_fields else ())))
     required = {
         'checkpoint_format_version': expected_version,
         'basis_dim': 64,
@@ -91,6 +146,14 @@ def load_fsia_analysis_checkpoint(checkpoint, device='cpu', require_domain=None,
     }
     if actual_alt_range != expected_alt_range:
         mismatches['alt_range'] = (actual_alt_range, expected_alt_range)
+    if actual_observation_alt_range != domain_contract['observation_alt_range']:
+        mismatches['observation_alt_range'] = (
+            actual_observation_alt_range,
+            domain_contract['observation_alt_range'])
+    if actual_peak_search_alt_range != domain_contract['peak_search_alt_range']:
+        mismatches['peak_search_alt_range'] = (
+            actual_peak_search_alt_range,
+            domain_contract['peak_search_alt_range'])
     if config.get('representativeness_kernel_path') is not None:
         mismatches['representativeness_kernel_path'] = (
             config.get('representativeness_kernel_path'), None)
@@ -100,6 +163,46 @@ def load_fsia_analysis_checkpoint(checkpoint, device='cpu', require_domain=None,
         mismatches['background_trust_gate_semantics'] = (
             config.get('background_trust_gate_semantics'),
             'fixed_altitude_localtime_dip_smoothstep_v1')
+    if domain == 'hybrid_120_500_model_200_500_observation_v1':
+        if config.get('background_trust_gate_enabled', False):
+            mismatches['background_trust_gate_enabled'] = (True, False)
+        for key, expected in _HYBRID_LOW_ALTITUDE_PROTOCOL.items():
+            actual = config.get(key)
+            if isinstance(expected, tuple):
+                actual = tuple(map(float, actual or ()))
+            elif isinstance(expected, float):
+                actual = None if actual is None else float(actual)
+            if (not np.isclose(actual, expected)
+                    if isinstance(expected, float) else actual != expected):
+                mismatches[key] = (actual, expected)
+        for key, expected in {
+                'background_epochs': 5,
+                'analysis_epochs': 10,
+                'seed': 42,
+                'background_seed_ckpt': None,
+        }.items():
+            if config.get(key) != expected:
+                mismatches[key] = (config.get(key), expected)
+        if config.get('smoke_run', False) or summary.get('smoke_run', False):
+            mismatches['smoke_run'] = (True, False)
+        expected_summary = {
+            'checkpoint_format_version': 14,
+            'model_domain_semantics': domain,
+            'alt_range': [120.0, 500.0],
+            'observation_alt_range': [200.0, 500.0],
+            'peak_search_alt_range': [200.0, 500.0],
+            'training_protocol': _HYBRID_TRAINING_PROTOCOL,
+        }
+        for key, expected in expected_summary.items():
+            if summary.get(key) != expected:
+                mismatches[f'training_summary.{key}'] = (
+                    summary.get(key), expected)
+        if not isinstance(manifest.get('data_identity'), dict):
+            mismatches['manifest.data_identity'] = (
+                manifest.get('data_identity'), 'non-empty object')
+        if not summary.get('date_split'):
+            mismatches['training_summary.date_split'] = (
+                summary.get('date_split'), 'required')
     if mismatches:
         raise ValueError(f'FSIA checkpoint contract mismatch: {mismatches}')
 
@@ -133,7 +236,8 @@ def allowed_observation_profile_ids(config):
         mode='observation', val_days=[],
         bin_size_hours=config['bin_size_hours'], use_memmap=True,
         val_ratio=None, split_seed=config['seed'],
-        split_days={'observation': days}, alt_range=config['alt_range'])
+        split_days={'observation': days}, alt_range=(
+            config.get('observation_alt_range') or config['alt_range']))
     fy = FY3D_Dataset(
         config['fy_path'], profile_path=config.get('fy_profile_path'),
         profile_index_path=config.get('fy_profile_index_path'), **common)

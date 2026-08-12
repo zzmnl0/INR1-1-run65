@@ -15,8 +15,14 @@ from inr_modules.mdia.checkpoint_io import load_fsia_analysis_checkpoint
 from inr_modules.mdia.train_fsia import (
     _architecture_signature,
     _development_selection_key,
+    _low_altitude_anchor_batch,
+    _validate_hybrid_low_altitude_protocol,
 )
-from isr_evaluation.main_isr_eval import _analysis_common_mask
+from isr_evaluation.main_isr_eval import (
+    _analysis_common_mask,
+    _candidate_baseline_common_mask,
+)
+from isr_evaluation.metrics import extract_grid_nmf2_hmf2
 from select_m2w_background import select_background
 
 
@@ -195,3 +201,97 @@ def test_background_candidate_tie_prefers_gate_off(tmp_path):
         run_dirs.append(run_dir)
     result = select_background(run_dirs)
     assert result['winner']['trust_gate_enabled'] is False
+
+
+def _v14_config(**overrides):
+    config = {
+        'model_domain_semantics': 'hybrid_120_500_model_200_500_observation_v1',
+        'checkpoint_format_version': 14,
+        'alt_range': (120.0, 500.0),
+        'observation_alt_range': (200.0, 500.0),
+        'peak_search_alt_range': (200.0, 500.0),
+        'low_altitude_prior_range': (120.0, 200.0),
+        'low_altitude_prior_semantics':
+        'soft_iri_background_zero_analysis_increment_v1',
+        'low_altitude_anchor_levels_km': tuple(range(120, 200, 10)),
+        'low_altitude_anchor_profiles_per_source': 16,
+        'w_low_altitude_background_iri': 0.02,
+        'w_low_altitude_analysis_increment': 0.01,
+        'low_altitude_gradient_ratio_max': 0.25,
+        'background_epochs': 5,
+        'analysis_epochs': 10,
+        'seed': 42,
+        'basis_dim': 64,
+        'enkf_n_members': 8,
+        'r_mode': 'global',
+        'background_trust_gate_enabled': False,
+    }
+    config.update(overrides)
+    return config
+
+
+def test_v14_domain_contract_and_observation_tokens(tmp_path):
+    _validate_hybrid_low_altitude_protocol(_v14_config())
+    with pytest.raises(ValueError, match='contract mismatch'):
+        _validate_hybrid_low_altitude_protocol(
+            _v14_config(observation_alt_range=(120.0, 500.0)))
+    data_path, index_path = _write_profiles(tmp_path)
+    index = FYNeighborhoodIndex(str(data_path), {
+        **_v14_config(), 'fy_profile_index_path': str(index_path),
+        'neighbor_directory_semantics': 'token_exact_positive_support_v1',
+        'physical_localization_space_km': 1800.0,
+        'physical_localization_time_hours': 1.5,
+    })
+    assert np.all((index.token_coords[:, 2] >= 200.0)
+                  & (index.token_coords[:, 2] <= 500.0))
+    strict = FY3D_Dataset(
+        str(data_path), mode='train', val_days=[], val_ratio=None,
+        profile_index_path=str(index_path), alt_range=(200.0, 500.0))
+    hybrid_observation = FY3D_Dataset(
+        str(data_path), mode='train', val_days=[], val_ratio=None,
+        profile_index_path=str(index_path),
+        alt_range=_v14_config()['observation_alt_range'])
+    assert np.array_equal(strict.profile_ids, hybrid_observation.profile_ids)
+    assert np.array_equal(strict.data[strict.selected_indices],
+                          hybrid_observation.data[hybrid_observation.selected_indices])
+
+
+def test_v14_anchors_are_deterministic_bounded_and_low_only():
+    config = _v14_config()
+    coords = np.asarray([
+        [1, 2, 250, 10], [3, 4, 300, 20], [5, 6, 400, 30],
+        [7, 8, 450, 40], [1, 2, 260, 11],
+    ], dtype=np.float32)
+    import torch
+    coordinate_tensor = torch.from_numpy(coords)
+    profiles = torch.tensor([9, 8, 7, 6, 9])
+    anchors, groups = _low_altitude_anchor_batch(
+        coordinate_tensor, profiles, config)
+    repeated, repeated_groups = _low_altitude_anchor_batch(
+        coordinate_tensor, profiles, config)
+    assert torch.equal(anchors, repeated) and torch.equal(groups, repeated_groups)
+    assert len(torch.unique(groups)) == 4
+    assert len(anchors) == 4 * 8
+    assert set(anchors[:, 2].tolist()) == set(range(120, 200, 10))
+
+
+def test_v14_dual_peak_excludes_150_km_peak():
+    altitude = np.arange(120.0, 501.0, 1.0)
+    field = np.maximum(
+        20.0 - ((altitude - 150.0) / 5.0) ** 2,
+        12.0 - ((altitude - 310.0) / 8.0) ** 2,
+    )[:, None]
+    nmf2, hmf2 = extract_grid_nmf2_hmf2(field, altitude, (200.0, 500.0))
+    assert np.isfinite(nmf2[0]) and hmf2[0] == 310.0
+
+
+def test_candidate_baseline_mask_requires_both_models_and_200_500():
+    observation = np.asarray([1.0, 2.0, 3.0, 4.0])
+    candidate = np.asarray([1.0, 2.0, np.nan, 4.0])
+    baseline = np.asarray([1.0, np.nan, 3.0, 4.0])
+    altitude = np.asarray([199.9, 250.0, 300.0, 500.0])
+    assert np.array_equal(
+        _candidate_baseline_common_mask(
+            observation, candidate, baseline, altitude),
+        np.asarray([False, False, False, True]),
+    )

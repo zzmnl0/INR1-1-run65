@@ -975,7 +975,8 @@ def _partition_loader(dataset_class, config, split_days, partition):
         val_ratio=None,
         split_seed=config["seed"],
         split_days=split_days,
-        alt_range=config.get("alt_range"),
+        alt_range=(config.get("observation_alt_range")
+                   or config.get("alt_range")),
         **kwargs,
     )
     sampler = ProfileTimeBinSampler(
@@ -1041,6 +1042,8 @@ def main():
     domain_contracts = {
         "legacy_120_500_domain_v1": (12, (120.0, 500.0)),
         "strict_200_500_domain_v1": (13, (200.0, 500.0)),
+        "hybrid_120_500_model_200_500_observation_v1": (
+            14, (120.0, 500.0)),
     }
     if domain not in domain_contracts:
         raise ValueError(f"unsupported model-domain semantics: {domain}")
@@ -1074,6 +1077,14 @@ def main():
         raise ValueError("M2-V development evaluation forbids representativeness tables")
     if tuple(map(float, config.get("alt_range", ()))) != expected_alt_range:
         raise ValueError("development evaluator model-domain bounds mismatch")
+    expected_observation_range = (
+        (200.0, 500.0)
+        if domain in ("strict_200_500_domain_v1",
+                      "hybrid_120_500_model_200_500_observation_v1")
+        else expected_alt_range)
+    if tuple(map(float, config.get("observation_alt_range")
+                       or expected_alt_range)) != expected_observation_range:
+        raise ValueError("development evaluator observation-domain bounds mismatch")
     date_manifest_path = Path(config["date_split_manifest"])
     if not date_manifest_path.is_absolute():
         date_manifest_path = ROOT / date_manifest_path

@@ -39,7 +39,45 @@ def _ccc(obs, pred):
 
 # ==================== NmF2 / hmF2 ====================
 
-def extract_isr_nmf2_hmf2(ne_2d, alt_1d, f2_alt_min=150.0):
+def extract_grid_nmf2_hmf2(log10_grid, alt_1d, peak_search_alt_range,
+                            coarse_step_km=10.0, fine_step_km=1.0):
+    """Independently search each field on a 10-km then 1-km F2 grid."""
+    lower, upper = map(float, peak_search_alt_range)
+    if not np.isfinite([lower, upper]).all() or lower >= upper:
+        raise ValueError('peak_search_alt_range must be finite and increasing')
+    altitude = np.asarray(alt_1d, dtype=np.float64)
+    values = np.asarray(log10_grid, dtype=np.float64)
+    if values.ndim != 2 or values.shape[0] != altitude.size:
+        raise ValueError('grid altitude dimension does not match alt_1d')
+    coarse = np.arange(lower, upper + 0.5 * coarse_step_km,
+                       coarse_step_km, dtype=np.float64)
+    nmf2 = np.full(values.shape[1], np.nan, dtype=np.float32)
+    hmf2 = np.full(values.shape[1], np.nan, dtype=np.float32)
+    for time_index in range(values.shape[1]):
+        column = values[:, time_index]
+        valid = np.isfinite(altitude) & np.isfinite(column)
+        if valid.sum() < 2:
+            continue
+        x, y = altitude[valid], column[valid]
+        order = np.argsort(x, kind='stable')
+        x, y = x[order], y[order]
+        in_domain = (x >= lower) & (x <= upper)
+        if in_domain.sum() < 2:
+            continue
+        x, y = x[in_domain], y[in_domain]
+        coarse_peak = coarse[int(np.argmax(np.interp(coarse, x, y)))]
+        fine = np.arange(max(lower, coarse_peak - 10.0),
+                         min(upper, coarse_peak + 10.0) + 0.5 * fine_step_km,
+                         fine_step_km, dtype=np.float64)
+        fine_values = np.interp(fine, x, y)
+        peak_index = int(np.argmax(fine_values))
+        nmf2[time_index], hmf2[time_index] = (
+            fine_values[peak_index], fine[peak_index])
+    return nmf2, hmf2
+
+
+def extract_isr_nmf2_hmf2(ne_2d, alt_1d, f2_alt_min=150.0,
+                           f2_alt_max=None, peak_search_alt_range=None):
     """
     从 ISR ne_2d (m⁻³) 中逐时刻提取 NmF2 和 hmF2。
 
@@ -52,25 +90,16 @@ def extract_isr_nmf2_hmf2(ne_2d, alt_1d, f2_alt_min=150.0):
         nmf2_log10: [n_time] float32 — log10(NmF2)
         hmf2_km:    [n_time] float32 — hmF2 (km)
     """
-    n_alt, n_time = ne_2d.shape
-    f2_mask = alt_1d >= f2_alt_min
-
-    nmf2_log10 = np.full(n_time, np.nan, dtype=np.float32)
-    hmf2_km    = np.full(n_time, np.nan, dtype=np.float32)
-
-    grid_f2 = ne_2d.copy().astype(np.float64)
-    grid_f2[~f2_mask, :] = np.nan
-    grid_f2[grid_f2 <= 0] = np.nan
-
-    for t in range(n_time):
-        col = grid_f2[:, t]
-        if not np.isfinite(col).any():
-            continue
-        idx = np.nanargmax(col)
-        nmf2_log10[t] = np.log10(col[idx])
-        hmf2_km[t]    = alt_1d[idx]
-
-    return nmf2_log10, hmf2_km
+    if peak_search_alt_range is None:
+        peak_search_alt_range = (
+            f2_alt_min,
+            float(np.nanmax(alt_1d)) if f2_alt_max is None else f2_alt_max,
+        )
+    grid = np.asarray(ne_2d, dtype=np.float64).copy()
+    grid[grid <= 0] = np.nan
+    with np.errstate(divide='ignore', invalid='ignore'):
+        grid = np.log10(grid)
+    return extract_grid_nmf2_hmf2(grid, alt_1d, peak_search_alt_range)
 
 
 def compute_nmf2_hmf2_metrics(isr_nmf2_log10, isr_hmf2_km,

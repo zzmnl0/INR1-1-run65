@@ -12,6 +12,7 @@ from inr_modules.mdia.sliding_dataset import (
     observation_query_coverage,
     query_observation_payload,
 )
+from isr_evaluation.metrics import extract_grid_nmf2_hmf2
 
 # 地理坐标降级模式：不再使用 aacgmv2；coords 保持 [M, 4]（Lat_geo, Lon_geo, Alt, Time）
 
@@ -84,6 +85,9 @@ def query_model_grid(model, sw_manager, day_record, start_unix, device,
         np.isfinite(alts_2d) &
         np.isfinite(rh_2d)
     )
+    model_lower = float(getattr(model, 'alt_min', -np.inf))
+    model_upper = float(getattr(model, 'alt_max', np.inf))
+    valid_mask &= ((alts_2d >= model_lower) & (alts_2d <= model_upper))
 
     ne_pred_log10 = np.full((n_alt, n_time), np.nan, dtype=np.float32)
     ne_bkg_log10 = np.full((n_alt, n_time), np.nan, dtype=np.float32)
@@ -155,7 +159,8 @@ def query_model_grid(model, sw_manager, day_record, start_unix, device,
     return ne_pred_log10, ne_bkg_log10, ne_iri_log10
 
 
-def extract_model_nmf2_hmf2(ne_log10_grid, alt_1d, f2_alt_min=150.0):
+def extract_model_nmf2_hmf2(ne_log10_grid, alt_1d, f2_alt_min=150.0,
+                            f2_alt_max=None, peak_search_alt_range=None):
     """
     从 log10(Ne) 网格中逐时刻提取 NmF2 和 hmF2。
 
@@ -170,21 +175,10 @@ def extract_model_nmf2_hmf2(ne_log10_grid, alt_1d, f2_alt_min=150.0):
         nmf2_log10: [n_time] float32 — log10(NmF2)，无峰时为 NaN
         hmf2_km:    [n_time] float32 — hmF2 (km)，无峰时为 NaN
     """
-    n_alt, n_time = ne_log10_grid.shape
-    f2_mask = alt_1d >= f2_alt_min               # [n_alt] bool
-
-    nmf2_log10 = np.full(n_time, np.nan, dtype=np.float32)
-    hmf2_km    = np.full(n_time, np.nan, dtype=np.float32)
-
-    grid_f2 = ne_log10_grid.copy()
-    grid_f2[~f2_mask, :] = np.nan               # 屏蔽 F2 层以下
-
-    for t in range(n_time):
-        col = grid_f2[:, t]
-        if not np.isfinite(col).any():
-            continue
-        idx = np.nanargmax(col)
-        nmf2_log10[t] = col[idx]
-        hmf2_km[t]    = alt_1d[idx]
-
-    return nmf2_log10, hmf2_km
+    if peak_search_alt_range is None:
+        peak_search_alt_range = (
+            f2_alt_min,
+            float(np.nanmax(alt_1d)) if f2_alt_max is None else f2_alt_max,
+        )
+    return extract_grid_nmf2_hmf2(
+        ne_log10_grid, alt_1d, peak_search_alt_range)

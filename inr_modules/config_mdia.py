@@ -47,6 +47,7 @@ CONFIG_MDIA = {
     'checkpoint_selection_semantics': 'mean_profile_rmse_v1',
     'background_training_semantics': 'qc_v2_date_blocked_train_only',
     'background_only': False,
+    'smoke_run': False,
     # Fixed physical trust gate for the new QC-v2 Background run.  It is
     # deliberately disabled by default so historical manifests keep their
     # exact M2-V behavior unless the CLI enables it explicitly.
@@ -72,7 +73,19 @@ CONFIG_MDIA = {
     'bin_size_hours': 0.5,
 
     # ==================== 物理参数 ====================
+    # ``alt_range`` is the coordinate domain of the INR.  Newer run
+    # contracts may intentionally keep the satellite-observation and F2-peak
+    # domains narrower; ``None`` preserves legacy single-domain behaviour.
     'alt_range': (120.0, 500.0),
+    'observation_alt_range': None,
+    'peak_search_alt_range': None,
+    'low_altitude_prior_range': None,
+    'low_altitude_prior_semantics': None,
+    'low_altitude_anchor_levels_km': (),
+    'low_altitude_anchor_profiles_per_source': 0,
+    'w_low_altitude_background_iri': 0.0,
+    'w_low_altitude_analysis_increment': 0.0,
+    'low_altitude_gradient_ratio_max': 0.25,
 
     # ==================== 时序学习参数 ====================
     # seq_len 控制 SpaceWeatherManager 的历史窗口
@@ -257,7 +270,8 @@ def print_config_mdia():
                     'iri_proxy_path', 'sw_path',
                     'giro_hmf2_path', 'giro_nmf2_path', 'save_dir'],
         '数据规格': ['total_hours', 'start_date_str', 'bin_size_hours'],
-        '物理参数': ['alt_range'],
+        '物理参数': ['alt_range', 'observation_alt_range',
+                    'peak_search_alt_range', 'low_altitude_prior_range'],
         '时序参数': ['seq_len', 'tau_kp_init', 'tau_solar_init'],
         'SIREN 架构': ['basis_dim', 'enkf_n_members', 'enkf_pert_hidden',
                        'enkf_anomaly_parameterization', 'enkf_scale_init',
@@ -280,6 +294,8 @@ def print_config_mdia():
                        'background_trust_gate_dip_core',
                        'background_trust_gate_dip_transition'],
         '损失权重': ['huber_delta', 'w_iri', 'w_increment',
+                    'w_low_altitude_background_iri',
+                    'w_low_altitude_analysis_increment',
                     'w_vertical_background', 'w_time_background',
                     'w_vertical_analysis', 'w_time_analysis',
                     'analysis_loss_active_only',

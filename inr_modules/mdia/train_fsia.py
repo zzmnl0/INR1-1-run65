@@ -58,6 +58,104 @@ from data_managers.FY_dataloader import (
 )
 
 
+_HYBRID_DOMAIN_SEMANTICS = 'hybrid_120_500_model_200_500_observation_v1'
+_HYBRID_LOW_ALTITUDE_PRIOR_SEMANTICS = (
+    'soft_iri_background_zero_analysis_increment_v1')
+_HYBRID_LOW_ALTITUDE_LEVELS = tuple(float(value) for value in range(120, 200, 10))
+
+
+def _observation_alt_range(config):
+    """Satellite targets and tokens; legacy contracts reuse model bounds."""
+    return tuple(map(float, config.get('observation_alt_range')
+                     or config.get('alt_range', (120.0, 500.0))))
+
+
+def _low_altitude_prior_protocol(config):
+    """Return the immutable v14 low-altitude protocol, if enabled."""
+    if config.get('model_domain_semantics') != _HYBRID_DOMAIN_SEMANTICS:
+        return None
+    return {
+        'range_km': [float(value) for value in config['low_altitude_prior_range']],
+        'semantics': config['low_altitude_prior_semantics'],
+        'anchor_levels_km': [
+            float(value) for value in config['low_altitude_anchor_levels_km']],
+        'profiles_per_source': int(
+            config['low_altitude_anchor_profiles_per_source']),
+        'background_weight': float(config['w_low_altitude_background_iri']),
+        'analysis_weight': float(config['w_low_altitude_analysis_increment']),
+        'gradient_ratio_max': float(config['low_altitude_gradient_ratio_max']),
+    }
+
+
+def _training_protocol_signature(config):
+    """Return the immutable v14 training protocol stored with resumable state."""
+    if config.get('model_domain_semantics') != _HYBRID_DOMAIN_SEMANTICS:
+        return None
+    return {
+        'seed': int(config['seed']),
+        'smoke_run': bool(config.get('smoke_run', False)),
+        'background_epochs': int(config['background_epochs']),
+        'analysis_epochs': int(config['analysis_epochs']),
+        'background_trust_gate_enabled': bool(
+            config.get('background_trust_gate_enabled', False)),
+        'low_altitude_anchor_selection': (
+            'first_16_unique_profiles_per_source_per_batch_first_record_v1'),
+        'low_altitude_anchor_grouping': 'source_profile_id_profile_balanced_v1',
+        'low_altitude_neighbor_profile_semantics': (
+            'synthetic_query_no_target_profile_exclusion_v1'),
+        'low_altitude_prior_protocol': _low_altitude_prior_protocol(config),
+    }
+
+
+def _validate_hybrid_low_altitude_protocol(config):
+    """Reject every v14 run that could silently change the prior experiment."""
+    if config.get('model_domain_semantics') != _HYBRID_DOMAIN_SEMANTICS:
+        return
+    smoke = bool(config.get('smoke_run', False))
+    expected = {
+        'alt_range': (120.0, 500.0),
+        'observation_alt_range': (200.0, 500.0),
+        'peak_search_alt_range': (200.0, 500.0),
+        'low_altitude_prior_range': (120.0, 200.0),
+        'low_altitude_prior_semantics': _HYBRID_LOW_ALTITUDE_PRIOR_SEMANTICS,
+        'low_altitude_anchor_levels_km': _HYBRID_LOW_ALTITUDE_LEVELS,
+        'low_altitude_anchor_profiles_per_source': 16,
+        'w_low_altitude_background_iri': 0.02,
+        'w_low_altitude_analysis_increment': 0.01,
+        'background_epochs': 1 if smoke else 5,
+        'analysis_epochs': 1 if smoke else 10,
+        'seed': 42,
+        'basis_dim': 64,
+        'enkf_n_members': 8,
+        'r_mode': 'global',
+    }
+    mismatches = {}
+    for key, expected_value in expected.items():
+        actual = config.get(key)
+        if isinstance(expected_value, tuple):
+            actual = tuple(map(float, actual or ()))
+        elif isinstance(expected_value, float):
+            actual = None if actual is None else float(actual)
+        if (not np.isclose(actual, expected_value)
+                if isinstance(expected_value, float) else actual != expected_value):
+            mismatches[key] = (actual, expected_value)
+    if config.get('background_trust_gate_enabled', False):
+        mismatches['background_trust_gate_enabled'] = (True, False)
+    if int(config.get('checkpoint_format_version', 0)) != 14:
+        mismatches['checkpoint_format_version'] = (
+            config.get('checkpoint_format_version'), 14)
+    if smoke and (int(config.get('background_epochs', 0)),
+                  int(config.get('analysis_epochs', 0))) != (1, 1):
+        mismatches['smoke_epochs'] = (
+            (config.get('background_epochs'), config.get('analysis_epochs')),
+            (1, 1))
+    if not 0.0 < float(config.get('low_altitude_gradient_ratio_max', 0.0)) <= 0.25:
+        mismatches['low_altitude_gradient_ratio_max'] = (
+            config.get('low_altitude_gradient_ratio_max'), '(0, 0.25]')
+    if mismatches:
+        raise ValueError(f'v14 low-altitude prior contract mismatch: {mismatches}')
+
+
 def _sha256_file(path):
     digest = hashlib.sha256()
     with open(path, 'rb') as stream:
@@ -227,6 +325,11 @@ def _record_resolved_training_config(config, covariance_strata):
             'resolved_representativeness_kernel'),
         'covariance_strata': covariance_strata,
         'date_split': config.get('resolved_date_split'),
+        'model_domain_data_summary': config.get('model_domain_data_summary'),
+        'low_altitude_prior_protocol': _low_altitude_prior_protocol(config),
+        'training_protocol': _training_protocol_signature(config),
+        'low_altitude_anchor_history': config.get(
+            'low_altitude_anchor_history', []),
         'background_training_semantics': config.get(
             'background_training_semantics'),
         'background_loader_schedule': config.get('background_loader_schedule'),
@@ -252,6 +355,68 @@ def _unpack_source_batch(batch, device):
     data, _, profile_ids = batch
     data = data.to(device, non_blocking=True)
     return data[:, :4], data[:, 4:5], profile_ids.to(device, non_blocking=True)
+
+
+def _low_altitude_anchor_batch(coords, profile_ids, config):
+    """Build deterministic IRI-only anchors from batch coordinates, never targets."""
+    levels = tuple(config.get('low_altitude_anchor_levels_km', ()))
+    maximum = int(config.get('low_altitude_anchor_profiles_per_source', 0))
+    if not levels or maximum <= 0 or len(coords) == 0:
+        empty_coords = coords.new_empty((0, 4))
+        return empty_coords, profile_ids.new_empty((0,))
+    # The batch sampler is randomized; preserve its first appearance order so
+    # the anchor selection is deterministic for a fixed sampler state.
+    chosen, seen = [], set()
+    for index, profile_id in enumerate(profile_ids.detach().reshape(-1).cpu().tolist()):
+        profile_id = int(profile_id)
+        if profile_id not in seen:
+            seen.add(profile_id)
+            chosen.append(index)
+            if len(chosen) == maximum:
+                break
+    if not chosen:
+        empty_coords = coords.new_empty((0, 4))
+        return empty_coords, profile_ids.new_empty((0,))
+    selected = torch.as_tensor(chosen, device=coords.device, dtype=torch.long)
+    base = coords.index_select(0, selected).repeat_interleave(len(levels), dim=0).clone()
+    base[:, 2] = torch.as_tensor(levels, device=coords.device,
+                                 dtype=coords.dtype).repeat(len(chosen))
+    groups = profile_ids.reshape(-1).index_select(0, selected).repeat_interleave(
+        len(levels))
+    return base, groups
+
+
+def _low_altitude_prior_loss(model, batch_processor, coords, profile_ids,
+                             source, stage, config, sw_manager,
+                             iri_peak_manager, allowed_profile_ids):
+    """Profile-balanced v14 IRI anchor, separate from satellite observation loss."""
+    anchors, groups = _low_altitude_anchor_batch(coords, profile_ids, config)
+    if len(anchors) == 0:
+        zero = coords.sum() * 0.0
+        return zero, {'profiles': 0, 'points': 0, 'active_fraction': 0.0}
+    sw_seq = sw_manager.get_drivers_sequence(anchors[:, 3])
+    iri_peak = (iri_peak_manager.get_iri_peak(anchors)
+                if iri_peak_manager is not None else None)
+    prediction, _, _, _, extras = _source_forward(
+        model, batch_processor, anchors, sw_seq, iri_peak, stage, source,
+        # Synthetic/no query profile IDs retain all train-only observation
+        # tokens for the Analysis zero-increment anchor.
+        None, False, config, iri_peak_manager, allowed_profile_ids)
+    delta = float(config.get('huber_delta', 0.2))
+    if stage == 'background':
+        values = extras['ne_bkg']
+        target = extras['ne_iri'].detach()
+    else:
+        values = prediction - extras['ne_bkg']
+        target = torch.zeros_like(values)
+    loss = profile_huber_loss(values, target, groups, delta=delta)
+    active = (_analysis_active_mask(extras) if stage == 'analysis'
+              else torch.ones(len(anchors), device=anchors.device, dtype=torch.bool))
+    return loss, {
+        'profiles': int(torch.unique(groups).numel()),
+        'points': int(len(anchors)),
+        'active_fraction': float(active.float().mean().detach().cpu()),
+    }
 
 
 def _apply_source_dropout(fy_obs, cosmic_obs, profile_ids, probabilities):
@@ -1029,13 +1194,21 @@ def train_one_epoch(model, train_loader, batch_processor, optimizer, device,
         'fy_direction_m10', 'fy_direction_m01', 'fy_direction_m11',
         'cosmic_direction_m10', 'cosmic_direction_m01',
         'cosmic_direction_m11',
-        'iri', 'increment',
+        'iri', 'increment', 'low_altitude',
         'vertical', 'time', 'weighted_iri', 'weighted_increment',
+        'weighted_low_altitude', 'low_altitude_profiles',
+        'low_altitude_points', 'low_altitude_active_fraction',
+        'fy_low_altitude', 'cosmic_low_altitude',
+        'fy_low_altitude_profiles', 'cosmic_low_altitude_profiles',
+        'fy_low_altitude_points', 'cosmic_low_altitude_points',
+        'fy_low_altitude_active_fraction',
+        'cosmic_low_altitude_active_fraction',
         'weighted_covariance', 'weighted_direction', 'weighted_gram',
         'weighted_vertical', 'weighted_time',
         'gradient_ratio', 'gradient_ratio_covariance',
         'gradient_ratio_direction', 'gradient_ratio_iri',
-        'gradient_ratio_increment', 'gradient_ratio_vertical',
+        'gradient_ratio_increment', 'gradient_ratio_low_altitude',
+        'gradient_ratio_vertical',
         'gradient_ratio_time', 'gradient_ratio_gram',
         'gradient_ratio_fy_m10', 'gradient_ratio_fy_m01',
         'gradient_ratio_fy_m11', 'gradient_ratio_cosmic_m10',
@@ -1221,6 +1394,26 @@ def train_one_epoch(model, train_loader, batch_processor, optimizer, device,
                 model, batch_processor, sw_manager, iri_peak_manager,
                 coords, profile_ids, stage, config, allowed_profile_ids)
 
+            low_altitude_loss = observation_loss.new_zeros(())
+            low_altitude_details = {
+                'FY': {'profiles': 0, 'points': 0, 'active_fraction': 0.0},
+                'COSMIC': {'profiles': 0, 'points': 0, 'active_fraction': 0.0},
+            }
+            fy_low_altitude = observation_loss.new_zeros(())
+            cosmic_low_altitude = observation_loss.new_zeros(())
+            if _low_altitude_prior_protocol(config) is not None:
+                fy_low_altitude, low_altitude_details['FY'] = (
+                    _low_altitude_prior_loss(
+                        model, batch_processor, coords, profile_ids, 'FY', stage,
+                        config, sw_manager, iri_peak_manager, allowed_profile_ids))
+                cosmic_low_altitude, low_altitude_details['COSMIC'] = (
+                    _low_altitude_prior_loss(
+                        model, batch_processor, cosmic_coords, cosmic_ids,
+                        'COSMIC', stage, config, sw_manager, iri_peak_manager,
+                        allowed_profile_ids))
+                low_altitude_loss = 0.5 * (
+                    fy_low_altitude + cosmic_low_altitude)
+
             if stage == 'background':
                 fy_iri = profile_huber_loss(
                     fy_extras['ne_bkg'], fy_extras['ne_iri'],
@@ -1232,12 +1425,16 @@ def train_one_epoch(model, train_loader, batch_processor, optimizer, device,
                 increment_loss = observation_loss.new_zeros(())
                 weighted_iri = config.get('w_iri', 0.02) * iri_loss
                 weighted_increment = increment_loss
+                weighted_low_altitude = (
+                    config.get('w_low_altitude_background_iri', 0.0)
+                    * low_altitude_loss)
                 weighted_vertical = (
                     config.get('w_vertical_background', 0.02) * vertical_loss)
                 weighted_time = (
                     config.get('w_time_background', 0.01) * time_loss)
                 auxiliary_loss = (
-                    weighted_iri + weighted_vertical + weighted_time
+                    weighted_iri + weighted_low_altitude + weighted_vertical
+                    + weighted_time
                 )
             else:
                 fy_increment = F.smooth_l1_loss(
@@ -1251,12 +1448,16 @@ def train_one_epoch(model, train_loader, batch_processor, optimizer, device,
                 weighted_iri = iri_loss
                 weighted_increment = (
                     config.get('w_increment', 0.01) * increment_loss)
+                weighted_low_altitude = (
+                    config.get('w_low_altitude_analysis_increment', 0.0)
+                    * low_altitude_loss)
                 weighted_vertical = (
                     config.get('w_vertical_analysis', 0.05) * vertical_loss)
                 weighted_time = (
                     config.get('w_time_analysis', 0.02) * time_loss)
                 auxiliary_loss = (
-                    weighted_increment + weighted_vertical + weighted_time
+                    weighted_increment + weighted_low_altitude + weighted_vertical
+                    + weighted_time
                 )
             total_loss = data_loss + auxiliary_loss
             auxiliary_components = {
@@ -1265,6 +1466,7 @@ def train_one_epoch(model, train_loader, batch_processor, optimizer, device,
                 'gram': weighted_gram,
                 'iri': weighted_iri,
                 'increment': weighted_increment,
+                'low_altitude': weighted_low_altitude,
                 'vertical': weighted_vertical,
                 'time': weighted_time,
             }
@@ -1291,7 +1493,7 @@ def train_one_epoch(model, train_loader, batch_processor, optimizer, device,
                 auxiliary_loss + weighted_covariance + weighted_direction
                 + weighted_gram,
                 [p for p in decoder.parameters() if p.requires_grad],
-                gradient_components if max_train_batches is not None else None)
+                gradient_components)
             audited_batches += 1
         else:
             observation_grad = total_loss.new_zeros(())
@@ -1361,6 +1563,19 @@ def train_one_epoch(model, train_loader, batch_processor, optimizer, device,
                 'direction_weighted': weighted_direction.item(),
                 'iri_raw': iri_loss.item(),
                 'increment_raw': increment_loss.item(),
+                'low_altitude_raw': low_altitude_loss.item(),
+                'low_altitude_weighted': weighted_low_altitude.item(),
+                'fy_low_altitude_raw': fy_low_altitude.item(),
+                'cosmic_low_altitude_raw': cosmic_low_altitude.item(),
+                'fy_low_altitude_profiles': low_altitude_details['FY']['profiles'],
+                'cosmic_low_altitude_profiles': (
+                    low_altitude_details['COSMIC']['profiles']),
+                'fy_low_altitude_points': low_altitude_details['FY']['points'],
+                'cosmic_low_altitude_points': low_altitude_details['COSMIC']['points'],
+                'fy_low_altitude_active_fraction': (
+                    low_altitude_details['FY']['active_fraction']),
+                'cosmic_low_altitude_active_fraction': (
+                    low_altitude_details['COSMIC']['active_fraction']),
                 'vertical_raw': vertical_loss.item(),
                 'time_raw': time_loss.item(),
                 'iri_weighted': weighted_iri.item(),
@@ -1454,6 +1669,22 @@ def train_one_epoch(model, train_loader, batch_processor, optimizer, device,
         stats['cosmic_active_fraction'] += cosmic_active.float().mean().item()
         stats['iri'] += iri_loss.item()
         stats['increment'] += increment_loss.item()
+        stats['low_altitude'] += low_altitude_loss.item()
+        stats['weighted_low_altitude'] += weighted_low_altitude.item()
+        stats['fy_low_altitude'] += fy_low_altitude.item()
+        stats['cosmic_low_altitude'] += cosmic_low_altitude.item()
+        for source, prefix in (('FY', 'fy'), ('COSMIC', 'cosmic')):
+            details = low_altitude_details[source]
+            stats[f'{prefix}_low_altitude_profiles'] += details['profiles']
+            stats[f'{prefix}_low_altitude_points'] += details['points']
+            stats[f'{prefix}_low_altitude_active_fraction'] += (
+                details['active_fraction'])
+        stats['low_altitude_profiles'] += sum(
+            details['profiles'] for details in low_altitude_details.values())
+        stats['low_altitude_points'] += sum(
+            details['points'] for details in low_altitude_details.values())
+        stats['low_altitude_active_fraction'] += 0.5 * sum(
+            details['active_fraction'] for details in low_altitude_details.values())
         stats['vertical'] += vertical_loss.item()
         stats['time'] += time_loss.item()
         stats['weighted_iri'] += weighted_iri.item()
@@ -1684,7 +1915,35 @@ def _evaluate_source(model, loader, batch_processor, device, stage, source,
             residual, raw_values, np.concatenate(targets).reshape(-1),
             np.concatenate(coords_all), np.concatenate(raw_residuals),
             np.concatenate(residuals), np.concatenate(trust_gates),
-            config.get('alt_range', (120.0, 500.0)))
+            _observation_alt_range(config))
+    return result
+
+
+@torch.no_grad()
+def _development_low_altitude_diagnostics(
+        model, loaders, batch_processor, device, stage, config, sw_manager,
+        iri_peak_manager, allowed_profile_ids=None):
+    """Finite-only v14 drift diagnostic; never used in checkpoint selection."""
+    if _low_altitude_prior_protocol(config) is None:
+        return None
+    _set_stage_mode(model, stage)
+    result = {}
+    for source, loader in loaders.items():
+        try:
+            batch = next(iter(loader))
+        except StopIteration:
+            raise ValueError(f'{source} development loader is empty')
+        coords, _, profile_ids = _unpack_source_batch(batch, device)
+        loss, details = _low_altitude_prior_loss(
+            model, batch_processor, coords, profile_ids, source, stage, config,
+            sw_manager, iri_peak_manager, allowed_profile_ids)
+        value = float(loss.detach().cpu())
+        if not np.isfinite(value):
+            raise FloatingPointError(
+                f'non-finite {source} development low-altitude anchor diagnostic')
+        result[source] = {'raw_loss': value, **details}
+    result['equal_source_raw_loss'] = float(np.mean([
+        result['FY']['raw_loss'], result['COSMIC']['raw_loss']]))
     return result
 
 
@@ -1794,8 +2053,7 @@ def _stratified_variance_table(data, config):
         raise ValueError('R profile thresholds must be non-negative')
 
     global_variance = _mad_variance(residual, sigma_min, sigma_max)
-    domain_min, domain_max = map(float, config.get(
-        'alt_range', (120.0, 500.0)))
+    domain_min, domain_max = _observation_alt_range(config)
     altitude_edges = [domain_min] + [
         edge for edge in (200.0, 300.0)
         if domain_min < edge < domain_max] + [domain_max]
@@ -1980,8 +2238,16 @@ def _reset_random_seeds(seed, device):
 
 def _architecture_signature(config):
     signature = {
+        'checkpoint_format_version': int(config.get(
+            'checkpoint_format_version', 12)),
         'alt_range': [float(value) for value in config.get(
             'alt_range', (120.0, 500.0))],
+        'observation_alt_range': [float(value) for value in (
+            config.get('observation_alt_range') or config.get(
+                'alt_range', (120.0, 500.0)))],
+        'peak_search_alt_range': [float(value) for value in (
+            config.get('peak_search_alt_range') or config.get(
+                'alt_range', (120.0, 500.0)))],
         'model_domain_semantics': config.get(
             'model_domain_semantics', 'legacy_120_500_domain_v1'),
         'basis_dim': int(config.get('basis_dim', 64)),
@@ -2202,18 +2468,28 @@ def train_fsia(config=None):
         model_domain = config.get(
             'model_domain_semantics', 'legacy_120_500_domain_v1')
         if model_domain not in (
-                'legacy_120_500_domain_v1', 'strict_200_500_domain_v1'):
+                'legacy_120_500_domain_v1', 'strict_200_500_domain_v1',
+                _HYBRID_DOMAIN_SEMANTICS):
             raise ValueError('unrecognized model-domain semantics')
-        expected_alt_range = (
-            (200.0, 500.0) if model_domain == 'strict_200_500_domain_v1'
-            else (120.0, 500.0))
+        expected_alt_range = {
+            'legacy_120_500_domain_v1': (120.0, 500.0),
+            'strict_200_500_domain_v1': (200.0, 500.0),
+            _HYBRID_DOMAIN_SEMANTICS: (120.0, 500.0),
+        }[model_domain]
         if tuple(map(float, config.get('alt_range', ()))) != expected_alt_range:
             raise ValueError('model-domain semantics and alt_range disagree')
-        expected_format = 13 if model_domain == 'strict_200_500_domain_v1' else 12
+        expected_format = {
+            'legacy_120_500_domain_v1': 12,
+            'strict_200_500_domain_v1': 13,
+            _HYBRID_DOMAIN_SEMANTICS: 14,
+        }[model_domain]
         if int(config.get('checkpoint_format_version', 0)) != expected_format:
             raise ValueError('model-domain semantics and checkpoint format disagree')
         if not config.get('eval_only'):
-            if model_domain == 'strict_200_500_domain_v1':
+            if model_domain == _HYBRID_DOMAIN_SEMANTICS:
+                expected_background_semantics = (
+                    'qc_v2_date_blocked_train_only_m2w_120_500_obs_200_500_low_alt_prior_v1')
+            elif model_domain == 'strict_200_500_domain_v1':
                 expected_background_semantics = (
                     'qc_v2_date_blocked_train_only_m2w_200_500_continuous_trust_gate_v1'
                     if config.get('background_trust_gate_enabled', False)
@@ -2233,6 +2509,7 @@ def train_fsia(config=None):
             if config.get('background_trust_gate_semantics') != (
                     'fixed_altitude_localtime_dip_smoothstep_v1'):
                 raise ValueError('M2-V trust-gate semantic is not recognized')
+        _validate_hybrid_low_altitude_protocol(config)
     if (config.get('use_direction_loss', False)
             and not config.get('analysis_exact_mode_loss', False)):
         raise ValueError(
@@ -2279,6 +2556,7 @@ def train_fsia(config=None):
         raise ValueError(
             'background_epochs and analysis_epochs must be positive for full training')
     architecture = _architecture_signature(config)
+    training_protocol = _training_protocol_signature(config)
     format_version = int(config.get(
         'checkpoint_format_version',
         8 if architecture['enkf_anomaly_parameterization']
@@ -2318,7 +2596,7 @@ def train_fsia(config=None):
         points_per_profile=config.get('profile_points_per_epoch', 8),
         full_validation_profiles=False,
         split_days=loader_split_days,
-        alt_range=config.get('alt_range'),
+        alt_range=_observation_alt_range(config),
     )
     train_loader, val_loader = get_dataloaders(
         npy_path=config['fy_path'],
@@ -2339,7 +2617,11 @@ def train_fsia(config=None):
         'pairing': 'cycle_shorter_source_max_loader_length',
     }
     config['model_domain_data_summary'] = {
-        'alt_range_km': [float(value) for value in config['alt_range']],
+        'model_alt_range_km': [float(value) for value in config['alt_range']],
+        'observation_alt_range_km': [
+            float(value) for value in _observation_alt_range(config)],
+        'peak_search_alt_range_km': [float(value) for value in (
+            config.get('peak_search_alt_range') or config['alt_range'])],
         'development_sampling': 'stable_8_points_per_profile',
         'FY': {
             'train_points': int(len(train_loader.dataset)),
@@ -2468,6 +2750,12 @@ def train_fsia(config=None):
                     'checkpoint Background training semantics differ from config')
             if int(loaded['background_epochs']) != background_epochs:
                 raise ValueError('checkpoint background_epochs differs from config')
+            if (config.get('model_domain_semantics') == _HYBRID_DOMAIN_SEMANTICS
+                    and int(loaded.get('analysis_epochs', -1)) != analysis_epochs):
+                raise ValueError('v14 checkpoint analysis_epochs differs from config')
+            if (config.get('model_domain_semantics') == _HYBRID_DOMAIN_SEMANTICS
+                    and loaded.get('training_protocol') != training_protocol):
+                raise ValueError('v14 checkpoint training protocol differs from config')
             checkpoint_r_mode = loaded.get('r_mode')
             if (checkpoint_r_mode is not None
                     and checkpoint_r_mode != config.get('r_mode', 'global')):
@@ -2508,28 +2796,35 @@ def train_fsia(config=None):
             checkpoint_architecture = loaded.get('architecture')
             if checkpoint_architecture is not None:
                 checkpoint_architecture = dict(checkpoint_architecture)
-                checkpoint_architecture.setdefault(
-                    'density_basis_semantics', 'query_conditioned')
-                checkpoint_architecture.setdefault(
-                    'background_trust_gate_enabled', False)
-                checkpoint_architecture.setdefault(
-                    'background_trust_gate_semantics', 'disabled')
-                checkpoint_architecture.setdefault(
-                    'background_trust_gate_altitude_core_km', 200.0)
-                checkpoint_architecture.setdefault(
-                    'background_trust_gate_altitude_transition_km', 100.0)
-                checkpoint_architecture.setdefault(
-                    'background_trust_gate_night_cosine_offset', 0.2)
-                checkpoint_architecture.setdefault(
-                    'background_trust_gate_night_cosine_scale', 0.2)
-                checkpoint_architecture.setdefault(
-                    'background_trust_gate_dip_core', 0.25)
-                checkpoint_architecture.setdefault(
-                    'background_trust_gate_dip_transition', 0.25)
-                checkpoint_architecture.setdefault(
-                    'alt_range', [120.0, 500.0])
-                checkpoint_architecture.setdefault(
-                    'model_domain_semantics', 'legacy_120_500_domain_v1')
+                if config.get('model_domain_semantics') != _HYBRID_DOMAIN_SEMANTICS:
+                    checkpoint_architecture.setdefault(
+                        'density_basis_semantics', 'query_conditioned')
+                    checkpoint_architecture.setdefault(
+                        'background_trust_gate_enabled', False)
+                    checkpoint_architecture.setdefault(
+                        'background_trust_gate_semantics', 'disabled')
+                    checkpoint_architecture.setdefault(
+                        'background_trust_gate_altitude_core_km', 200.0)
+                    checkpoint_architecture.setdefault(
+                        'background_trust_gate_altitude_transition_km', 100.0)
+                    checkpoint_architecture.setdefault(
+                        'background_trust_gate_night_cosine_offset', 0.2)
+                    checkpoint_architecture.setdefault(
+                        'background_trust_gate_night_cosine_scale', 0.2)
+                    checkpoint_architecture.setdefault(
+                        'background_trust_gate_dip_core', 0.25)
+                    checkpoint_architecture.setdefault(
+                        'background_trust_gate_dip_transition', 0.25)
+                    checkpoint_architecture.setdefault(
+                        'alt_range', [120.0, 500.0])
+                    checkpoint_architecture.setdefault(
+                        'observation_alt_range', checkpoint_architecture['alt_range'])
+                    checkpoint_architecture.setdefault(
+                        'peak_search_alt_range', checkpoint_architecture['alt_range'])
+                    checkpoint_architecture.setdefault(
+                        'checkpoint_format_version', format_version)
+                    checkpoint_architecture.setdefault(
+                        'model_domain_semantics', 'legacy_120_500_domain_v1')
             if (checkpoint_architecture is not None
                     and checkpoint_architecture != architecture):
                 raise ValueError(
@@ -2696,6 +2991,36 @@ def train_fsia(config=None):
         if stage == 'background':
             config.setdefault('background_update_steps', []).append(
                 int(train_metrics['processed_batches']))
+        if _low_altitude_prior_protocol(config) is not None:
+            config.setdefault('low_altitude_anchor_history', []).append({
+                'epoch': epoch + 1,
+                'stage': stage,
+                'raw_loss': train_metrics['low_altitude'],
+                'weighted_loss': train_metrics['weighted_low_altitude'],
+                'profiles_per_batch': train_metrics['low_altitude_profiles'],
+                'points_per_batch': train_metrics['low_altitude_points'],
+                'active_fraction': train_metrics[
+                    'low_altitude_active_fraction'],
+                'FY': {
+                    'raw_loss': train_metrics['fy_low_altitude'],
+                    'profiles_per_batch': train_metrics[
+                        'fy_low_altitude_profiles'],
+                    'points_per_batch': train_metrics['fy_low_altitude_points'],
+                    'active_fraction': train_metrics[
+                        'fy_low_altitude_active_fraction'],
+                },
+                'COSMIC': {
+                    'raw_loss': train_metrics['cosmic_low_altitude'],
+                    'profiles_per_batch': train_metrics[
+                        'cosmic_low_altitude_profiles'],
+                    'points_per_batch': train_metrics[
+                        'cosmic_low_altitude_points'],
+                    'active_fraction': train_metrics[
+                        'cosmic_low_altitude_active_fraction'],
+                },
+                'gradient_ratio_to_observation': train_metrics[
+                    'gradient_ratio_low_altitude'],
+            })
         if batch_diagnostics:
             diagnostics_path = os.path.join(
                 config['save_dir'], 'batch_diagnostics.jsonl')
@@ -2706,6 +3031,12 @@ def train_fsia(config=None):
             model, val_loader, batch_processor, device, config,
             sw_manager, iri_peak_manager, cosmic_val_loader, stage,
             query_profile_partitions['development'])
+        low_altitude_development = _development_low_altitude_diagnostics(
+            model, {'FY': val_loader, 'COSMIC': cosmic_val_loader},
+            batch_processor, device, stage, config, sw_manager,
+            iri_peak_manager, query_profile_partitions['train'])
+        if low_altitude_development is not None:
+            val_metrics['low_altitude_diagnostic'] = low_altitude_development
         if scheduler is not None:
             scheduler.step()
 
@@ -2714,6 +3045,19 @@ def train_fsia(config=None):
             print(
                 f"  警告: 辅助/观测梯度比={train_metrics['gradient_ratio']:.3f}>0.30；"
                 '全量训练前应下调对应辅助权重')
+        if (_low_altitude_prior_protocol(config) is not None
+                and config.get('max_train_batches') is not None
+                and train_metrics['gradient_audit_batches']):
+            low_ratio = train_metrics['gradient_ratio_low_altitude']
+            maximum = float(config['low_altitude_gradient_ratio_max'])
+            if not np.isfinite(low_ratio) or low_ratio > maximum:
+                raise RuntimeError(
+                    f'low-altitude preflight gradient ratio {low_ratio!r} '
+                    f'is outside [0, {maximum}]')
+            if stage == 'analysis' and low_ratio <= 0.0:
+                raise RuntimeError(
+                    'low-altitude Analysis anchor has zero gradient; '
+                    'check train-only token coverage before full training')
         if (stage == 'analysis'
                 and config.get('use_observation_gram_loss', False)
                 and config.get('max_train_batches') is not None
@@ -2783,6 +3127,12 @@ def train_fsia(config=None):
                 'model_domain_semantics', 'legacy_120_500_domain_v1'),
             'alt_range': [float(value) for value in config.get(
                 'alt_range', (120.0, 500.0))],
+            'observation_alt_range': [float(value) for value in (
+                config.get('observation_alt_range') or config.get(
+                    'alt_range', (120.0, 500.0)))],
+            'peak_search_alt_range': [float(value) for value in (
+                config.get('peak_search_alt_range') or config.get(
+                    'alt_range', (120.0, 500.0)))],
             'completed_epochs': epoch + 1,
             'background_epochs': background_epochs,
             'analysis_epochs': analysis_epochs,
@@ -2804,10 +3154,14 @@ def train_fsia(config=None):
                 )
             },
             'background_only': background_only,
+            'smoke_run': bool(config.get('smoke_run', False)),
             'background_loader_schedule': config.get(
                 'background_loader_schedule'),
             'background_update_steps': config.get(
                 'background_update_steps', []),
+            'training_protocol': training_protocol,
+            'low_altitude_anchor_history': config.get(
+                'low_altitude_anchor_history', []),
             'r_mode': config.get('r_mode', 'global'),
             'use_distance_localization': bool(
                 config.get('use_distance_localization', False)),
@@ -2891,11 +3245,18 @@ def train_fsia(config=None):
             f'passed={background_gate_passed}')
     summary = {
         'completed_stage': 'background' if background_only else 'analysis',
+        'smoke_run': bool(config.get('smoke_run', False)),
         'checkpoint_format_version': format_version,
         'model_domain_semantics': config.get(
             'model_domain_semantics', 'legacy_120_500_domain_v1'),
         'alt_range': [float(value) for value in config.get(
             'alt_range', (120.0, 500.0))],
+        'observation_alt_range': [float(value) for value in (
+            config.get('observation_alt_range') or config.get(
+                'alt_range', (120.0, 500.0)))],
+        'peak_search_alt_range': [float(value) for value in (
+            config.get('peak_search_alt_range') or config.get(
+                'alt_range', (120.0, 500.0)))],
         'model_domain_data_summary': config.get(
             'model_domain_data_summary'),
         'best_scores': {
@@ -2930,6 +3291,10 @@ def train_fsia(config=None):
         'background_development_gate_passed': background_gate_passed,
         'background_loader_schedule': config.get('background_loader_schedule'),
         'background_update_steps': config.get('background_update_steps', []),
+        'training_protocol': training_protocol,
+        'low_altitude_prior_protocol': _low_altitude_prior_protocol(config),
+        'low_altitude_anchor_history': config.get(
+            'low_altitude_anchor_history', []),
         'r_mode': config.get('r_mode', 'global'),
         'use_distance_localization': bool(
             config.get('use_distance_localization', False)),
