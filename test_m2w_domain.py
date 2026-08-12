@@ -218,6 +218,7 @@ def _v14_config(**overrides):
         'w_low_altitude_background_iri': 0.02,
         'w_low_altitude_analysis_increment': 0.01,
         'low_altitude_gradient_ratio_max': 0.25,
+        'smoke_auxiliary_gradient_ratio_max': 0.25,
         'background_epochs': 5,
         'analysis_epochs': 10,
         'seed': 42,
@@ -235,6 +236,9 @@ def test_v14_domain_contract_and_observation_tokens(tmp_path):
     with pytest.raises(ValueError, match='contract mismatch'):
         _validate_hybrid_low_altitude_protocol(
             _v14_config(observation_alt_range=(120.0, 500.0)))
+    with pytest.raises(ValueError, match='contract mismatch'):
+        _validate_hybrid_low_altitude_protocol(
+            _v14_config(smoke_auxiliary_gradient_ratio_max=0.30))
     data_path, index_path = _write_profiles(tmp_path)
     index = FYNeighborhoodIndex(str(data_path), {
         **_v14_config(), 'fy_profile_index_path': str(index_path),

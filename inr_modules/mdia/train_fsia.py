@@ -84,6 +84,8 @@ def _low_altitude_prior_protocol(config):
         'background_weight': float(config['w_low_altitude_background_iri']),
         'analysis_weight': float(config['w_low_altitude_analysis_increment']),
         'gradient_ratio_max': float(config['low_altitude_gradient_ratio_max']),
+        'smoke_auxiliary_gradient_ratio_max': float(
+            config['smoke_auxiliary_gradient_ratio_max']),
     }
 
 
@@ -122,6 +124,7 @@ def _validate_hybrid_low_altitude_protocol(config):
         'low_altitude_anchor_profiles_per_source': 16,
         'w_low_altitude_background_iri': 0.02,
         'w_low_altitude_analysis_increment': 0.01,
+        'smoke_auxiliary_gradient_ratio_max': 0.25,
         'background_epochs': 1 if smoke else 5,
         'analysis_epochs': 1 if smoke else 10,
         'seed': 42,
@@ -152,6 +155,10 @@ def _validate_hybrid_low_altitude_protocol(config):
     if not 0.0 < float(config.get('low_altitude_gradient_ratio_max', 0.0)) <= 0.25:
         mismatches['low_altitude_gradient_ratio_max'] = (
             config.get('low_altitude_gradient_ratio_max'), '(0, 0.25]')
+    if not 0.0 < float(config.get(
+            'smoke_auxiliary_gradient_ratio_max', 0.0)) <= 0.25:
+        mismatches['smoke_auxiliary_gradient_ratio_max'] = (
+            config.get('smoke_auxiliary_gradient_ratio_max'), '(0, 0.25]')
     if mismatches:
         raise ValueError(f'v14 low-altitude prior contract mismatch: {mismatches}')
 
@@ -3040,10 +3047,13 @@ def train_fsia(config=None):
         if scheduler is not None:
             scheduler.step()
 
+        smoke_auxiliary_limit = float(config.get(
+            'smoke_auxiliary_gradient_ratio_max', 0.30))
         if (train_metrics['gradient_audit_batches']
-                and train_metrics['gradient_ratio'] > 0.30):
+                and train_metrics['gradient_ratio'] > smoke_auxiliary_limit):
             print(
-                f"  警告: 辅助/观测梯度比={train_metrics['gradient_ratio']:.3f}>0.30；"
+                f"  警告: 辅助/观测梯度比={train_metrics['gradient_ratio']:.3f}>"
+                f"{smoke_auxiliary_limit:.2f}；"
                 '全量训练前应下调对应辅助权重')
         if (_low_altitude_prior_protocol(config) is not None
                 and config.get('max_train_batches') is not None
@@ -3075,9 +3085,10 @@ def train_fsia(config=None):
             if min(coverages) < 0.50:
                 raise RuntimeError(
                     f'Gram preflight eligible coverage is below 0.50: {coverages}')
-            if train_metrics['gradient_ratio'] > 0.30:
+            if train_metrics['gradient_ratio'] > smoke_auxiliary_limit:
                 raise RuntimeError(
-                    'Gram preflight auxiliary/observation gradient ratio exceeds 0.30')
+                    'Gram preflight auxiliary/observation gradient ratio exceeds '
+                    f'{smoke_auxiliary_limit:.2f}')
             if len(batch_diagnostics) >= 40:
                 first_gram = np.median([
                     row['gram_raw'] for row in batch_diagnostics[:20]])

@@ -434,6 +434,7 @@ def main(eval_only=False, resume_ckpt=None, run_name=_DEFAULT_RUN_NAME,
         w_low_altitude_background_iri=(0.02 if hybrid_domain else 0.0),
         w_low_altitude_analysis_increment=(0.01 if hybrid_domain else 0.0),
         low_altitude_gradient_ratio_max=(0.25 if hybrid_domain else 0.25),
+        smoke_auxiliary_gradient_ratio_max=(0.25 if hybrid_domain else 0.30),
         checkpoint_format_version=checkpoint_format_version,
         run_semantics=run_semantics,
         checkpoint_selection_semantics=(
