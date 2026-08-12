@@ -441,6 +441,8 @@ def main(eval_only=False, resume_ckpt=None, run_name=_DEFAULT_RUN_NAME,
             else prior_config.get('checkpoint_selection_semantics',
                                   'mean_profile_rmse_v1')),
     )
+    if smoke_run:
+        update_config_mdia(r_calibration_batches=1, gram_calibration_batches=1)
     if qc_data:
         update_config_mdia(
             fy_path=r'D:\FYsatellite\EDP_data\fy_202409_qc_v2.npy',
