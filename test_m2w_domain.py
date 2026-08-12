@@ -12,6 +12,7 @@ from inr_modules.data_managers.FY_dataloader import (
 )
 from inr_modules.mdia.evaluation_stats import paired_group_bootstrap
 from inr_modules.mdia.checkpoint_io import load_fsia_analysis_checkpoint
+from inr_modules.mdia.v14_contract import canonical_v14_training_protocol
 from inr_modules.mdia.train_fsia import (
     _architecture_signature,
     _development_selection_key,
@@ -128,7 +129,9 @@ def test_analysis_loader_historical_epoch_requires_opt_in(tmp_path):
     with pytest.raises(ValueError, match='SHA256'):
         load_fsia_analysis_checkpoint(checkpoint)
     with pytest.raises(ValueError, match='contract mismatch'):
-        load_fsia_analysis_checkpoint(checkpoint, allow_historical_epoch=True)
+        load_fsia_analysis_checkpoint(
+            checkpoint, allow_historical_epoch=True,
+            expected_sha256=hashlib.sha256(checkpoint.read_bytes()).hexdigest())
 
 
 def test_isr_pair_mask_does_not_depend_on_background():
@@ -227,6 +230,11 @@ def _v14_config(**overrides):
         'r_mode': 'global',
         'background_trust_gate_enabled': False,
     }
+    protocol = canonical_v14_training_protocol(
+        bool(config.get('smoke_run', False)))
+    config.update({
+        key: value for key, value in protocol.items()
+        if key != 'low_altitude_prior_protocol'})
     config.update(overrides)
     return config
 

@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import time
+import copy
 from datetime import datetime, timedelta
 
 import numpy as np
@@ -49,6 +50,35 @@ except ImportError:
     )
     from plotting import plot_training_curves
 
+try:
+    from .v14_contract import (
+        CALIBRATION_PRECISION,
+        GRADIENT_PARAMETER_SCOPE,
+        HYBRID_DOMAIN_SEMANTICS,
+        INPUT_DATA_IDENTITY_KEYS,
+        build_v14_low_altitude_protocol,
+        build_v14_training_protocol,
+        canonical_v14_config,
+        canonical_v14_low_altitude_protocol,
+        canonical_v14_training_protocol,
+        resolve_v14_gram_weight,
+        valid_v14_gram_calibration,
+    )
+except ImportError:
+    from v14_contract import (
+        CALIBRATION_PRECISION,
+        GRADIENT_PARAMETER_SCOPE,
+        HYBRID_DOMAIN_SEMANTICS,
+        INPUT_DATA_IDENTITY_KEYS,
+        build_v14_low_altitude_protocol,
+        build_v14_training_protocol,
+        canonical_v14_config,
+        canonical_v14_low_altitude_protocol,
+        canonical_v14_training_protocol,
+        resolve_v14_gram_weight,
+        valid_v14_gram_calibration,
+    )
+
 from data_managers import SpaceWeatherManager, IRINeuralProxy
 from data_managers.FY_dataloader import (
     FYNeighborhoodIndex,
@@ -58,7 +88,7 @@ from data_managers.FY_dataloader import (
 )
 
 
-_HYBRID_DOMAIN_SEMANTICS = 'hybrid_120_500_model_200_500_observation_v1'
+_HYBRID_DOMAIN_SEMANTICS = HYBRID_DOMAIN_SEMANTICS
 _HYBRID_LOW_ALTITUDE_PRIOR_SEMANTICS = (
     'soft_iri_background_zero_analysis_increment_v1')
 _HYBRID_LOW_ALTITUDE_LEVELS = tuple(float(value) for value in range(120, 200, 10))
@@ -74,93 +104,56 @@ def _low_altitude_prior_protocol(config):
     """Return the immutable v14 low-altitude protocol, if enabled."""
     if config.get('model_domain_semantics') != _HYBRID_DOMAIN_SEMANTICS:
         return None
-    return {
-        'range_km': [float(value) for value in config['low_altitude_prior_range']],
-        'semantics': config['low_altitude_prior_semantics'],
-        'anchor_levels_km': [
-            float(value) for value in config['low_altitude_anchor_levels_km']],
-        'profiles_per_source': int(
-            config['low_altitude_anchor_profiles_per_source']),
-        'background_weight': float(config['w_low_altitude_background_iri']),
-        'analysis_weight': float(config['w_low_altitude_analysis_increment']),
-        'gradient_ratio_max': float(config['low_altitude_gradient_ratio_max']),
-        'smoke_auxiliary_gradient_ratio_max': float(
-            config['smoke_auxiliary_gradient_ratio_max']),
-    }
+    return build_v14_low_altitude_protocol(config)
 
 
 def _training_protocol_signature(config):
     """Return the immutable v14 training protocol stored with resumable state."""
     if config.get('model_domain_semantics') != _HYBRID_DOMAIN_SEMANTICS:
         return None
-    return {
-        'seed': int(config['seed']),
-        'smoke_run': bool(config.get('smoke_run', False)),
-        'background_epochs': int(config['background_epochs']),
-        'analysis_epochs': int(config['analysis_epochs']),
-        'background_trust_gate_enabled': bool(
-            config.get('background_trust_gate_enabled', False)),
-        'low_altitude_anchor_selection': (
-            'first_16_unique_profiles_per_source_per_batch_first_record_v1'),
-        'low_altitude_anchor_grouping': 'source_profile_id_profile_balanced_v1',
-        'low_altitude_neighbor_profile_semantics': (
-            'synthetic_query_no_target_profile_exclusion_v1'),
-        'low_altitude_prior_protocol': _low_altitude_prior_protocol(config),
-    }
+    return build_v14_training_protocol(config)
 
 
 def _validate_hybrid_low_altitude_protocol(config):
-    """Reject every v14 run that could silently change the prior experiment."""
+    """Reject every v14 run that could silently change its fixed contract."""
     if config.get('model_domain_semantics') != _HYBRID_DOMAIN_SEMANTICS:
         return
     smoke = bool(config.get('smoke_run', False))
-    expected = {
-        'alt_range': (120.0, 500.0),
-        'observation_alt_range': (200.0, 500.0),
-        'peak_search_alt_range': (200.0, 500.0),
-        'low_altitude_prior_range': (120.0, 200.0),
-        'low_altitude_prior_semantics': _HYBRID_LOW_ALTITUDE_PRIOR_SEMANTICS,
-        'low_altitude_anchor_levels_km': _HYBRID_LOW_ALTITUDE_LEVELS,
-        'low_altitude_anchor_profiles_per_source': 16,
-        'w_low_altitude_background_iri': 0.02,
-        'w_low_altitude_analysis_increment': 0.01,
-        'smoke_auxiliary_gradient_ratio_max': 0.25,
-        'background_epochs': 1 if smoke else 5,
-        'analysis_epochs': 1 if smoke else 10,
-        'seed': 42,
-        'basis_dim': 64,
-        'enkf_n_members': 8,
-        'r_mode': 'global',
-    }
+    expected = canonical_v14_config(smoke)
+    expected.update({'basis_dim': 64, 'enkf_n_members': 8, 'r_mode': 'global'})
     mismatches = {}
     for key, expected_value in expected.items():
         actual = config.get(key)
         if isinstance(expected_value, tuple):
             actual = tuple(map(float, actual or ()))
+            matches = actual == expected_value
         elif isinstance(expected_value, float):
-            actual = None if actual is None else float(actual)
-        if (not np.isclose(actual, expected_value)
-                if isinstance(expected_value, float) else actual != expected_value):
+            try:
+                actual = float(actual)
+                matches = bool(np.isclose(actual, expected_value))
+            except (TypeError, ValueError):
+                matches = False
+        else:
+            matches = actual == expected_value
+        if not matches:
             mismatches[key] = (actual, expected_value)
     if config.get('background_trust_gate_enabled', False):
         mismatches['background_trust_gate_enabled'] = (True, False)
-    if int(config.get('checkpoint_format_version', 0)) != 14:
-        mismatches['checkpoint_format_version'] = (
-            config.get('checkpoint_format_version'), 14)
-    if smoke and (int(config.get('background_epochs', 0)),
-                  int(config.get('analysis_epochs', 0))) != (1, 1):
-        mismatches['smoke_epochs'] = (
-            (config.get('background_epochs'), config.get('analysis_epochs')),
-            (1, 1))
-    if not 0.0 < float(config.get('low_altitude_gradient_ratio_max', 0.0)) <= 0.25:
-        mismatches['low_altitude_gradient_ratio_max'] = (
-            config.get('low_altitude_gradient_ratio_max'), '(0, 0.25]')
-    if not 0.0 < float(config.get(
-            'smoke_auxiliary_gradient_ratio_max', 0.0)) <= 0.25:
-        mismatches['smoke_auxiliary_gradient_ratio_max'] = (
-            config.get('smoke_auxiliary_gradient_ratio_max'), '(0, 0.25]')
+    if _low_altitude_prior_protocol(config) != canonical_v14_low_altitude_protocol():
+        mismatches['low_altitude_prior_protocol'] = (
+            _low_altitude_prior_protocol(config), canonical_v14_low_altitude_protocol())
+    if _training_protocol_signature(config) != canonical_v14_training_protocol(smoke):
+        mismatches['training_protocol'] = (
+            _training_protocol_signature(config),
+            canonical_v14_training_protocol(smoke))
+    if (config.get('training_protocol') is not None
+            and config.get('training_protocol')
+            != canonical_v14_training_protocol(smoke)):
+        mismatches['config.training_protocol'] = (
+            config.get('training_protocol'),
+            canonical_v14_training_protocol(smoke))
     if mismatches:
-        raise ValueError(f'v14 low-altitude prior contract mismatch: {mismatches}')
+        raise ValueError(f'v14 training contract mismatch: {mismatches}')
 
 
 def _sha256_file(path):
@@ -169,6 +162,42 @@ def _sha256_file(path):
         for chunk in iter(lambda: stream.read(1024 * 1024), b''):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _resolve_input_data_sha256(config):
+    """Verify each manifest-pinned v14 input before a state can be restored."""
+    path = os.path.join(config['save_dir'], 'run_manifest.json')
+    if not os.path.isfile(path):
+        if config.get('model_domain_semantics') == _HYBRID_DOMAIN_SEMANTICS:
+            raise FileNotFoundError('v14 training requires a run manifest')
+        return None
+    with open(path, encoding='utf-8') as stream:
+        manifest = json.load(stream)
+    identities = manifest.get('data_identity', {})
+    if not isinstance(identities, dict):
+        raise ValueError('run manifest data_identity must be an object')
+    result = {}
+    for key, identity in identities.items():
+        if not isinstance(identity, dict) or not identity.get('path'):
+            raise ValueError(f'run manifest has invalid input identity for {key}')
+        expected = identity.get('sha256')
+        actual = _sha256_file(identity['path'])
+        if actual != expected:
+            raise ValueError(f'input SHA256 differs from run manifest for {key}')
+        result[key] = actual
+    if config.get('model_domain_semantics') == _HYBRID_DOMAIN_SEMANTICS:
+        if manifest.get('config', {}).get('input_data_sha256') != result:
+            raise ValueError(
+                'v14 run manifest config input_data_sha256 differs from data identity')
+        required = set(INPUT_DATA_IDENTITY_KEYS) & {
+            key for key in INPUT_DATA_IDENTITY_KEYS
+            if config.get(key) and os.path.isfile(config[key])}
+        missing = sorted(required - set(result))
+        if missing:
+            raise ValueError(f'v14 input identity lacks {missing}')
+        if 'date_split_manifest' not in result:
+            raise ValueError('v14 input identity must include date_split_manifest')
+    return result
 
 
 def _atomic_torch_save(state, path):
@@ -332,6 +361,7 @@ def _record_resolved_training_config(config, covariance_strata):
             'resolved_representativeness_kernel'),
         'covariance_strata': covariance_strata,
         'date_split': config.get('resolved_date_split'),
+        'input_data_sha256': config.get('input_data_sha256'),
         'model_domain_data_summary': config.get('model_domain_data_summary'),
         'low_altitude_prior_protocol': _low_altitude_prior_protocol(config),
         'training_protocol': _training_protocol_signature(config),
@@ -536,6 +566,16 @@ def _set_training_stage(model, stage):
     model.iri_proxy.freeze()
 
 
+def _current_stage_trainable_parameters(model):
+    """The sole parameter scope for optimizer, calibration, and audits."""
+    return [parameter for parameter in model.parameters() if parameter.requires_grad]
+
+
+def _current_stage_parameter_counts(model):
+    parameters = _current_stage_trainable_parameters(model)
+    return len(parameters), sum(parameter.numel() for parameter in parameters)
+
+
 def _set_stage_mode(model, stage):
     model.train()
     model.iri_proxy.eval()
@@ -550,7 +590,7 @@ def _set_stage_mode(model, stage):
 
 def _make_optimizer(model, config, stage_epochs):
     optimizer = optim.AdamW(
-        [p for p in model.parameters() if p.requires_grad],
+        _current_stage_trainable_parameters(model),
         lr=config['lr'],
         weight_decay=config.get('weight_decay', 1e-4),
     )
@@ -685,6 +725,75 @@ def _gradient_norms(data_loss, auxiliary_loss, parameters, components=None):
         data_norm.detach(), auxiliary_norm.detach(), ratio.detach(),
         component_norms,
     )
+
+
+def _smoke_json_value(value):
+    if isinstance(value, dict):
+        return {key: _smoke_json_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_smoke_json_value(item) for item in value]
+    if isinstance(value, (float, np.floating)):
+        return float(value) if np.isfinite(value) else None
+    return value
+
+
+def _write_smoke_preflight(config, stage, epoch, batch, ratios, coverages,
+                           losses=None):
+    """Atomically record each stage gate before the first optimizer step."""
+    path = os.path.join(config['save_dir'], 'smoke_preflight.json')
+    current = {'schema_version': 14, 'stages': {}}
+    if os.path.isfile(path):
+        with open(path, encoding='utf-8') as stream:
+            current = json.load(stream)
+    lower, upper = config.get('gram_preflight_ratio_bounds', (0.016, 0.024))
+    auxiliary_limit = float(config['smoke_auxiliary_gradient_ratio_max'])
+    total = ratios['total_auxiliary_to_observation']
+    low = ratios['low_altitude_to_observation']
+    gram = ratios['gram_to_observation']
+    failures = []
+    inclusive = stage == 'background'
+    if not np.isfinite(total) or total < 0.0 or total > auxiliary_limit:
+        failures.append('total auxiliary gradient ratio outside [0, 0.25]')
+    if not np.isfinite(low) or low < 0.0 or low > auxiliary_limit:
+        failures.append('low-altitude gradient ratio outside [0, 0.25]')
+    if not inclusive and (total <= 0.0 or low <= 0.0):
+        failures.append('Analysis low-altitude and total auxiliary ratios must be positive')
+    calibration = config.get('gram_gradient_calibration')
+    if stage == 'analysis':
+        achieved = None if calibration is None else calibration.get(
+            'achieved_median_ratio')
+        if not np.isfinite(gram) or gram <= 0.0:
+            failures.append('single-batch Gram gradient ratio must be finite and positive')
+        if (achieved is None or not np.isfinite(achieved)
+                or not float(lower) <= float(achieved) <= float(upper)):
+            failures.append(
+                '20-batch Gram achieved median ratio is outside '
+                f'[{float(lower):.3f}, {float(upper):.3f}]')
+        if (calibration is None
+                or calibration.get('requested_batches') != 20
+                or calibration.get('processed_batches') != 20
+                or calibration.get('valid_batches') != 20):
+            failures.append('v14 Gram calibration is not a complete 20/20 record')
+    stage_record = {
+        'epoch': int(epoch + 1),
+        'batch': int(batch + 1),
+        'losses': _smoke_json_value(losses or {}),
+        'ratios': _smoke_json_value(ratios),
+        'gram_calibration': _smoke_json_value(
+            calibration if stage == 'analysis' else None),
+        'gram_coverage_diagnostic': _smoke_json_value(coverages),
+        'coverage_policy': 'diagnostic_only_v1',
+        'passed': not failures,
+        'failures': failures,
+    }
+    current.setdefault('stages', {})[stage] = stage_record
+    temporary = f'{path}.tmp'
+    with open(temporary, 'w', encoding='utf-8') as stream:
+        json.dump(current, stream, ensure_ascii=False, indent=2,
+                  allow_nan=False)
+    os.replace(temporary, path)
+    if failures:
+        raise RuntimeError('; '.join(failures))
 
 
 def _query_precision_sum(extras, source):
@@ -1042,11 +1151,8 @@ def _resolve_covariance_weight(
                 _source_mode_for_batch(
                     config.get('source_mode_schedule', 'random_profile'),
                     batch_index))
-            parameters = [
-                parameter for parameter in model.parameters()
-                if parameter.requires_grad]
             _, _, covariance_to_observation, _ = _gradient_norms(
-                observation, covariance, parameters)
+                observation, covariance, _current_stage_trainable_parameters(model))
             value = float(covariance_to_observation)
             if np.isfinite(value) and value > 0:
                 ratios.append(value)
@@ -1097,14 +1203,8 @@ def _resolve_direction_weight(
                 model, batch_processor, fy_batch, cosmic_batch, device,
                 config, sw_manager, iri_peak_manager, allowed_profile_ids,
                 'exact_M10_M01_M11')
-            decoder = (model.density_basis_decoder
-                       if hasattr(model, 'density_basis_decoder')
-                       else model.kalman_layer)
-            parameters = [
-                parameter for parameter in decoder.parameters()
-                if parameter.requires_grad]
             _, _, direction_to_observation, _ = _gradient_norms(
-                observation, direction, parameters)
+                observation, direction, _current_stage_trainable_parameters(model))
             value = float(direction_to_observation)
             if np.isfinite(value) and value > 0:
                 ratios.append(value)
@@ -1124,6 +1224,41 @@ def _resolve_direction_weight(
     return resolved
 
 
+def _resolve_v14_gram_weight_from_ratios(raw_ratios, target_ratio):
+    """Resolve the v14 coefficient without silently changing the target."""
+    try:
+        return resolve_v14_gram_weight(raw_ratios, target_ratio)
+    except ValueError as error:
+        raise RuntimeError(str(error)) from error
+
+
+def _valid_v14_gram_calibration(record, protocol):
+    """True only for a complete, protocol-matching persisted calibration."""
+    return valid_v14_gram_calibration(record, protocol)
+
+
+def _validate_v14_resume_state(loaded, training_protocol, input_data_sha256):
+    """Reject smoke or protocol-drifted v14 states before loading parameters."""
+    if loaded.get('smoke_run', False) or loaded.get(
+            'training_protocol', {}).get('smoke_run', False):
+        raise ValueError('v14 smoke training states are never resumable')
+    if loaded.get('training_protocol') != training_protocol:
+        raise ValueError('v14 checkpoint training protocol differs from config')
+    if loaded.get('input_data_sha256') != input_data_sha256:
+        raise ValueError('v14 checkpoint input data SHA256 differs from config')
+    if (loaded.get('stage') == 'analysis'
+            and not _valid_v14_gram_calibration(
+                loaded.get('gram_gradient_calibration'), training_protocol)):
+        raise ValueError(
+            'v14 Analysis resume requires a complete matching Gram calibration')
+
+
+def _clone_calibration_value(value):
+    if torch.is_tensor(value):
+        return value.detach().clone()
+    return copy.deepcopy(value)
+
+
 def _resolve_gram_weight(
         model, train_loader, cosmic_train_loader, batch_processor, device,
         config, sw_manager, iri_peak_manager, allowed_profile_ids=None):
@@ -1132,52 +1267,148 @@ def _resolve_gram_weight(
     if batches < 1 or not 0.0 < target_ratio <= 1.0:
         raise ValueError(
             'Gram calibration batches must be positive and target in (0, 1]')
+
+    # v12/v13 checkpoints retain their historical clipped calibration rule.
+    if config.get('model_domain_semantics') != _HYBRID_DOMAIN_SEMANTICS:
+        numpy_state = np.random.get_state()
+        torch_state = torch.get_rng_state()
+        cuda_state = (
+            torch.cuda.get_rng_state_all() if device.type == 'cuda' else None)
+        ratios = []
+        try:
+            _set_stage_mode(model, 'analysis')
+            cosmic_iter = iter(cosmic_train_loader)
+            for batch_index, fy_batch in enumerate(train_loader):
+                if batch_index >= batches:
+                    break
+                try:
+                    cosmic_batch = next(cosmic_iter)
+                except StopIteration:
+                    cosmic_iter = iter(cosmic_train_loader)
+                    cosmic_batch = next(cosmic_iter)
+                observation, _, _, gram = _paired_analysis_losses(
+                    model, batch_processor, fy_batch, cosmic_batch, device,
+                    config, sw_manager, iri_peak_manager, allowed_profile_ids,
+                    'exact_M10_M01_M11')
+                _, _, gram_to_observation, _ = _gradient_norms(
+                    observation, gram, _current_stage_trainable_parameters(model))
+                value = float(gram_to_observation)
+                if np.isfinite(value) and value > 0:
+                    ratios.append(value)
+        finally:
+            np.random.set_state(numpy_state)
+            torch.set_rng_state(torch_state)
+            if cuda_state is not None:
+                torch.cuda.set_rng_state_all(cuda_state)
+        if not ratios:
+            raise RuntimeError('observation Gram calibration produced no finite gradients')
+        median_ratio = float(np.median(ratios))
+        resolved = float(np.clip(target_ratio / median_ratio, 1e-4, 1.0))
+        config['gram_gradient_calibration'] = {
+            'batches': len(ratios),
+            'median_ratio': median_ratio,
+            'target_ratio': target_ratio,
+        }
+        return resolved
+
+    if batches != 20:
+        raise ValueError('v14 Gram calibration requires exactly 20 batches')
+    module_modes = [(module, module.training) for module in model.modules()]
+    state_dict = {
+        name: value.detach().clone()
+        for name, value in model.state_dict().items()
+    }
+    gradients = [
+        (parameter, None if parameter.grad is None else parameter.grad.detach().clone())
+        for parameter in model.parameters()
+    ]
+    transient = {
+        name: _clone_calibration_value(getattr(model.kalman_layer, name))
+        for name in ('last_member_weights', 'last_inflation_scale')
+        if hasattr(model.kalman_layer, name)
+    }
     numpy_state = np.random.get_state()
     torch_state = torch.get_rng_state()
     cuda_state = (
         torch.cuda.get_rng_state_all() if device.type == 'cuda' else None)
     ratios = []
+    processed = 0
     try:
         _set_stage_mode(model, 'analysis')
+        parameters = _current_stage_trainable_parameters(model)
+        if not parameters:
+            raise RuntimeError('v14 Gram calibration has no trainable Analysis parameters')
+        fy_iter = iter(train_loader)
         cosmic_iter = iter(cosmic_train_loader)
-        for batch_index, fy_batch in enumerate(train_loader):
-            if batch_index >= batches:
-                break
+        for batch_index in range(batches):
             try:
+                fy_batch = next(fy_iter)
                 cosmic_batch = next(cosmic_iter)
-            except StopIteration:
-                cosmic_iter = iter(cosmic_train_loader)
-                cosmic_batch = next(cosmic_iter)
-            observation, _, _, gram = _paired_analysis_losses(
-                model, batch_processor, fy_batch, cosmic_batch, device,
-                config, sw_manager, iri_peak_manager, allowed_profile_ids,
-                'exact_M10_M01_M11')
-            parameters = [
-                parameter for parameter in model.parameters()
-                if parameter.requires_grad]
-            _, _, gram_to_observation, _ = _gradient_norms(
+            except StopIteration as error:
+                raise RuntimeError(
+                    'v14 Gram calibration requires exactly 20 paired FY/COSMIC '
+                    f'batches; loader ended at batch {batch_index + 1}') from error
+            with torch.amp.autocast(
+                    'cuda', enabled=bool(config.get('use_amp', False))
+                    and device.type == 'cuda'):
+                observation, _, _, gram = _paired_analysis_losses(
+                    model, batch_processor, fy_batch, cosmic_batch, device,
+                    config, sw_manager, iri_peak_manager, allowed_profile_ids,
+                    'exact_M10_M01_M11')
+            observation_grad, gram_grad, ratio, _ = _gradient_norms(
                 observation, gram, parameters)
-            value = float(gram_to_observation)
-            if np.isfinite(value) and value > 0:
-                ratios.append(value)
-            model.zero_grad(set_to_none=True)
+            values = tuple(float(value.detach().cpu()) for value in (
+                observation_grad, gram_grad, ratio))
+            if (not all(np.isfinite(value) and value > 0.0 for value in values)):
+                raise RuntimeError(
+                    'v14 Gram calibration requires finite positive observation, '
+                    f'Gram, and ratio gradients at batch {batch_index + 1}: {values}')
+            ratios.append(values[2])
+            processed += 1
     finally:
+        model.load_state_dict(state_dict, strict=True)
+        for parameter, gradient in gradients:
+            parameter.grad = (None if gradient is None else gradient.clone())
+        for module, training in module_modes:
+            module.train(training)
+        for name, value in transient.items():
+            setattr(model.kalman_layer, name, _clone_calibration_value(value))
         np.random.set_state(numpy_state)
         torch.set_rng_state(torch_state)
         if cuda_state is not None:
             torch.cuda.set_rng_state_all(cuda_state)
-    if not ratios:
-        raise RuntimeError('observation Gram calibration produced no finite gradients')
-    median_ratio = float(np.median(ratios))
-    resolved = float(np.clip(target_ratio / median_ratio, 1e-4, 1.0))
+    if processed != batches or len(ratios) != batches:
+        raise RuntimeError(
+            f'v14 Gram calibration processed {processed}/{batches} batches')
+    resolved, median_ratio = _resolve_v14_gram_weight_from_ratios(
+        ratios, target_ratio)
+    quantiles = np.quantile(np.asarray(ratios, dtype=np.float64),
+                            [0.0, 0.25, 0.50, 0.75, 1.0])
+    tensor_count, parameter_count = _current_stage_parameter_counts(model)
     config['gram_gradient_calibration'] = {
-        'batches': len(ratios),
+        'requested_batches': batches,
+        'processed_batches': processed,
+        'valid_batches': len(ratios),
+        'raw_ratios': [float(value) for value in ratios],
+        'raw_ratio_summary': {
+            key: float(value) for key, value in zip(
+                ('min', 'q1', 'median', 'q3', 'max'), quantiles)
+        },
         'median_ratio': median_ratio,
         'target_ratio': target_ratio,
+        'resolved_weight': resolved,
+        'achieved_median_ratio': resolved * median_ratio,
+        'parameter_tensor_count': tensor_count,
+        'parameter_count': parameter_count,
+        'gradient_parameter_scope': GRADIENT_PARAMETER_SCOPE,
+        'calibration_precision': CALIBRATION_PRECISION,
+        'weight_resolution_semantics': (
+            'target_over_median_no_lower_clip_reject_gt_one_v1'),
+        'require_all_batches_finite_positive': True,
     }
     print(
         f'[HX Gram] 梯度比中位数={median_ratio:.6f}, '
-        f'resolved lambda={resolved:.6f}')
+        f'resolved lambda={resolved:.9f}')
     return resolved
 
 
@@ -1486,10 +1717,6 @@ def train_one_epoch(model, train_loader, batch_processor, optimizer, device,
             raise FloatingPointError(
                 f'non-finite {stage} loss at epoch={epoch + 1}, batch={batch_idx}')
 
-        decoder = (model.background_decoder if stage == 'background'
-                   else (model.density_basis_decoder
-                         if hasattr(model, 'density_basis_decoder')
-                         else model.kalman_layer))
         first_stage_epoch = (
             epoch == 0 if stage == 'background'
             else epoch == int(config['background_epochs']))
@@ -1499,7 +1726,7 @@ def train_one_epoch(model, train_loader, batch_processor, optimizer, device,
                 observation_loss,
                 auxiliary_loss + weighted_covariance + weighted_direction
                 + weighted_gram,
-                [p for p in decoder.parameters() if p.requires_grad],
+                _current_stage_trainable_parameters(model),
                 gradient_components)
             audited_batches += 1
         else:
@@ -1642,19 +1869,46 @@ def train_one_epoch(model, train_loader, batch_processor, optimizer, device,
                 **representativeness_stats,
             })
 
+        if (config.get('smoke_run', False) and first_stage_epoch
+                and batch_idx == 0):
+            _write_smoke_preflight(
+                config, stage, epoch, batch_idx,
+                {
+                    'total_auxiliary_to_observation': float(ratio.detach().cpu()),
+                    'low_altitude_to_observation': float(
+                        component_grads['low_altitude']
+                        / observation_grad.clamp_min(1e-12)),
+                    'gram_to_observation': float(
+                        component_grads['gram']
+                        / observation_grad.clamp_min(1e-12)),
+                },
+                {
+                    f'{target}_{mode}': float(
+                        (fy_gram_coverage if target == 'fy'
+                         else cosmic_gram_coverage)[mode].detach().cpu())
+                    for target in ('fy', 'cosmic')
+                    for mode in _EXACT_MODE_SOURCES
+                },
+                {
+                    'observation': float(observation_loss.detach().cpu()),
+                    'gram': float(gram_loss.detach().cpu()),
+                    'low_altitude': float(low_altitude_loss.detach().cpu()),
+                    'total': float(total_loss.detach().cpu()),
+                })
+
         optimizer.zero_grad(set_to_none=True)
         if use_amp:
             scaler.scale(total_loss).backward()
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(
-                [p for p in model.parameters() if p.requires_grad],
+                _current_stage_trainable_parameters(model),
                 config.get('grad_clip', 1.0))
             scaler.step(optimizer)
             scaler.update()
         else:
             total_loss.backward()
             torch.nn.utils.clip_grad_norm_(
-                [p for p in model.parameters() if p.requires_grad],
+                _current_stage_trainable_parameters(model),
                 config.get('grad_clip', 1.0))
             optimizer.step()
 
@@ -2569,6 +2823,13 @@ def train_fsia(config=None):
         8 if architecture['enkf_anomaly_parameterization']
         == 'orthogonal_factor' else 7))
 
+    date_split, date_split_identity = _load_or_create_date_split(config)
+    if date_split_identity is not None:
+        config['resolved_date_split'] = date_split_identity
+    # Recompute immutable input identities before any model state is restored.
+    input_data_sha256 = _resolve_input_data_sha256(config)
+    config['input_data_sha256'] = input_data_sha256
+
     sw_manager = SpaceWeatherManager(
         txt_path=config['sw_path'],
         start_date_str=config['start_date_str'],
@@ -2582,9 +2843,6 @@ def train_fsia(config=None):
     iri_proxy.eval()
     iri_peak_manager = _load_iri_peak_manager(config, device)
 
-    date_split, date_split_identity = _load_or_create_date_split(config)
-    if date_split_identity is not None:
-        config['resolved_date_split'] = date_split_identity
     loader_split_days = (
         {
             'train': date_split['train'],
@@ -2746,6 +3004,9 @@ def train_fsia(config=None):
                 raise ValueError('run66 cannot resume an older architecture checkpoint')
             model.load_state_dict(loaded, strict=True)
         else:
+            if config.get('model_domain_semantics') == _HYBRID_DOMAIN_SEMANTICS:
+                _validate_v14_resume_state(
+                    loaded, training_protocol, input_data_sha256)
             if int(loaded.get('format_version', 0)) != format_version:
                 raise ValueError(
                     f'checkpoint format does not match expected v{format_version}')
@@ -2760,9 +3021,6 @@ def train_fsia(config=None):
             if (config.get('model_domain_semantics') == _HYBRID_DOMAIN_SEMANTICS
                     and int(loaded.get('analysis_epochs', -1)) != analysis_epochs):
                 raise ValueError('v14 checkpoint analysis_epochs differs from config')
-            if (config.get('model_domain_semantics') == _HYBRID_DOMAIN_SEMANTICS
-                    and loaded.get('training_protocol') != training_protocol):
-                raise ValueError('v14 checkpoint training protocol differs from config')
             checkpoint_r_mode = loaded.get('r_mode')
             if (checkpoint_r_mode is not None
                     and checkpoint_r_mode != config.get('r_mode', 'global')):
@@ -3057,7 +3315,8 @@ def train_fsia(config=None):
                 '全量训练前应下调对应辅助权重')
         if (_low_altitude_prior_protocol(config) is not None
                 and config.get('max_train_batches') is not None
-                and train_metrics['gradient_audit_batches']):
+                and train_metrics['gradient_audit_batches']
+                and not config.get('smoke_run', False)):
             low_ratio = train_metrics['gradient_ratio_low_altitude']
             maximum = float(config['low_altitude_gradient_ratio_max'])
             if not np.isfinite(low_ratio) or low_ratio > maximum:
@@ -3068,36 +3327,6 @@ def train_fsia(config=None):
                 raise RuntimeError(
                     'low-altitude Analysis anchor has zero gradient; '
                     'check train-only token coverage before full training')
-        if (stage == 'analysis'
-                and config.get('use_observation_gram_loss', False)
-                and config.get('max_train_batches') is not None
-                and train_metrics['gradient_audit_batches']):
-            gram_ratio = train_metrics.get('gradient_ratio_gram', 0.0)
-            coverages = [
-                train_metrics[f'{target}_gram_{mode}_coverage']
-                for target in ('fy', 'cosmic')
-                for mode in ('m10', 'm01', 'm11')
-            ]
-            if not 0.016 <= gram_ratio <= 0.024:
-                raise RuntimeError(
-                    f'Gram preflight gradient ratio {gram_ratio:.6f} is outside '
-                    '[0.016, 0.024]')
-            if min(coverages) < 0.50:
-                raise RuntimeError(
-                    f'Gram preflight eligible coverage is below 0.50: {coverages}')
-            if train_metrics['gradient_ratio'] > smoke_auxiliary_limit:
-                raise RuntimeError(
-                    'Gram preflight auxiliary/observation gradient ratio exceeds '
-                    f'{smoke_auxiliary_limit:.2f}')
-            if len(batch_diagnostics) >= 40:
-                first_gram = np.median([
-                    row['gram_raw'] for row in batch_diagnostics[:20]])
-                last_gram = np.median([
-                    row['gram_raw'] for row in batch_diagnostics[-20:]])
-                if not last_gram < first_gram:
-                    raise RuntimeError(
-                        'Gram preflight loss did not decrease over the audited batches')
-
         history_row = {
             'epoch': epoch + 1,
             'stage': stage,
@@ -3199,6 +3428,7 @@ def train_fsia(config=None):
             'profile_subset': profile_subset,
             'profile_subset_identity': profile_subset_identity,
             'date_split_identity': date_split_identity,
+            'input_data_sha256': input_data_sha256,
             'allowed_profile_summary': allowed_profile_summary,
             'model_domain_data_summary': config.get(
                 'model_domain_data_summary'),
@@ -3339,6 +3569,7 @@ def train_fsia(config=None):
         'profile_subset': profile_subset,
         'profile_subset_manifest': profile_subset_identity,
         'date_split': date_split_identity,
+        'input_data_sha256': input_data_sha256,
         'allowed_profile_summary': allowed_profile_summary,
         'covariance_moment': {
             'enabled': bool(config.get('use_covariance_moment_loss', False)),

@@ -7,6 +7,13 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from .v14_contract import (
+    HYBRID_DOMAIN_SEMANTICS,
+    canonical_v14_config,
+    canonical_v14_training_protocol,
+    valid_v14_gram_calibration,
+)
+
 
 _DOMAIN_CONTRACTS = {
     'legacy_120_500_domain_v1': {
@@ -29,39 +36,6 @@ _DOMAIN_CONTRACTS = {
     },
 }
 
-_HYBRID_LOW_ALTITUDE_PROTOCOL = {
-    'low_altitude_prior_range': (120.0, 200.0),
-    'low_altitude_prior_semantics': (
-        'soft_iri_background_zero_analysis_increment_v1'),
-    'low_altitude_anchor_levels_km': tuple(float(value) for value in range(120, 200, 10)),
-    'low_altitude_anchor_profiles_per_source': 16,
-    'w_low_altitude_background_iri': 0.02,
-    'w_low_altitude_analysis_increment': 0.01,
-}
-
-_HYBRID_TRAINING_PROTOCOL = {
-    'seed': 42,
-    'smoke_run': False,
-    'background_epochs': 5,
-    'analysis_epochs': 10,
-    'background_trust_gate_enabled': False,
-    'low_altitude_anchor_selection': (
-        'first_16_unique_profiles_per_source_per_batch_first_record_v1'),
-    'low_altitude_anchor_grouping': 'source_profile_id_profile_balanced_v1',
-    'low_altitude_neighbor_profile_semantics': (
-        'synthetic_query_no_target_profile_exclusion_v1'),
-    'low_altitude_prior_protocol': {
-        'range_km': [120.0, 200.0],
-        'semantics': 'soft_iri_background_zero_analysis_increment_v1',
-        'anchor_levels_km': [float(value) for value in range(120, 200, 10)],
-        'profiles_per_source': 16,
-        'background_weight': 0.02,
-        'analysis_weight': 0.01,
-        'gradient_ratio_max': 0.25,
-    },
-}
-
-
 def _sha256(path):
     digest = hashlib.sha256()
     with Path(path).open('rb') as stream:
@@ -70,8 +44,33 @@ def _sha256(path):
     return digest.hexdigest()
 
 
+def _verify_v14_input_identity(manifest, summary):
+    identities = manifest.get('data_identity')
+    expected = manifest.get('config', {}).get('input_data_sha256')
+    resolved = manifest.get('resolved_training', {})
+    if not isinstance(identities, dict) or not isinstance(expected, dict):
+        raise ValueError('v14 manifest lacks input_data_sha256 identities')
+    actual = {}
+    for key, identity in identities.items():
+        if not isinstance(identity, dict) or not identity.get('path'):
+            raise ValueError(f'v14 manifest input identity is invalid for {key}')
+        digest = _sha256(identity['path'])
+        if digest != identity.get('sha256'):
+            raise ValueError(f'v14 input SHA256 differs from manifest for {key}')
+        actual[key] = digest
+    if 'date_split_manifest' not in actual:
+        raise ValueError('v14 manifest lacks date_split_manifest identity')
+    if actual != expected:
+        raise ValueError('v14 manifest config input_data_sha256 differs from data identity')
+    if summary.get('input_data_sha256') != actual:
+        raise ValueError('v14 summary input_data_sha256 differs from data identity')
+    if resolved.get('input_data_sha256') != actual:
+        raise ValueError('v14 resolved training input_data_sha256 differs from data identity')
+
+
 def load_fsia_analysis_checkpoint(checkpoint, device='cpu', require_domain=None,
-                                  allow_historical_epoch=False):
+                                  allow_historical_epoch=False,
+                                  expected_sha256=None):
     """Load a finite Analysis model using only its colocated run contract."""
     checkpoint = Path(checkpoint).resolve()
     manifest_path = checkpoint.parent / 'run_manifest.json'
@@ -95,7 +94,8 @@ def load_fsia_analysis_checkpoint(checkpoint, device='cpu', require_domain=None,
         parts = checkpoint.stem.split('_')
         is_historical_epoch = (len(parts) == 3 and parts[0] == 'epoch'
                                and parts[1].isdigit() and parts[2] == 'model')
-        if not (allow_historical_epoch and is_historical_epoch):
+        if not (allow_historical_epoch and is_historical_epoch
+                and expected_sha256 == actual_sha):
             raise ValueError('checkpoint SHA256 differs from training summary')
         summary = dict(summary)
         summary['checkpoint'] = str(checkpoint)
@@ -113,7 +113,7 @@ def load_fsia_analysis_checkpoint(checkpoint, device='cpu', require_domain=None,
     actual_alt_range = tuple(map(float, config.get(
         'alt_range', expected_alt_range if domain ==
         'legacy_120_500_domain_v1' else ())))
-    legacy_domain_fields = domain != 'hybrid_120_500_model_200_500_observation_v1'
+    legacy_domain_fields = domain != HYBRID_DOMAIN_SEMANTICS
     actual_observation_alt_range = tuple(map(float, config.get(
         'observation_alt_range', expected_alt_range if legacy_domain_fields else ())))
     actual_peak_search_alt_range = tuple(map(float, config.get(
@@ -163,26 +163,29 @@ def load_fsia_analysis_checkpoint(checkpoint, device='cpu', require_domain=None,
         mismatches['background_trust_gate_semantics'] = (
             config.get('background_trust_gate_semantics'),
             'fixed_altitude_localtime_dip_smoothstep_v1')
-    if domain == 'hybrid_120_500_model_200_500_observation_v1':
-        if config.get('background_trust_gate_enabled', False):
-            mismatches['background_trust_gate_enabled'] = (True, False)
-        for key, expected in _HYBRID_LOW_ALTITUDE_PROTOCOL.items():
+    if domain == HYBRID_DOMAIN_SEMANTICS:
+        expected_protocol = canonical_v14_training_protocol(False)
+        for key, expected in canonical_v14_config(False).items():
             actual = config.get(key)
             if isinstance(expected, tuple):
                 actual = tuple(map(float, actual or ()))
+                matches = actual == expected
             elif isinstance(expected, float):
-                actual = None if actual is None else float(actual)
-            if (not np.isclose(actual, expected)
-                    if isinstance(expected, float) else actual != expected):
+                try:
+                    actual = float(actual)
+                    matches = bool(np.isclose(actual, expected))
+                except (TypeError, ValueError):
+                    matches = False
+            else:
+                matches = actual == expected
+            if not matches:
                 mismatches[key] = (actual, expected)
-        for key, expected in {
-                'background_epochs': 5,
-                'analysis_epochs': 10,
-                'seed': 42,
-                'background_seed_ckpt': None,
-        }.items():
-            if config.get(key) != expected:
-                mismatches[key] = (config.get(key), expected)
+        if config.get('background_seed_ckpt') is not None:
+            mismatches['background_seed_ckpt'] = (
+                config.get('background_seed_ckpt'), None)
+        if config.get('training_protocol') != expected_protocol:
+            mismatches['config.training_protocol'] = (
+                config.get('training_protocol'), expected_protocol)
         if config.get('smoke_run', False) or summary.get('smoke_run', False):
             mismatches['smoke_run'] = (True, False)
         expected_summary = {
@@ -191,20 +194,35 @@ def load_fsia_analysis_checkpoint(checkpoint, device='cpu', require_domain=None,
             'alt_range': [120.0, 500.0],
             'observation_alt_range': [200.0, 500.0],
             'peak_search_alt_range': [200.0, 500.0],
-            'training_protocol': _HYBRID_TRAINING_PROTOCOL,
+            'training_protocol': expected_protocol,
         }
         for key, expected in expected_summary.items():
             if summary.get(key) != expected:
                 mismatches[f'training_summary.{key}'] = (
                     summary.get(key), expected)
-        if not isinstance(manifest.get('data_identity'), dict):
-            mismatches['manifest.data_identity'] = (
-                manifest.get('data_identity'), 'non-empty object')
         if not summary.get('date_split'):
             mismatches['training_summary.date_split'] = (
                 summary.get('date_split'), 'required')
+        resolved = manifest.get('resolved_training')
+        if not isinstance(resolved, dict):
+            mismatches['manifest.resolved_training'] = (resolved, 'required object')
+        else:
+            if resolved.get('training_protocol') != expected_protocol:
+                mismatches['manifest.resolved_training.training_protocol'] = (
+                    resolved.get('training_protocol'), expected_protocol)
+            calibration = resolved.get('gram_gradient_calibration')
+            if not valid_v14_gram_calibration(calibration, expected_protocol):
+                mismatches['manifest.resolved_training.gram_gradient_calibration'] = (
+                    calibration, 'complete valid 20-batch calibration')
+            summary_calibration = summary.get(
+                'observation_gram_loss', {}).get('gradient_calibration')
+            if summary_calibration != calibration:
+                mismatches['training_summary.observation_gram_loss.gradient_calibration'] = (
+                    summary_calibration, calibration)
     if mismatches:
         raise ValueError(f'FSIA checkpoint contract mismatch: {mismatches}')
+    if domain == HYBRID_DOMAIN_SEMANTICS:
+        _verify_v14_input_identity(manifest, summary)
 
     from inr_modules.data_managers.irinc_neural_proxy import IRINeuralProxy
     from inr_modules.mdia.fsia_model import FSIA_INR_Model

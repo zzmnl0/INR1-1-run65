@@ -17,6 +17,7 @@ if inr_modules_dir not in sys.path:
 
 from inr_modules.config_mdia import get_config_mdia, print_config_mdia, update_config_mdia
 from inr_modules.mdia.train_fsia import train_fsia
+from inr_modules.mdia.v14_contract import canonical_v14_training_protocol
 from inr_modules.mdia.evaluation_mdia import evaluate_and_save_report, evaluate_parity
 from inr_modules.mdia.visualization_mdia import (plot_global_slice, plot_altitude_profile,
                                                   plot_hmf2_nmf2_map)
@@ -40,6 +41,8 @@ _M2W_HYBRID_BACKGROUND_SEMANTICS = (
 _LOW_ALTITUDE_PRIOR_SEMANTICS = (
     'soft_iri_background_zero_analysis_increment_v1')
 _HYBRID_LOW_ALTITUDE_LEVELS = tuple(float(value) for value in range(120, 200, 10))
+_M2W_V14_DATE_SPLIT_SHA256 = (
+    '0576d83c72cbcfd5994e3afcb192429f965bf423a937f88a1db26eb09e21dbab')
 _DOMAIN_SPECS = {
     _M2V_DOMAIN_SEMANTICS: {
         'checkpoint_format_version': 12,
@@ -119,13 +122,16 @@ def _write_run_manifest(config):
             'fy_qc_report_path', 'cosmic_path', 'cosmic_profile_index_path',
             'cosmic_qc_report_path', 'iri_proxy_path',
             'iri_hmf2_path', 'iri_nmf2_path', 'sw_path',
-            'representativeness_kernel_path')
+            'representativeness_kernel_path', 'date_split_manifest')
         if config.get(key) and os.path.isfile(config[key])
     ]
+    data_identity = {key: _file_identity(config[key]) for key in data_keys}
+    config['input_data_sha256'] = {
+        key: identity['sha256'] for key, identity in data_identity.items()}
     manifest = {
         'created_utc': datetime.now(timezone.utc).isoformat(),
         'config': config,
-        'data_identity': {key: _file_identity(config[key]) for key in data_keys},
+        'data_identity': data_identity,
         'code_identity': _code_identity(current_dir),
         'environment': {
             'python': sys.version,
@@ -212,6 +218,8 @@ def main(eval_only=False, resume_ckpt=None, run_name=_DEFAULT_RUN_NAME,
     domain_spec = _DOMAIN_SPECS[model_domain_semantics]
     m2w_domain = model_domain_semantics != _M2V_DOMAIN_SEMANTICS
     hybrid_domain = model_domain_semantics == _M2W_HYBRID_DOMAIN_SEMANTICS
+    v14_protocol = (canonical_v14_training_protocol(smoke_run)
+                    if hybrid_domain else {})
     if model_domain_semantics == _M2V_DOMAIN_SEMANTICS:
         alt_range = tuple(prior_config.get('alt_range', config['alt_range']))
         observation_alt_range = tuple(prior_config.get(
@@ -435,6 +443,19 @@ def main(eval_only=False, resume_ckpt=None, run_name=_DEFAULT_RUN_NAME,
         w_low_altitude_analysis_increment=(0.01 if hybrid_domain else 0.0),
         low_altitude_gradient_ratio_max=(0.25 if hybrid_domain else 0.25),
         smoke_auxiliary_gradient_ratio_max=(0.25 if hybrid_domain else 0.30),
+        **{key: v14_protocol[key] for key in (
+            'training_protocol_revision',
+            'gram_weight_resolution_semantics',
+            'gradient_parameter_scope',
+            'calibration_precision',
+            'gram_require_all_batches_finite_positive',
+            'gram_preflight_ratio_bounds',
+            'gram_coverage_policy',
+            'low_altitude_anchor_selection',
+            'low_altitude_anchor_grouping',
+            'low_altitude_neighbor_profile_semantics',
+        ) if key in v14_protocol},
+        training_protocol=(v14_protocol if hybrid_domain else None),
         checkpoint_format_version=checkpoint_format_version,
         run_semantics=run_semantics,
         checkpoint_selection_semantics=(
@@ -443,7 +464,7 @@ def main(eval_only=False, resume_ckpt=None, run_name=_DEFAULT_RUN_NAME,
                                   'mean_profile_rmse_v1')),
     )
     if smoke_run:
-        update_config_mdia(r_calibration_batches=1, gram_calibration_batches=1)
+        update_config_mdia(r_calibration_batches=1)
     if qc_data:
         update_config_mdia(
             fy_path=r'D:\FYsatellite\EDP_data\fy_202409_qc_v2.npy',
@@ -497,6 +518,8 @@ def main(eval_only=False, resume_ckpt=None, run_name=_DEFAULT_RUN_NAME,
         required_paths.append('cosmic_path')
         if config.get('cosmic_profile_index_path'):
             required_paths.append('cosmic_profile_index_path')
+    if date_blocked_split:
+        required_paths.append('date_split_manifest')
     if qc_data:
         required_paths.extend(['fy_qc_report_path', 'cosmic_qc_report_path'])
     if representativeness_kernel:
@@ -508,6 +531,12 @@ def main(eval_only=False, resume_ckpt=None, run_name=_DEFAULT_RUN_NAME,
         for k in missing:
             print(f'  {k}: {config[k]}')
         return
+    if hybrid_domain:
+        split_sha256 = _file_identity(config['date_split_manifest'])['sha256']
+        if split_sha256 != _M2W_V14_DATE_SPLIT_SHA256:
+            raise RuntimeError(
+                'v14 date-split manifest SHA256 differs from the approved '
+                'train+development contract')
     if qc_data:
         for source, data_key, index_key, report_key in (
                 ('FY', 'fy_path', 'fy_profile_index_path', 'fy_qc_report_path'),
@@ -530,8 +559,17 @@ def main(eval_only=False, resume_ckpt=None, run_name=_DEFAULT_RUN_NAME,
     if is_resume:
         if not os.path.exists(config['resume_ckpt']):
             raise FileNotFoundError(f"续训 checkpoint 不存在: {config['resume_ckpt']}")
+        if hybrid_domain:
+            resume_state = torch.load(
+                config['resume_ckpt'], map_location='cpu', weights_only=False)
+            if isinstance(resume_state, dict) and resume_state.get('smoke_run', False):
+                raise ValueError('v14 smoke training states are never resumable')
         _record_resume_manifest(config)
     elif not eval_only:
+        if hybrid_domain and run_dir.exists():
+            raise FileExistsError(
+                'v14 smoke/full training requires a previously nonexistent '
+                f'target directory: {run_dir}')
         Path(config['save_dir']).mkdir(parents=True, exist_ok=True)
         if best_ckpt.exists():
             raise FileExistsError(f'新训练目录已有 checkpoint，请换用空目录: {best_ckpt}')

@@ -42,6 +42,8 @@ _M2W_DOMAINS = {
     'strict_200_500_domain_v1',
     'hybrid_120_500_model_200_500_observation_v1',
 }
+_HISTORICAL_EPOCH12_SHA256 = (
+    '486ffe73722cde1ff2909da93898e02d4d1e173700c9e4fa9dd2f0990e2fe56a')
 
 
 def _json_safe(value):
@@ -376,9 +378,17 @@ def _plot_density(path, h_records, n_records, h_prediction, n_prediction,
     plt.close(fig)
 
 
-def _load_model_context(checkpoint, device):
+def _is_historical_epoch_checkpoint(checkpoint):
+    parts = Path(checkpoint).stem.split('_')
+    return len(parts) == 3 and parts[0] == 'epoch' and parts[1].isdigit() \
+        and parts[2] == 'model'
+
+
+def _load_model_context(checkpoint, device, historical_sha256=None):
     model, config, _, summary = load_fsia_analysis_checkpoint(
-        checkpoint, device=device, allow_historical_epoch=True)
+        checkpoint, device=device,
+        allow_historical_epoch=historical_sha256 is not None,
+        expected_sha256=historical_sha256)
     peak_range = _require_m2w_peak_contract(config)
     return model, config, summary, peak_range, allowed_observation_profile_ids(config)
 
@@ -391,7 +401,8 @@ def _paired_model_bootstrap(records, field, candidate, baseline):
         replicates=2000, seed=42)
 
 
-def evaluate_giro_peak(checkpoint, save_dir=None, baseline_checkpoint=None):
+def evaluate_giro_peak(checkpoint, save_dir=None, baseline_checkpoint=None,
+                       baseline_checkpoint_sha256=None):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model, config, summary, peak_range, allowed = _load_model_context(
         checkpoint, device)
@@ -399,9 +410,19 @@ def evaluate_giro_peak(checkpoint, save_dir=None, baseline_checkpoint=None):
     baseline_model = baseline_config = baseline_summary = baseline_contract = None
     baseline_allowed = None
     if baseline_checkpoint is not None:
+        if (_is_historical_epoch_checkpoint(baseline_checkpoint)
+                and not baseline_checkpoint_sha256):
+            raise ValueError(
+                'historical GIRO baseline requires --baseline-checkpoint-sha256')
+        if (Path(baseline_checkpoint).name == 'epoch_12_model.pth'
+                and baseline_checkpoint_sha256 != _HISTORICAL_EPOCH12_SHA256):
+            raise ValueError('historical epoch12 GIRO baseline SHA256 is not approved')
         (baseline_model, baseline_config, baseline_summary,
          baseline_peak_range, baseline_allowed) = _load_model_context(
-            baseline_checkpoint, device)
+            baseline_checkpoint, device, baseline_checkpoint_sha256)
+        if (Path(baseline_checkpoint).name == 'epoch_12_model.pth'
+                and baseline_config.get('background_trust_gate_enabled', False)):
+            raise ValueError('historical epoch12 GIRO baseline must be gate-off')
         if baseline_peak_range != peak_range:
             raise ValueError('candidate and baseline peak-search domains differ')
         if (config['fy_path'] != baseline_config['fy_path']
@@ -549,6 +570,8 @@ if __name__ == '__main__':
     parser.add_argument('--checkpoint', required=True)
     parser.add_argument('--save-dir')
     parser.add_argument('--baseline-checkpoint')
+    parser.add_argument('--baseline-checkpoint-sha256')
     arguments = parser.parse_args()
     evaluate_giro_peak(arguments.checkpoint, arguments.save_dir,
-                       arguments.baseline_checkpoint)
+                       arguments.baseline_checkpoint,
+                       arguments.baseline_checkpoint_sha256)

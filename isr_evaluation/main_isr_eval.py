@@ -74,6 +74,8 @@ CONFIG = {
     'run_jicamarca':  True,
     'run_poker_flat': True,
 }
+_HISTORICAL_EPOCH12_SHA256 = (
+    '486ffe73722cde1ff2909da93898e02d4d1e173700c9e4fa9dd2f0990e2fe56a')
 # ─────────────────────────────────────────────
 
 
@@ -437,7 +439,8 @@ def _load_state_compat(model, state_dict):
             print(msg)
 
 
-def _load_model_and_managers(config, device, checkpoint=None):
+def _load_model_and_managers(config, device, checkpoint=None,
+                             historical_expected_sha256=None):
     """加载模型、SpaceWeatherManager 和 IRIPeakManager。
 
     Returns:
@@ -455,7 +458,10 @@ def _load_model_and_managers(config, device, checkpoint=None):
             allowed_observation_profile_ids,
             load_fsia_analysis_checkpoint,
         )
-        model, cfg, _, _ = load_fsia_analysis_checkpoint(ckpt, device)
+        model, cfg, _, _ = load_fsia_analysis_checkpoint(
+            ckpt, device,
+            allow_historical_epoch=historical_expected_sha256 is not None,
+            expected_sha256=historical_expected_sha256)
         _require_m2v_config(cfg)
         allowed_profile_ids = allowed_observation_profile_ids(cfg)
         model_name = 'FSIA-INR'
@@ -962,8 +968,14 @@ def _process_station(station_name, day_records, model, sw_manager,
     return report
 
 
+def _is_historical_epoch_checkpoint(checkpoint):
+    parts = os.path.splitext(os.path.basename(checkpoint))[0].split('_')
+    return (len(parts) == 3 and parts[0] == 'epoch' and parts[1].isdigit()
+            and parts[2] == 'model')
+
+
 def main(checkpoint=None, save_dir=None, preflight_only=False,
-         baseline_checkpoint=None):
+         baseline_checkpoint=None, baseline_checkpoint_sha256=None):
     if checkpoint is not None:
         CONFIG['checkpoint_path'] = checkpoint
     if save_dir is not None:
@@ -993,10 +1005,21 @@ def main(checkpoint=None, save_dir=None, preflight_only=False,
     baseline_context = None
     baseline_contract = None
     if baseline_checkpoint is not None:
+        if (_is_historical_epoch_checkpoint(baseline_checkpoint)
+                and not baseline_checkpoint_sha256):
+            raise ValueError(
+                'historical ISR baseline requires --baseline-checkpoint-sha256')
+        if (os.path.basename(baseline_checkpoint) == 'epoch_12_model.pth'
+                and baseline_checkpoint_sha256 != _HISTORICAL_EPOCH12_SHA256):
+            raise ValueError('historical epoch12 ISR baseline SHA256 is not approved')
         (baseline_model, baseline_sw, baseline_cfg, _, baseline_iri_peak,
          baseline_fy_index, baseline_cosmic_index,
          baseline_allowed) = _load_model_and_managers(
-            CONFIG, device, checkpoint=baseline_checkpoint)
+            CONFIG, device, checkpoint=baseline_checkpoint,
+            historical_expected_sha256=baseline_checkpoint_sha256)
+        if (os.path.basename(baseline_checkpoint) == 'epoch_12_model.pth'
+                and baseline_cfg.get('background_trust_gate_enabled', False)):
+            raise ValueError('historical epoch12 ISR baseline must be gate-off')
         baseline_contract = _checkpoint_evaluation_contract(
             baseline_checkpoint, baseline_cfg)
         if (candidate_contract['observation_alt_range_km'] !=
@@ -1206,14 +1229,17 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument(
         '--checkpoint', required=True,
-        help='必需：完整Analysis阶段的FSIA v12/v13 checkpoint路径')
+        help='必需：完整Analysis阶段的FSIA v12/v13/v14 checkpoint路径')
     parser.add_argument('--save-dir', default=None)
     parser.add_argument('--baseline-checkpoint', default=None,
                         help='paired M2-W baseline evaluated on the same ISR loop')
+    parser.add_argument('--baseline-checkpoint-sha256', default=None,
+                        help='required for a historical epoch baseline')
     parser.add_argument(
         '--preflight-only', action='store_true',
         help='只加载并核验模型与配置，不读取ISR数据或生成评估输出')
     args = parser.parse_args()
     main(checkpoint=args.checkpoint, save_dir=args.save_dir,
          preflight_only=args.preflight_only,
-         baseline_checkpoint=args.baseline_checkpoint)
+         baseline_checkpoint=args.baseline_checkpoint,
+         baseline_checkpoint_sha256=args.baseline_checkpoint_sha256)

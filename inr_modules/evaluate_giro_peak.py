@@ -24,12 +24,13 @@ if __name__ == '__main__':
     parser.add_argument('--checkpoint', required=True)
     parser.add_argument('--save-dir')
     parser.add_argument('--baseline-checkpoint')
+    parser.add_argument('--baseline-checkpoint-sha256')
     parser.add_argument('--preflight-only', action='store_true')
     arguments = parser.parse_args()
     if arguments.preflight_only:
         _, config, _, summary = load_fsia_analysis_checkpoint(
             arguments.checkpoint, device=torch.device('cpu'),
-            allow_historical_epoch=True)
+            allow_historical_epoch=False)
         _require_m2w_peak_contract(config)
         print('[preflight] M2-W Analysis checkpoint passed: '
               f'v{summary["checkpoint_format_version"]}, '
@@ -37,4 +38,5 @@ if __name__ == '__main__':
     else:
         evaluate_giro_peak(
             arguments.checkpoint, arguments.save_dir,
-            arguments.baseline_checkpoint)
+            arguments.baseline_checkpoint,
+            arguments.baseline_checkpoint_sha256)
