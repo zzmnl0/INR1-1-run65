@@ -2,7 +2,10 @@ import torch
 import torch.nn as nn
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.colors import LogNorm
 import os
+
+from inr_modules.density_units import DENSITY_UNIT_LABEL, log10_density_to_display
 
 # ==========================================
 # 1. SIREN Layer (The Core for Derivatives)
@@ -377,13 +380,14 @@ def main():
             viz_tensor = torch.tensor(viz_inputs, dtype=torch.float32).to(DEVICE)
             
             pred_log_ne = proxy(viz_tensor).cpu().numpy().reshape(181, 360)
-            pred_results.append(pred_log_ne)
+            pred_results.append(log10_density_to_display(pred_log_ne))
 
     # 自动计算 min 和 max
     all_preds = np.array(pred_results)
     auto_vmin = np.min(all_preds)
     auto_vmax = np.max(all_preds)
-    print(f"自动色标范围: vmin={auto_vmin:.2f}, vmax={auto_vmax:.2f}")
+    print(f"自动色标范围: vmin={auto_vmin:.3g}, vmax={auto_vmax:.3g} "
+          f"(10^11 m^-3)")
 
     # 统一绘图
     fig, axes = plt.subplots(1, 4, figsize=(24, 5))
@@ -391,15 +395,18 @@ def main():
     im = None
     for i, (alt, pred_data) in enumerate(zip(target_alts, pred_results)):
         ax = axes[i]
-        im = ax.pcolormesh(viz_lons, viz_lats, pred_data, cmap='plasma', shading='auto', 
-                           vmin=auto_vmin, vmax=auto_vmax)
+        im = ax.pcolormesh(
+            viz_lons, viz_lats, pred_data, cmap='plasma', shading='auto',
+            norm=LogNorm(vmin=max(auto_vmin, 1e-12), vmax=auto_vmax))
         
         ax.set_title(f"Neural Proxy Interpolation\nAlt={alt}km, Time={TEST_TIME_HOUR:.1f}h")
         ax.set_xlabel("Longitude")
         if i == 0: ax.set_ylabel("Latitude")
 
     # 共享 Colorbar
-    cbar = plt.colorbar(im, ax=axes.ravel().tolist(), label='Log10 Electron Density')
+    cbar = plt.colorbar(
+        im, ax=axes.ravel().tolist(),
+        label=f'Electron Density ({DENSITY_UNIT_LABEL})')
     plt.suptitle(f"IRI-2024 Neural Surrogate Field Interpolation Test (t={TEST_TIME_HOUR}h)", fontsize=16)
     
     os.makedirs(os.path.dirname(VIZ_SAVE_PATH), exist_ok=True)

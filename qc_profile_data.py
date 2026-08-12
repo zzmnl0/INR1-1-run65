@@ -19,6 +19,8 @@ import numpy as np
 from scipy.ndimage import median_filter
 from scipy.signal import find_peaks, savgol_filter
 
+from inr_modules.density_units import DENSITY_UNIT_LABEL, density_to_display
+
 
 ROOT = Path(__file__).resolve().parent
 START_UTC = datetime(2024, 9, 1, tzinfo=timezone.utc)
@@ -594,10 +596,12 @@ def _save_anomaly_plots(
             altitude = physical[order, 2]
             density = physical[order, 3]
             figure, axis = plt.subplots(figsize=(4.5, 6.0))
-            axis.plot(np.log10(np.clip(density, 1.0, None)), altitude, ".-", ms=2)
+            axis.plot(density_to_display(np.clip(density, 1.0, None)),
+                      altitude, ".-", ms=2)
             axis.axhline(result.h_cut_km, color="tab:red", ls="--")
+            axis.set_xscale("log")
             axis.set(
-                xlabel="log10 Ne (m-3)", ylabel="Altitude (km)",
+                xlabel=f"Ne ({DENSITY_UNIT_LABEL})", ylabel="Altitude (km)",
                 title=f"{label}\n{reason}; bits={result.reason_bits}",
             )
             axis.grid(alpha=0.25)

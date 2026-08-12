@@ -31,9 +31,7 @@ def _candidate(run_dir):
         raise ValueError(f'{run_dir} Background checkpoint identity mismatch')
     metrics = summary.get('background_development') or {}
     values = np.asarray([
-        0.5 * (metrics['fy_ccc'] + metrics['cosmic_ccc']),
-        0.5 * (metrics['fy_rmse'] + metrics['cosmic_rmse']),
-        0.5 * (metrics['fy_pearson_r'] + metrics['cosmic_pearson_r']),
+        metrics['ccc'], metrics['rmse'], metrics['pearson_r'],
     ], dtype=np.float64)
     eligible = bool(summary.get('background_development_gate_passed'))
     eligible = eligible and np.isfinite(values).all()

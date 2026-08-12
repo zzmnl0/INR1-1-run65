@@ -23,7 +23,7 @@ def plot_training_curves(history, save_path='fsia_training_curves.png'):
     ax.plot(epochs, _get('fy_profile_rmse'), label='FY profile RMSE')
     ax.plot(epochs, _get('cosmic_profile_rmse'), label='COSMIC profile RMSE')
     ax.plot(epochs, _get('val_score'), label='Selection score', ls='--')
-    ax.set_ylabel('log10Ne')
+    ax.set_ylabel('Profile RMSE (dex)')
     ax.set_title('Profile-balanced validation')
     ax.legend()
     ax.grid(True, alpha=0.25)

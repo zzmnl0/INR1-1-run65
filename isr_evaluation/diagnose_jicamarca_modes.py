@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from inr_modules.density_units import DENSITY_UNIT_LABEL, log10_density_to_display
 from inr_modules.mdia.sliding_dataset import (
     attach_observation_background,
     query_observation_payload,
@@ -398,9 +399,11 @@ def _qc_profile_audit(rows, data_path, index_path, output, source):
     figure, axes = plt.subplots(4, 5, figsize=(15, 14), squeeze=False)
     for axis, item, curve in zip(axes.flat, audited, curves):
         if curve is not None and len(curve):
-            axis.plot(curve[:, 4], curve[:, 2], linewidth=1.0)
+            axis.plot(log10_density_to_display(curve[:, 4]), curve[:, 2],
+                      linewidth=1.0)
         axis.set_title(f'{source} profile {item["profile_id"]}', fontsize=8)
-        axis.set_xlabel('log10Ne')
+        axis.set_xlabel(f'Ne ({DENSITY_UNIT_LABEL})')
+        axis.set_xscale('log')
         axis.set_ylabel('Altitude (km)')
         axis.grid(alpha=0.25)
     for axis in axes.flat[len(audited):]:

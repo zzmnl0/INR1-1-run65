@@ -14,6 +14,10 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 from matplotlib.colors import LogNorm
 from sklearn.metrics import r2_score, mean_squared_error
 from scipy.stats import pearsonr
+from inr_modules.density_units import (
+    DENSITY_UNIT_LABEL,
+    log10_density_to_display,
+)
 from .sliding_dataset import attach_observation_background
 
 
@@ -192,15 +196,20 @@ def evaluate_parity(model, val_loader, batch_processor, save_dir,
     m_bkg = _calc_metrics(true, bkg)
     m_inr = _calc_metrics(true, pred)
 
-    ax_min = np.floor(min(true.min(), iri.min(), bkg.min(), pred.min()) * 10) / 10
-    ax_max = np.ceil(max(true.max(), iri.max(), bkg.max(), pred.max()) * 10) / 10
+    true_plot = log10_density_to_display(true)
+    ys_plot = [log10_density_to_display(values)
+               for values in (iri, bkg, pred)]
+    ax_min = min(true_plot.min(), *(values.min() for values in ys_plot))
+    ax_max = max(true_plot.max(), *(values.max() for values in ys_plot))
+    ax_min *= 0.95
+    ax_max *= 1.05
 
     def _make_title(label, m):
         return (f'{label} vs 观测\n'
-                f'RMSE={m[0]:.4f}  R²={m[1]:.4f}  R={m[2]:.4f}')
+                f'log10 metrics: RMSE={m[0]:.4f} dex  '
+                f'R²={m[1]:.4f}  R={m[2]:.4f}')
 
     panel_labels = ['Raw IRI', 'FNDA Background', 'FSIA-INR M11']
-    ys = [iri, bkg, pred]
     colors = ['steelblue', 'gray', 'darkorange']
     titles = [
         _make_title(label, metrics)
@@ -209,15 +218,17 @@ def evaluate_parity(model, val_loader, batch_processor, save_dir,
 
     # ---- 散点图 ----
     fig1, axes = plt.subplots(1, 3, figsize=(19, 6), dpi=150)
-    for ax, y, title, color in zip(axes, ys, titles, colors):
-        ax.scatter(true, y, alpha=0.05, s=0.5, c=color, rasterized=True)
+    for ax, y, title, color in zip(axes, ys_plot, titles, colors):
+        ax.scatter(true_plot, y, alpha=0.05, s=0.5, c=color, rasterized=True)
         ax.plot([ax_min, ax_max], [ax_min, ax_max], 'r--', lw=1.5, alpha=0.8, label='1:1')
         ax.set_title(title, fontsize=11, fontweight='bold')
-        ax.set_xlabel('观测 Ne (log10)', fontsize=10)
-        ax.set_ylabel('预测 Ne (log10)', fontsize=10)
+        ax.set_xlabel(f'观测 Ne ({DENSITY_UNIT_LABEL})', fontsize=10)
+        ax.set_ylabel(f'预测 Ne ({DENSITY_UNIT_LABEL})', fontsize=10)
+        ax.set_xscale('log')
+        ax.set_yscale('log')
         ax.set_xlim(ax_min, ax_max)
         ax.set_ylim(ax_min, ax_max)
-        ax.set_aspect('equal')
+        ax.set_aspect('equal', 'box')
         ax.grid(True, alpha=0.3)
         ax.legend(fontsize=9)
     plt.suptitle('FSIA-INR Parity — 散点图（验证集）', fontsize=13, fontweight='bold')
@@ -228,16 +239,20 @@ def evaluate_parity(model, val_loader, batch_processor, save_dir,
     print(f'  散点图已保存: {scatter_path}')
 
     # ---- 密度图 ----
-    plot_range = [[ax_min, ax_max], [ax_min, ax_max]]
+    density_edges = np.geomspace(ax_min, ax_max, 301)
     fig2, axes = plt.subplots(1, 3, figsize=(20, 6), dpi=150)
-    for ax, y, title in zip(axes, ys, titles):
-        h = ax.hist2d(true, y, bins=300, range=plot_range,
+    for ax, y, title in zip(axes, ys_plot, titles):
+        h = ax.hist2d(true_plot, y, bins=[density_edges, density_edges],
                       cmap='turbo', norm=LogNorm(), cmin=1)
         ax.plot([ax_min, ax_max], [ax_min, ax_max], 'w--', lw=1.5, alpha=0.8, label='1:1')
         ax.set_title(title, fontsize=11, fontweight='bold')
-        ax.set_xlabel('观测 Ne (log10)', fontsize=10)
-        ax.set_ylabel('预测 Ne (log10)', fontsize=10)
-        ax.set_aspect('equal')
+        ax.set_xlabel(f'观测 Ne ({DENSITY_UNIT_LABEL})', fontsize=10)
+        ax.set_ylabel(f'预测 Ne ({DENSITY_UNIT_LABEL})', fontsize=10)
+        ax.set_xscale('log')
+        ax.set_yscale('log')
+        ax.set_xlim(ax_min, ax_max)
+        ax.set_ylim(ax_min, ax_max)
+        ax.set_aspect('equal', 'box')
         ax.grid(True, linestyle=':', alpha=0.4)
         ax.legend(fontsize=9)
         divider = make_axes_locatable(ax)

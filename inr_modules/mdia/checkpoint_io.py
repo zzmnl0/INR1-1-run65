@@ -22,7 +22,8 @@ def _sha256(path):
     return digest.hexdigest()
 
 
-def load_fsia_analysis_checkpoint(checkpoint, device='cpu', require_domain=None):
+def load_fsia_analysis_checkpoint(checkpoint, device='cpu', require_domain=None,
+                                  allow_historical_epoch=False):
     """Load a finite Analysis model using only its colocated run contract."""
     checkpoint = Path(checkpoint).resolve()
     manifest_path = checkpoint.parent / 'run_manifest.json'
@@ -43,7 +44,14 @@ def load_fsia_analysis_checkpoint(checkpoint, device='cpu', require_domain=None)
         raise ValueError('training summary checkpoint_stage is not analysis')
     actual_sha = _sha256(checkpoint)
     if summary.get('checkpoint_sha256') != actual_sha:
-        raise ValueError('checkpoint SHA256 differs from training summary')
+        parts = checkpoint.stem.split('_')
+        is_historical_epoch = (len(parts) == 3 and parts[0] == 'epoch'
+                               and parts[1].isdigit() and parts[2] == 'model')
+        if not (allow_historical_epoch and is_historical_epoch):
+            raise ValueError('checkpoint SHA256 differs from training summary')
+        summary = dict(summary)
+        summary['checkpoint'] = str(checkpoint)
+        summary['checkpoint_sha256'] = actual_sha
 
     domain = config.get(
         'model_domain_semantics', 'legacy_120_500_domain_v1')

@@ -18,6 +18,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from estimate_empirical_covariance import _deterministic_npz, _sha256
+from inr_modules.density_units import DENSITY_UNIT_LABEL, density_to_display
 from qc_profile_data import (
     COSMIC_INPUT,
     FY_DIRS,
@@ -870,25 +871,28 @@ def _plot_review_sheets(
                 ylabel="Altitude (km)",
                 title=review_id,
             )
-            with np.errstate(divide="ignore", invalid="ignore"):
-                ax_log.plot(
-                    np.log10(curves["density"]),
-                    curves["alt"],
-                    ".",
-                    color="0.55",
-                    ms=2,
-                )
-                ax_log.plot(
-                    np.log10(curves["median30"]),
-                    curves["grid"],
-                    color="tab:blue",
-                )
-                ax_log.plot(
-                    np.log10(curves["detection"]),
-                    curves["grid"],
-                    color="tab:orange",
-                )
-            ax_log.set(xlabel="log10 Ne", title=f"{review_id} log")
+            ax_log.plot(
+                density_to_display(np.clip(curves["density"], 1.0, None)),
+                curves["alt"],
+                ".",
+                color="0.55",
+                ms=2,
+            )
+            ax_log.plot(
+                density_to_display(np.clip(curves["median30"], 1.0, None)),
+                curves["grid"],
+                color="tab:blue",
+            )
+            ax_log.plot(
+                density_to_display(np.clip(curves["detection"], 1.0, None)),
+                curves["grid"],
+                color="tab:orange",
+            )
+            ax_log.set_xscale("log")
+            ax_log.set(
+                xlabel=f"Ne ({DENSITY_UNIT_LABEL})",
+                title=f"{review_id} absolute",
+            )
             ax_log.tick_params(labelleft=False)
         used = min(8, len(review_rows) - sheet_start)
         for local in range(used, 8):

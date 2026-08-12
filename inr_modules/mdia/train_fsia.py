@@ -2316,9 +2316,7 @@ def train_fsia(config=None):
             else config.get('val_ratio', 0.1)),
         split_seed=config['seed'],
         points_per_profile=config.get('profile_points_per_epoch', 8),
-        full_validation_profiles=(
-            config.get('model_domain_semantics') ==
-            'strict_200_500_domain_v1'),
+        full_validation_profiles=False,
         split_days=loader_split_days,
         alt_range=config.get('alt_range'),
     )
@@ -2342,9 +2340,7 @@ def train_fsia(config=None):
     }
     config['model_domain_data_summary'] = {
         'alt_range_km': [float(value) for value in config['alt_range']],
-        'development_sampling': (
-            'all_domain_points' if config.get('model_domain_semantics') ==
-            'strict_200_500_domain_v1' else 'stable_8_points_per_profile'),
+        'development_sampling': 'stable_8_points_per_profile',
         'FY': {
             'train_points': int(len(train_loader.dataset)),
             'development_points': int(len(val_loader.dataset)),

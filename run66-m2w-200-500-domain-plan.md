@@ -10,7 +10,7 @@ M2-V以提交`d80d7bdfb50935e16113d302a51193e6844384fd`和远程恢复标签`run
 
 FY和COSMIC在共享Dataset及NeighborhoodIndex入口按`200≤h≤500 km`过滤，不重新QC、不改变date-blocked划分或profile身份。每条profile继续保留8个稳定高度token；exact token表示检索1800 km×1.5 h正支持内的全部ragged token，不使用profile center或top-k。训练与外部推理token只允许train和development profile，locked-test profile不参与模型输入。
 
-D64/N8、7个活动集合方向、Global R、4096 token分块、Gram约束及连续Gaspari–Cohn局地化保持不变。IRI代理不重训。M2-W最终development遍历全部域内点，训练期8点profile采样不得进入checkpoint选择或最终评估。
+D64/N8、7个活动集合方向、Global R、4096 token分块、Gram约束及连续Gaspari–Cohn局地化保持不变。IRI代理不重训。训练期checkpoint选择对每条development profile确定性等距采样8个高度点；训练结束后的正式development评估仍遍历全部域内点，且只有正式全量结果用于最终精度结论。
 
 ## Background候选与Analysis
 
@@ -21,7 +21,7 @@ D64/N8、7个活动集合方向、Global R、4096 token分块、Gram约束及连
 
 两者禁止M2-V或其他外部seed。gate-on仅复用M2-V现有连续可信度门，不实施已记录的300 km回退核心及300–350 km过渡方案。两候选均须满足FY和COSMIC各自`RMSE(M00)≤RMSE(Raw IRI)`；合格候选按两来源平均CCC最大、RMSE最小、Pearson R最大进行字典序选择，完全相同时选择gate-off。若均不合格，不启动Analysis。
 
-胜出候选续训10个Analysis epoch。最佳checkpoint按FY/COSMIC完整development的M11平均CCC最大、平均RMSE最小、平均Pearson R最大选择，任何非有限指标均不能成为最佳模型。
+胜出候选续训10个Analysis epoch。训练期最佳checkpoint按FY/COSMIC稳定8点development样本的M11平均CCC最大、平均RMSE最小、平均Pearson R最大选择，任何非有限指标均不能成为最佳模型；训练完成后再对最佳checkpoint执行一次全量development评估。
 
 ## 可视化与外部评估
 
@@ -39,6 +39,6 @@ Analysis完成后生成全球切片、hmF2/NmF2图及200–500 km EDP廓线。IS
 
 ## 验证与执行约束
 
-回归检查覆盖200/500 km边界、域外target/token排除、profile身份、v12兼容、v13错误域及Background-only拒绝、完整development、字典序选择、ISR公共掩码、locked-test token排除、GIRO独立寻峰及bootstrap确定性和三种判定。随后执行相关pytest、模型自检、语法检查、`git diff --check`和单批smoke test。
+回归检查覆盖200/500 km边界、域外target/token排除、profile身份、v12兼容、v13错误域及Background-only拒绝、训练期稳定8点development采样、正式全量development、字典序选择、ISR公共掩码、locked-test token排除、GIRO独立寻峰及bootstrap确定性和三种判定。随后执行相关pytest、模型自检、语法检查、`git diff --check`和单批smoke test。
 
 仅提交源码、测试和本计划；排除checkpoint、日志、评估输出、`reports/`、PPTX和临时目录。长训练每30分钟单次检查，不持续追踪、不自动重启。

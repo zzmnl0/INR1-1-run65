@@ -12,6 +12,10 @@ from matplotlib.colors import LogNorm
 import numpy as np
 import torch
 
+from inr_modules.density_units import (
+    DENSITY_UNIT_LABEL,
+    log10_density_to_display,
+)
 from inr_modules.data_managers.FY_dataloader import (
     COSMICNeighborhoodIndex, FYNeighborhoodIndex)
 from inr_modules.data_managers.iri_peak_manager import IRIPeakManager
@@ -173,21 +177,26 @@ def _plot_density(path, h_records, n_records, h_prediction, n_prediction,
     fig, axes = plt.subplots(2, 3, figsize=(17, 11), dpi=150)
     for row, (records, predictions, metrics, quantity) in enumerate((
             (h_records, h_prediction, h_metrics, 'hmF2 (km)'),
-            (n_records, n_prediction, n_metrics, 'NmF2 (log10)'))):
+            (n_records, n_prediction, n_metrics,
+             f'NmF2 ({DENSITY_UNIT_LABEL})'))):
         truth = records[:, 3]
         for column, source in enumerate(('IRI', 'M00', 'M11')):
             prediction = predictions[source][
                 'hmf2' if row == 0 else 'nmf2']
             finite = np.isfinite(truth) & np.isfinite(prediction)
             x, y = truth[finite], prediction[finite]
+            if row == 1:
+                x = log10_density_to_display(x)
+                y = log10_density_to_display(y)
             lower, upper = float(min(x.min(), y.min())), float(max(x.max(), y.max()))
             image = axes[row, column].hist2d(
                 x, y, bins=100, range=[[lower, upper], [lower, upper]],
                 cmap='turbo', norm=LogNorm(), cmin=1)
             axes[row, column].plot([lower, upper], [lower, upper], 'w--', lw=1)
             value = metrics[source]
+            metric_label = 'log10-space ' if row == 1 else ''
             axes[row, column].set_title(
-                f'{source} {quantity}\nCCC={value["ccc"]:.4f}  '
+                f'{source} {quantity}\n{metric_label}CCC={value["ccc"]:.4f}  '
                 f'RMSE={value["rmse"]:.3f}  R={value["pearson_r"]:.4f}')
             axes[row, column].set_xlabel(f'GIRO {quantity}')
             axes[row, column].set_ylabel(f'Prediction {quantity}')
@@ -201,7 +210,8 @@ def evaluate_giro_peak(checkpoint, save_dir=None):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model, config, _, summary = load_fsia_analysis_checkpoint(
         checkpoint, device=device,
-        require_domain='strict_200_500_domain_v1')
+        require_domain='strict_200_500_domain_v1',
+        allow_historical_epoch=True)
     save_dir = Path(save_dir or Path(checkpoint).resolve().parent / 'giro_peak_eval')
     save_dir.mkdir(parents=True, exist_ok=True)
 

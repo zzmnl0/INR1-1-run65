@@ -765,7 +765,7 @@ def _save_figure(report, output):
     ]
     figure, axes = plt.subplots(1, 3, figsize=(14, 4.2))
     axes[0].bar(names, rmse, color=("#0072B2", "#E69F00", "#009E73"))
-    axes[0].set_ylabel("RMSE (log10 Ne)")
+    axes[0].set_ylabel("RMSE (dex)")
     axes[0].set_title("Jicamarca 120-300 km nighttime")
 
     for source, color in (("FY", "#0072B2"), ("COSMIC", "#D55E00")):

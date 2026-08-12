@@ -5,7 +5,7 @@ MDIA-INR / FSIA-INR 局地时垂直切片可视化
     plot_vertical_slice_lt — 固定经度扇区，多地方时垂直（纬度×高度）切片图
                               横轴：地理纬度 90°N → 90°S
                               纵轴：高度 120–500 km
-                              色标：与 plot_global_slice 一致（log 离散 jet，7×10⁹–4×10¹² el/m³）
+                              色标：物理密度（10¹¹ m⁻³），对数间隔 jet
 
 时间约定：
     输入为模型世界时（UT）的 global_time（小数小时，距 start_date 起算）。
@@ -25,6 +25,9 @@ import matplotlib.pyplot as plt
 
 matplotlib.rcParams['font.sans-serif'] = ['Microsoft YaHei', 'SimHei', 'STXihei', 'DejaVu Sans']
 matplotlib.rcParams['axes.unicode_minus'] = False
+
+_DENSITY_SCALE_M3 = 1.0e11
+_DENSITY_UNIT_LABEL = r'$10^{11}$ m$^{-3}$'
 
 # 从同目录导入辅助函数（与 visualization_mdia.py 共享色标工具）
 try:
@@ -126,8 +129,8 @@ def plot_vertical_slice_lt(
     LAT_2D, ALT_2D = np.meshgrid(lat_grid, alt_grid, indexing='ij')  # [n_lat, n_alt]
 
     # ---- 固定色标（与 plot_global_slice 一致）----
-    _ne_lo = np.log10(7e9)
-    _ne_hi = np.log10(4e12)
+    _ne_lo = np.log10(7e9 / _DENSITY_SCALE_M3)
+    _ne_hi = np.log10(4e12 / _DENSITY_SCALE_M3)
     ne_cmap, ne_norm, ne_bounds = _discrete_norm_log('jet', _ne_lo, _ne_hi, n=20)
 
     # ---- global_time → LT/UT 标签（LT = UT + lon/15，精确到分钟）----
@@ -173,7 +176,8 @@ def plot_vertical_slice_lt(
         # ---- 推理 ----
         result    = _infer_grid(model, coords_np, sw_seq_single, device,
                                 iri_peak_manager=iri_peak_manager)
-        ne_lin    = (10.0 ** result['ne_fused']).reshape(n_lat, n_alt)
+        ne_lin = ((10.0 ** result['ne_fused']) / _DENSITY_SCALE_M3
+                  ).reshape(n_lat, n_alt)
         hmf2_line = _hmf2_from_ne(ne_lin, alt_grid)          # [n_lat] 廓线 argmax
 
         # IRI structural-reference hmF2 (km).
@@ -181,7 +185,8 @@ def plot_vertical_slice_lt(
         _has_pk = not np.all(np.isnan(_hmf2_pk_raw))
 
         # IRI 背景：同步提取，缓存供第二张画布
-        ne_iri   = (10.0 ** result['ne_bkg']).reshape(n_lat, n_alt)
+        ne_iri = ((10.0 ** result['ne_bkg']) / _DENSITY_SCALE_M3
+                  ).reshape(n_lat, n_alt)
         hmf2_iri = _hmf2_from_ne(ne_iri, alt_grid)
         iri_panels.append((lt_str, ut_int, ut_min, ut_day,
                            kp_disp, f107_disp, ne_iri, hmf2_iri))
@@ -229,7 +234,8 @@ def plot_vertical_slice_lt(
     fig.subplots_adjust(right=0.87, hspace=0.40, wspace=0.08)
     cbar_ax = fig.add_axes([0.895, 0.10, 0.016, 0.76])
     cb = fig.colorbar(ims[0], cax=cbar_ax)
-    cb.set_label('Electron Density (el/m³)', fontsize=10, labelpad=6)
+    cb.set_label(f'Electron Density ({_DENSITY_UNIT_LABEL})',
+                 fontsize=10, labelpad=6)
     _fmt_log_ticks(cb, ne_bounds)
     cb.ax.tick_params(labelsize=8)
 
@@ -298,7 +304,8 @@ def plot_vertical_slice_lt(
     fig2.subplots_adjust(right=0.87, hspace=0.40, wspace=0.08)
     cbar_ax2 = fig2.add_axes([0.895, 0.10, 0.016, 0.76])
     cb2 = fig2.colorbar(ims2[0], cax=cbar_ax2)
-    cb2.set_label('Electron Density (el/m³)', fontsize=10, labelpad=6)
+    cb2.set_label(f'Electron Density ({_DENSITY_UNIT_LABEL})',
+                  fontsize=10, labelpad=6)
     _fmt_log_ticks(cb2, ne_bounds)
     cb2.ax.tick_params(labelsize=8)
 
@@ -339,7 +346,7 @@ def plot_lt_lat_map(
     行 2：model_name — NmF2 | hmF2（从最终 Ne_fused 廓线 argmax + 抛物线插值精化）
 
     色标：
-        NmF2  log10 离散 jet，8×10¹⁰ – 4×10¹² el/m³，20 级
+        NmF2  物理密度（10¹¹ m⁻³），对数间隔 jet，20 级
         hmF2  线性离散 plasma，200 – 500 km，15 级（步长 20 km）
 
     扫描：lt_grid = linspace(0,24,n_lt)（默认 0.5h，49 步）
@@ -390,21 +397,23 @@ def plot_lt_lat_map(
         result = _infer_grid(model, coords_np, sw_seq, device,
                              iri_peak_manager=iri_peak_manager)
 
-        ne_fsia = (10.0 ** result['ne_fused']).reshape(n_lat, n_alt)
+        ne_fsia = ((10.0 ** result['ne_fused']) / _DENSITY_SCALE_M3
+                   ).reshape(n_lat, n_alt)
         nmf2_grid[:, j] = np.max(ne_fsia, axis=1)
 
         # hmF2 来自最终模型输出 Ne_fused 廓线 argmax + 抛物线插值精化
         # (independent of the IRI reference in result['hmf2_f2'])
         hmf2_grid[:, j] = _hmf2_from_ne(ne_fsia, alt_grid)
 
-        ne_iri  = (10.0 ** result['ne_bkg']).reshape(n_lat, n_alt)
+        ne_iri = ((10.0 ** result['ne_bkg']) / _DENSITY_SCALE_M3
+                  ).reshape(n_lat, n_alt)
         nmf2_iri_grid[:, j] = np.max(ne_iri,  axis=1)
         hmf2_iri_grid[:, j] = _hmf2_from_ne(ne_iri,  alt_grid)
 
     # ---- 色标定义 ----
-    # NmF2：log10 离散 jet，8×10¹⁰ – 4×10¹²
-    _ne_lo = np.log10(8e10)
-    _ne_hi = np.log10(4e12)
+    # NmF2：物理密度（10^11 m^-3），对数间隔 jet。
+    _ne_lo = np.log10(8e10 / _DENSITY_SCALE_M3)
+    _ne_hi = np.log10(4e12 / _DENSITY_SCALE_M3)
     ne_cmap, ne_norm, ne_bounds = _discrete_norm_log('jet', _ne_lo, _ne_hi, n=20)
 
     # hmF2：线性离散 plasma，200–500 km，15 级（20 km/级）
@@ -430,7 +439,7 @@ def plot_lt_lat_map(
 
     def _add_nmf2_cb(im, ax):
         cb = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-        cb.set_label('NmF2 (el/m³)', fontsize=9, labelpad=5)
+        cb.set_label(f'NmF2 ({_DENSITY_UNIT_LABEL})', fontsize=9, labelpad=5)
         _fmt_log_ticks(cb, ne_bounds)
         cb.ax.tick_params(labelsize=7)
 

@@ -40,7 +40,7 @@ def _write_profiles(tmp_path):
     return data_path, index_path
 
 
-def test_strict_domain_boundaries_and_complete_development(tmp_path):
+def test_strict_domain_boundaries_and_stable_development_sampling(tmp_path):
     data_path, index_path = _write_profiles(tmp_path)
     dataset = FY3D_Dataset(
         str(data_path), mode='train', val_days=[], val_ratio=None,
@@ -50,9 +50,9 @@ def test_strict_domain_boundaries_and_complete_development(tmp_path):
     train, development = get_dataloaders(
         str(data_path), batch_size=16, val_ratio=0.34,
         profile_index_path=str(index_path), alt_range=(200.0, 500.0),
-        full_validation_profiles=True)
+        full_validation_profiles=False)
     assert train.batch_sampler.points_per_profile == 8
-    assert development.batch_sampler.points_per_profile is None
+    assert development.batch_sampler.points_per_profile == 8
 
 
 def test_exact_tokens_respect_domain_and_profile_whitelist(tmp_path):
@@ -108,6 +108,21 @@ def test_analysis_loader_rejects_background_and_wrong_v13_domain(tmp_path):
         json.dumps(summary), encoding='utf-8')
     with pytest.raises(ValueError, match='contract mismatch'):
         load_fsia_analysis_checkpoint(checkpoint)
+
+
+def test_analysis_loader_historical_epoch_requires_opt_in(tmp_path):
+    checkpoint = tmp_path / 'epoch_12_model.pth'
+    checkpoint.write_bytes(b'historical-analysis-checkpoint')
+    (tmp_path / 'run_manifest.json').write_text(json.dumps({
+        'config': {'model_domain_semantics': 'strict_200_500_domain_v1',
+                   'alt_range': [120.0, 500.0]}}), encoding='utf-8')
+    (tmp_path / 'training_summary.json').write_text(json.dumps({
+        'completed_stage': 'analysis', 'checkpoint_sha256': 'best-model-sha'}),
+        encoding='utf-8')
+    with pytest.raises(ValueError, match='SHA256'):
+        load_fsia_analysis_checkpoint(checkpoint)
+    with pytest.raises(ValueError, match='contract mismatch'):
+        load_fsia_analysis_checkpoint(checkpoint, allow_historical_epoch=True)
 
 
 def test_isr_pair_mask_does_not_depend_on_background():
@@ -171,7 +186,7 @@ def test_background_candidate_tie_prefers_gate_off(tmp_path):
             'background_trust_gate_enabled': enabled,
             'background_development': {
                 'fy_ccc': 0.5, 'cosmic_ccc': 0.5,
-                'fy_rmse': 0.2, 'cosmic_rmse': 0.2,
+                'ccc': 0.5, 'rmse': 0.2, 'pearson_r': 0.6,
                 'fy_pearson_r': 0.6, 'cosmic_pearson_r': 0.6,
             },
         }

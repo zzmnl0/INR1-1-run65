@@ -13,6 +13,11 @@ import numpy as np
 import torch
 import matplotlib
 import matplotlib.pyplot as plt
+from inr_modules.density_units import (
+    DENSITY_UNIT_LABEL,
+    density_to_display,
+    log10_density_to_display,
+)
 from .sliding_dataset import (
     attach_observation_background,
     observation_query_coverage,
@@ -47,7 +52,7 @@ def _extract_isr_profile(isr_record, rel_hour, tol_sec=1800):
         tol_sec:    最大时间容差（秒），超出则视为无近邻数据（默认 1800 = 30 min）
 
     Returns:
-        (ne_log10 [M], alt_km [M])  — 有效观测点的 log₁₀(Ne) 与对应高度
+        (ne_display [M], alt_km [M]) — 有效观测点的 Ne/10¹¹ m⁻³ 与高度
         或 (None, None) 若无近邻数据或全部无效
     """
     target_unix = _SEP01_2024_UNIX + rel_hour * 3600.0
@@ -62,7 +67,7 @@ def _extract_isr_profile(isr_record, rel_hour, tol_sec=1800):
     valid   = (ne_col > 0) & np.isfinite(ne_col)
     if not valid.any():
         return None, None
-    return np.log10(ne_col[valid].astype(np.float64)), alt_col[valid]
+    return density_to_display(ne_col[valid]), alt_col[valid]
 
 
 # ======================== 内部辅助 ========================
@@ -372,14 +377,10 @@ def plot_global_slice(model, sw_manager, device, target_day, target_hour,
     ]
 
     # ---- 固定色标范围（统一所有高度层）----
-    # Ne 面板：7×10⁹ ~ 4×10¹² el/m³（log10: 9.845 ~ 12.602）
-    _ne_lo = np.log10(7e9)
-    _ne_hi = np.log10(4e12)
+    # Ne 面板：0.07 ~ 40（单位 10^11 m^-3，对数间隔色标）
+    _ne_lo = np.log10(density_to_display(7e9))
+    _ne_hi = np.log10(density_to_display(4e12))
     ne_cmap, ne_norm, ne_bounds = _discrete_norm_log('jet', _ne_lo, _ne_hi, n=20)
-
-    # Analysis increment in log10 space.
-    _dl_max = 0.5
-    dl_cmap, dl_norm = _discrete_norm_sym_white('RdBu_r', _dl_max, n=19, n_white=1)
 
     # ---- 单遍推理 + 绘图 ----
     for row_idx, alt in enumerate(alt_levels):
@@ -401,22 +402,27 @@ def plot_global_slice(model, sw_manager, device, target_day, target_hour,
         m10_map   = result['m10'].reshape(LAT.shape)
         m01_map   = result['m01'].reshape(LAT.shape)
         fuse_map  = result['m11'].reshape(LAT.shape)
-        delta_map = result['ne_delta'].reshape(LAT.shape)   # log10 残差
-        iri_lin   = 10.0 ** iri_map
-        bkg_lin   = 10.0 ** bkg_map
-        m10_lin   = 10.0 ** m10_map
-        m01_lin   = 10.0 ** m01_map
-        fuse_lin  = 10.0 ** fuse_map
+        iri_lin = log10_density_to_display(iri_map)
+        bkg_lin = log10_density_to_display(bkg_map)
+        m10_lin = log10_density_to_display(m10_map)
+        m01_lin = log10_density_to_display(m01_map)
+        fuse_lin = log10_density_to_display(fuse_map)
+        delta_map = fuse_lin - bkg_lin
+        finite_delta = np.abs(delta_map[np.isfinite(delta_map)])
+        delta_max = max(float(np.percentile(finite_delta, 98))
+                        if len(finite_delta) else 1.0, 0.05)
+        dl_cmap, dl_norm = _discrete_norm_sym_white(
+            'RdBu_r', delta_max, n=19, n_white=1)
 
         # (data, cmap_d, norm_d, bounds_or_None, col_title, cb_mode)
-        # cb_mode: 'log' → log el/m³; 'sym_lin' → symmetric linear el/m³; 'log10' → log10 units
+        # cb_mode: 'log' → physical density with log-spaced colors; 'delta' → ΔNe.
         maps_cfg = [
             (iri_lin,   ne_cmap,  ne_norm,  ne_bounds, col_titles[0], 'log'),
             (bkg_lin,   ne_cmap,  ne_norm,  ne_bounds, col_titles[1], 'log'),
             (m10_lin,   ne_cmap,  ne_norm,  ne_bounds, col_titles[2], 'log'),
             (m01_lin,   ne_cmap,  ne_norm,  ne_bounds, col_titles[3], 'log'),
             (fuse_lin,  ne_cmap,  ne_norm,  ne_bounds, col_titles[4], 'log'),
-            (delta_map, dl_cmap,  dl_norm,  None,      col_titles[5], 'log10'),
+            (delta_map, dl_cmap,  dl_norm,  None,      col_titles[5], 'delta'),
         ]
 
         for col_idx, (data, cmap_d, norm_d, bounds, col_title, cb_mode) in enumerate(maps_cfg):
@@ -436,13 +442,13 @@ def plot_global_slice(model, sw_manager, device, target_day, target_hour,
                 ax.set_xlabel('Longitude (°)', fontsize=9)
             cb = plt.colorbar(im, ax=ax, pad=0.02, shrink=0.85)
             if cb_mode == 'log':
-                cb.set_label('el/m³', fontsize=8)
+                cb.set_label(f'Ne ({DENSITY_UNIT_LABEL})', fontsize=8)
                 _fmt_log_ticks(cb, bounds)
-            else:  # 'log10'
-                tick_vals = np.linspace(-_dl_max, _dl_max, 5)
+            else:
+                tick_vals = np.linspace(-delta_max, delta_max, 5)
                 cb.set_ticks(tick_vals)
-                cb.set_ticklabels([f'{v:+.2f}' for v in tick_vals], fontsize=7)
-                cb.set_label(r'$\Delta \log_{10} N_e$', fontsize=8)
+                cb.set_ticklabels([f'{v:+.2g}' for v in tick_vals], fontsize=7)
+                cb.set_label(f'$\\Delta$Ne ({DENSITY_UNIT_LABEL})', fontsize=8)
 
     plt.suptitle(
         f'{model_name} 全球切片  Day {target_day}  {target_hour:02d}:00 UT\n'
@@ -528,27 +534,33 @@ def plot_altitude_profile(model, sw_manager, device, lat, lon, time_hour,
             lt_h = (lt_h + 1) % 24
             lt_m = 0
 
-        ax.plot(result['ne_iri'], alts, color='black', lw=1.5, ls='--',
+        ax.plot(log10_density_to_display(result['ne_iri']), alts,
+                color='black', lw=1.5, ls='--',
                 label='Raw IRI')
-        ax.plot(result['background'], alts, color='gray', lw=1.5, ls=':',
+        ax.plot(log10_density_to_display(result['background']), alts,
+                color='gray', lw=1.5, ls=':',
                 label='FNDA Background = M00')
-        ax.plot(result['m10'], alts, color='tab:green', lw=1.3,
+        ax.plot(log10_density_to_display(result['m10']), alts,
+                color='tab:green', lw=1.3,
                 label='M10 FY')
-        ax.plot(result['m01'], alts, color='tab:orange', lw=1.3,
+        ax.plot(log10_density_to_display(result['m01']), alts,
+                color='tab:orange', lw=1.3,
                 label='M01 COSMIC')
-        ax.plot(result['m11'], alts, color='blue', lw=2,
+        ax.plot(log10_density_to_display(result['m11']), alts,
+                color='blue', lw=2,
                 label=f'M11 {model_name}')
 
         # ISR 真值叠绘
         if isr_record is not None:
-            ne_log, alt_isr = _extract_isr_profile(isr_record, t_hour)
-            if ne_log is not None:
-                ax.plot(ne_log, alt_isr, color='red', lw=1.5, alpha=0.85,
+            ne_display, alt_isr = _extract_isr_profile(isr_record, t_hour)
+            if ne_display is not None:
+                ax.plot(ne_display, alt_isr, color='red', lw=1.5, alpha=0.85,
                         label='Jicamarca ISR')
             else:
                 print(f'  [EDP] {hr:02d}:00 UT (LT {lt_h:02d}:{lt_m:02d}) — 无近邻 ISR 数据（容差 30 min）')
 
-        ax.set_xlabel(r'$\log_{10}$ Ne (m$^{-3}$)', fontsize=11)
+        ax.set_xlabel(f'Ne ({DENSITY_UNIT_LABEL})', fontsize=11)
+        ax.set_xscale('log')
         if col_idx == 0:
             ax.set_ylabel('Altitude (km)', fontsize=12)
         ax.set_title(f'{hr:02d}:00 UT  (LT {lt_h:02d}:{lt_m:02d})',
@@ -626,8 +638,9 @@ def plot_hmf2_nmf2_map(model, sw_manager, device, time_steps, save_dir,
 
     # 所有时间步共享统一色标
     hmf2_cmap, hmf2_norm = _discrete_norm('jet', 330, 480, n=20)
-    # NmF2: log10 空间 [10.5, 13.0] → el/m³ 对数间距 20 级
-    nmf2_cmap, nmf2_norm, nmf2_bounds = _discrete_norm_log('jet', 10.5, 12.1, n=20)
+    # NmF2：物理单位 10^11 m^-3，对数间距 20 级。
+    nmf2_cmap, nmf2_norm, nmf2_bounds = _discrete_norm_log(
+        'jet', 10.5 - 11.0, 12.1 - 11.0, n=20)
 
     for row_idx, (target_day, target_hour) in enumerate(time_steps):
         global_time = target_day * 24.0 + target_hour
@@ -642,7 +655,7 @@ def plot_hmf2_nmf2_map(model, sw_manager, device, time_steps, save_dir,
             sw_seq_single, device, sw_manager, iri_peak_manager,
             fy_nb_index, cosmic_nb_index, allowed_profile_ids)
         hmf2_map = hmf2.reshape(LAT.shape)
-        nmf2_map = (10.0 ** nmf2).reshape(LAT.shape)
+        nmf2_map = log10_density_to_display(nmf2).reshape(LAT.shape)
 
         row_label = (f'Day {target_day}  {target_hour:02d}:00 UT\n'
                      f'Kp={kp_disp:.1f}  F10.7={f107_disp:.1f}')
@@ -675,7 +688,7 @@ def plot_hmf2_nmf2_map(model, sw_manager, device, time_steps, save_dir,
         else:
             ax_n.set_xlabel('Longitude (°)', fontsize=9)
         cb_n = plt.colorbar(im_n, ax=ax_n, pad=0.02, shrink=0.85)
-        cb_n.set_label('el/m³', fontsize=9)
+        cb_n.set_label(f'NmF2 ({DENSITY_UNIT_LABEL})', fontsize=9)
         _fmt_log_ticks(cb_n, nmf2_bounds)
 
     plt.suptitle(f'{model_name}  F2 峰高 hmF2 与峰值电子密度 NmF2 全球分布',

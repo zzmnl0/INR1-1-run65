@@ -13,6 +13,13 @@ import matplotlib
 import matplotlib.font_manager as _fm
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+from matplotlib.colors import LogNorm
+
+from inr_modules.density_units import (
+    DENSITY_UNIT_LABEL,
+    density_to_display,
+    log10_density_to_display,
+)
 
 
 def _setup_font():
@@ -55,12 +62,12 @@ def plot_time_altitude_comparison(day_record, ne_iri_log10,
                                   save_path):
     """
     绘制六列时间-高度对比图：
-        Col 1: ISR 观测 (log10 Ne)
+        Col 1: ISR 观测（物理电子密度）
         Col 2: Raw IRI
         Col 3: FNDA Background (M00)
         Col 4: FSIA-INR Analysis (M11)
-        Col 5: Analysis - ISR 误差 (log10 单位, bwr)
-        Col 6: Raw IRI - ISR 误差 (log10 单位, bwr)
+        Col 5: Analysis - ISR 误差（物理电子密度, bwr）
+        Col 6: Raw IRI - ISR 误差（物理电子密度, bwr）
 
     Args:
         day_record:      DayRecord dict，含 'ne_2d' (m⁻³), 'alt_1d', 'ts_1d',
@@ -80,11 +87,9 @@ def plot_time_altitude_comparison(day_record, ne_iri_log10,
     date_str  = day_record.get('date_str', '')
     plot_segs = day_record.get('plot_segs', [])
 
-    # ---- ISR log10 全网格（用于色标范围及回退渲染）----
-    with np.errstate(divide='ignore', invalid='ignore'):
-        isr_log10_full = np.where(ne_2d > 0,
-                                  np.log10(ne_2d.astype(np.float64)), np.nan
-                                  ).astype(np.float32)
+    # ---- 物理电子密度全网格（单位 10^11 m^-3）----
+    isr_display_full = np.where(
+        ne_2d > 0, density_to_display(ne_2d), np.nan)
 
     # Ne 色标范围
     lo, hi = _safe_log10_range(ne_2d)
@@ -96,13 +101,20 @@ def plot_time_altitude_comparison(day_record, ne_iri_log10,
     lo = max(lo, 8.0);  hi = min(hi, 13.0)
     if hi - lo < 0.3:
         mid = (lo + hi) / 2;  lo, hi = mid - 0.15, mid + 0.15
+    ne_norm = LogNorm(vmin=10.0 ** (lo - 11.0),
+                      vmax=10.0 ** (hi - 11.0))
 
-    # 误差色标范围：取 Analysis-ISR 和 IRI-ISR 的共同 95th 分位。
-    mdia_err_full = model_log10_2d - isr_log10_full
-    iri_err_full  = ne_iri_log10   - isr_log10_full
+    iri_display_full = log10_density_to_display(ne_iri_log10)
+    bkg_display_full = log10_density_to_display(background_log10_2d)
+    model_display_full = log10_density_to_display(model_log10_2d)
+
+    # 误差色标范围：取物理密度差的共同 95th 分位。
+    mdia_err_full = model_display_full - isr_display_full
+    iri_err_full = iri_display_full - isr_display_full
     all_err       = np.concatenate([mdia_err_full[np.isfinite(mdia_err_full)],
                                     iri_err_full [np.isfinite(iri_err_full )]])
-    err_max = max(float(np.percentile(np.abs(all_err), 95)) if len(all_err) else 1.0, 0.1)
+    err_max = max(float(np.percentile(np.abs(all_err), 95))
+                  if len(all_err) else 1.0, 0.05)
 
     # 时间戳 → 列索引映射
     ts_dict = {int(round(float(t))): i for i, t in enumerate(ts_1d)}
@@ -129,49 +141,50 @@ def plot_time_altitude_comparison(day_record, ne_iri_log10,
 
         alt_idx = np.array([int(np.argmin(np.abs(alt_1d - a))) for a in seg_alt])
 
-        with np.errstate(divide='ignore', invalid='ignore'):
-            log_isr = np.where(seg_ne_v > 0,
-                               np.log10(seg_ne_v.astype(np.float64)), np.nan
-                               ).astype(np.float32)
+        isr_display = np.where(
+            seg_ne_v > 0, density_to_display(seg_ne_v), np.nan)
+        ne_iri_sub = log10_density_to_display(
+            ne_iri_log10[np.ix_(alt_idx, ts_idx_v)])
+        ne_bkg_sub = log10_density_to_display(
+            background_log10_2d[np.ix_(alt_idx, ts_idx_v)])
+        ne_pred_sub = log10_density_to_display(
+            model_log10_2d[np.ix_(alt_idx, ts_idx_v)])
+        mdia_err = ne_pred_sub - isr_display
+        iri_err = ne_iri_sub - isr_display
 
-        ne_iri_sub  = ne_iri_log10  [np.ix_(alt_idx, ts_idx_v)]
-        ne_bkg_sub = background_log10_2d[np.ix_(alt_idx, ts_idx_v)]
-        ne_pred_sub = model_log10_2d[np.ix_(alt_idx, ts_idx_v)]
-        mdia_err    = ne_pred_sub - log_isr   # MDIA - ISR
-        iri_err     = ne_iri_sub  - log_isr   # IRI  - ISR
-
-        def _pm(ax, data, cmap, vmin, vmax):
+        def _pm(ax, data, cmap, **norm_kwargs):
             return ax.pcolormesh(ts_dt_seg, seg_alt, data,
-                                 cmap=cmap, shading='auto', vmin=vmin, vmax=vmax)
+                                 cmap=cmap, shading='auto', **norm_kwargs)
 
-        m = _pm(axes[0], log_isr,     'plasma', lo,       hi)
+        m = _pm(axes[0], isr_display, 'plasma', norm=ne_norm)
         if ne_mesh_ref is None:  ne_mesh_ref  = m
-        _pm(axes[1], ne_iri_sub,  'plasma', lo,       hi)
-        _pm(axes[2], ne_bkg_sub, 'plasma', lo, hi)
-        _pm(axes[3], ne_pred_sub, 'plasma', lo,       hi)
-        m = _pm(axes[4], mdia_err, 'bwr', -err_max, err_max)
+        _pm(axes[1], ne_iri_sub, 'plasma', norm=ne_norm)
+        _pm(axes[2], ne_bkg_sub, 'plasma', norm=ne_norm)
+        _pm(axes[3], ne_pred_sub, 'plasma', norm=ne_norm)
+        m = _pm(axes[4], mdia_err, 'bwr', vmin=-err_max, vmax=err_max)
         if err_mesh_ref is None: err_mesh_ref = m
-        _pm(axes[5], iri_err,  'bwr', -err_max, err_max)
+        _pm(axes[5], iri_err, 'bwr', vmin=-err_max, vmax=err_max)
 
     # 回退：无 plot_segs 时用合并网格
     if ne_mesh_ref is None:
         t_dt = pd.to_datetime(ts_1d, unit='s').values
-        ne_mesh_ref  = axes[0].pcolormesh(t_dt, alt_1d, isr_log10_full,
-                                          cmap='plasma', shading='auto', vmin=lo, vmax=hi)
-        axes[1].pcolormesh(t_dt, alt_1d, ne_iri_log10,   cmap='plasma',
-                           shading='auto', vmin=lo, vmax=hi)
-        axes[2].pcolormesh(t_dt, alt_1d, background_log10_2d, cmap='plasma',
-                           shading='auto', vmin=lo, vmax=hi)
-        axes[3].pcolormesh(t_dt, alt_1d, model_log10_2d, cmap='plasma',
-                           shading='auto', vmin=lo, vmax=hi)
+        ne_mesh_ref = axes[0].pcolormesh(
+            t_dt, alt_1d, isr_display_full, cmap='plasma',
+            shading='auto', norm=ne_norm)
+        axes[1].pcolormesh(t_dt, alt_1d, iri_display_full, cmap='plasma',
+                           shading='auto', norm=ne_norm)
+        axes[2].pcolormesh(t_dt, alt_1d, bkg_display_full, cmap='plasma',
+                           shading='auto', norm=ne_norm)
+        axes[3].pcolormesh(t_dt, alt_1d, model_display_full, cmap='plasma',
+                           shading='auto', norm=ne_norm)
         err_mesh_ref = axes[4].pcolormesh(t_dt, alt_1d, mdia_err_full, cmap='bwr',
                                           shading='auto', vmin=-err_max, vmax=err_max)
         axes[5].pcolormesh(t_dt, alt_1d, iri_err_full,  cmap='bwr',
                            shading='auto', vmin=-err_max, vmax=err_max)
 
     # Colorbars — 标签用 mathtext 避免 Unicode 渲染问题
-    _ne_label  = r'$\log_{10}$ Ne (m$^{-3}$)'
-    _err_label = r'$\Delta\log_{10}$ Ne'
+    _ne_label = f'Ne ({DENSITY_UNIT_LABEL})'
+    _err_label = f'$\\Delta$Ne ({DENSITY_UNIT_LABEL})'
     for ax, ref, label in [
         (axes[0], ne_mesh_ref,  _ne_label),
         (axes[1], ne_mesh_ref,  _ne_label),
@@ -222,32 +235,38 @@ def plot_nmf2_scatter(isr_nmf2_log10_all, model_nmf2_log10_all,
         save_path:            输出 PNG 完整路径
     """
     mask = np.isfinite(isr_nmf2_log10_all) & np.isfinite(model_nmf2_log10_all)
-    obs  = isr_nmf2_log10_all[mask].astype(np.float64)
-    pred = model_nmf2_log10_all[mask].astype(np.float64)
+    obs_log10 = isr_nmf2_log10_all[mask].astype(np.float64)
+    pred_log10 = model_nmf2_log10_all[mask].astype(np.float64)
+    obs = log10_density_to_display(obs_log10)
+    pred = log10_density_to_display(pred_log10)
     n    = len(obs)
 
     fig, ax = plt.subplots(figsize=(6, 6))
 
     if n >= 2:
-        r = float(np.corrcoef(obs, pred)[0, 1])
+        r = float(np.corrcoef(obs_log10, pred_log10)[0, 1])
         ax.scatter(obs, pred, s=12, alpha=0.5, color='steelblue', linewidths=0)
-        lo = min(obs.min(), pred.min()) - 0.1
-        hi = max(obs.max(), pred.max()) + 0.1
+        lower = min(obs.min(), pred.min())
+        upper = max(obs.max(), pred.max())
+        pad = max(0.05 * (upper - lower), 0.01 * upper, 1e-3)
+        lo = max(0.0, lower - pad)
+        hi = upper + pad
         ax.plot([lo, hi], [lo, hi], 'k--', lw=1.2, label='y = x')
         ax.set_xlim(lo, hi)
         ax.set_ylim(lo, hi)
-        ax.text(0.05, 0.92, f'CC = {r:.3f}\nN = {n}',
+        ax.text(0.05, 0.92, f'CC (log10) = {r:.3f}\nN = {n}',
                 transform=ax.transAxes, fontsize=11,
                 bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
     else:
         ax.text(0.5, 0.5, 'No valid data', transform=ax.transAxes,
                 ha='center', fontsize=12)
 
-    ax.set_xlabel(r'ISR  $\log_{10}$(NmF2)  [m$^{-3}$]', fontsize=11)
-    ax.set_ylabel(r'Prediction  $\log_{10}$(NmF2)  [m$^{-3}$]', fontsize=11)
+    ax.set_xlabel(f'ISR NmF2 ({DENSITY_UNIT_LABEL})', fontsize=11)
+    ax.set_ylabel(f'Prediction NmF2 ({DENSITY_UNIT_LABEL})', fontsize=11)
     ax.set_title(f'{station}  NmF2 Scatter', fontsize=12, fontweight='bold')
     ax.set_aspect('equal', 'box')
-    ax.legend(fontsize=10)
+    if n >= 2:
+        ax.legend(fontsize=10)
     ax.grid(True, alpha=0.3)
 
     plt.tight_layout()
@@ -269,7 +288,7 @@ def plot_peak_lt_comparison(
     绘制 hmF2 和 NmF2 随地方时变化的拟合对比图（连续时间轴，含日期区分）。
 
     上图（hmF2）: 横轴 LT 连续日期时间，纵轴高度 (km)
-    下图（NmF2）: 横轴 LT 连续日期时间，纵轴 log10(NmF2)
+    下图（NmF2）: 横轴 LT 连续日期时间，纵轴物理峰值密度
 
     四条曲线：ISR 观测、Raw IRI、FNDA Background、M11 Analysis。
     排序后按时间先后绘制，x 轴刻度同时显示日期和 LT 小时，让日内日间循环
@@ -312,6 +331,10 @@ def plot_peak_lt_comparison(
     # 有效掩码
     h_mask = np.isfinite(ih) & np.isfinite(mh) & np.isfinite(bh) & np.isfinite(rh)
     n_mask = np.isfinite(in_) & np.isfinite(mn) & np.isfinite(bn) & np.isfinite(rn)
+    in_plot = log10_density_to_display(in_)
+    mn_plot = log10_density_to_display(mn)
+    bn_plot = log10_density_to_display(bn)
+    rn_plot = log10_density_to_display(rn)
 
     fig, (ax_h, ax_n) = plt.subplots(2, 1, figsize=(16, 8), sharex=True)
 
@@ -327,14 +350,14 @@ def plot_peak_lt_comparison(
               color='#2ca02c', lw=1.5, ls='-', label=model_name, zorder=5)
 
     # ---- NmF2 ----
-    ax_n.scatter(lt_dt[n_mask], in_[n_mask],
+    ax_n.scatter(lt_dt[n_mask], in_plot[n_mask],
                  s=10, alpha=0.5, color='#1f77b4', linewidths=0,
                  label='ISR', zorder=3)
-    ax_n.plot(lt_dt[n_mask], rn[n_mask],
+    ax_n.plot(lt_dt[n_mask], rn_plot[n_mask],
               color='black', lw=1.2, ls='--', label='Raw IRI', zorder=4)
-    ax_n.plot(lt_dt[n_mask], bn[n_mask],
+    ax_n.plot(lt_dt[n_mask], bn_plot[n_mask],
               color='gray', lw=1.2, ls=':', label='FNDA Background', zorder=4)
-    ax_n.plot(lt_dt[n_mask], mn[n_mask],
+    ax_n.plot(lt_dt[n_mask], mn_plot[n_mask],
               color='#2ca02c', lw=1.5, ls='-', label=model_name, zorder=5)
 
     # ---- 轴格式：显示日期 + LT 小时 ----
@@ -361,7 +384,7 @@ def plot_peak_lt_comparison(
         ax.legend(fontsize=9, loc='best')
 
     ax_h.set_ylabel('hmF2 (km)', fontsize=11)
-    ax_n.set_ylabel(r'$\log_{10}$ NmF2 (m$^{-3}$)', fontsize=11)
+    ax_n.set_ylabel(f'NmF2 ({DENSITY_UNIT_LABEL})', fontsize=11)
     ax_n.set_xlabel('Local Time', fontsize=11)
 
     ax_h.set_title(f'{station}  hmF2 vs Local Time', fontsize=11, fontweight='bold')
