@@ -80,6 +80,13 @@ def _run_directory(run_name):
     return Path(current_dir) / 'checkpoints_fsia' / run_name
 
 
+def _is_transient_log_scaffold(run_dir):
+    """Allow retrying a run stopped before it wrote any experiment artifact."""
+    return (run_dir.is_dir()
+            and (run_dir / 'training.log').is_file()
+            and {path.name for path in run_dir.iterdir()} == {'training.log'})
+
+
 class _Tee:
     def __init__(self, *streams):
         self.streams = streams
@@ -566,7 +573,9 @@ def main(eval_only=False, resume_ckpt=None, run_name=_DEFAULT_RUN_NAME,
                 raise ValueError('v14 smoke training states are never resumable')
         _record_resume_manifest(config)
     elif not eval_only:
-        if hybrid_domain and run_dir.exists():
+        # The CLI checked freshness before creating this one-file tee-log
+        # scaffold.  Do not mistake that transient scaffold for a prior run.
+        if hybrid_domain and run_dir.exists() and not _is_transient_log_scaffold(run_dir):
             raise FileExistsError(
                 'v14 smoke/full training requires a previously nonexistent '
                 f'target directory: {run_dir}')
@@ -815,7 +824,8 @@ if __name__ == '__main__':
         help='final-only: load ISR for profile overlays after model freeze')
     args = parser.parse_args()
     run_dir = _run_directory(args.run_name)
-    if not args.eval_only and not args.resume and run_dir.exists():
+    if (not args.eval_only and not args.resume and run_dir.exists()
+            and not _is_transient_log_scaffold(run_dir)):
         raise FileExistsError(
             'new training requires a nonexistent run directory; '
             f'use a new --run-name: {run_dir}')

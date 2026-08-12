@@ -19,6 +19,7 @@ from inr_modules.mdia.train_fsia import (
     _low_altitude_anchor_batch,
     _validate_hybrid_low_altitude_protocol,
 )
+from main_fsia import _is_transient_log_scaffold
 from isr_evaluation.main_isr_eval import (
     _analysis_common_mask,
     _candidate_baseline_common_mask,
@@ -60,6 +61,15 @@ def test_strict_domain_boundaries_and_stable_development_sampling(tmp_path):
         full_validation_profiles=False)
     assert train.batch_sampler.points_per_profile == 8
     assert development.batch_sampler.points_per_profile == 8
+
+
+def test_transient_training_log_scaffold_is_retryable(tmp_path):
+    run_dir = tmp_path / 'smoke'
+    run_dir.mkdir()
+    (run_dir / 'training.log').write_text('preflight stopped\n', encoding='utf-8')
+    assert _is_transient_log_scaffold(run_dir)
+    (run_dir / 'run_manifest.json').write_text('{}', encoding='utf-8')
+    assert not _is_transient_log_scaffold(run_dir)
 
 
 def test_exact_tokens_respect_domain_and_profile_whitelist(tmp_path):
