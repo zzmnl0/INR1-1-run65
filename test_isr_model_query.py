@@ -75,6 +75,39 @@ def test_query_model_grid_passes_both_sources():
     assert fy_index.calls == cosmic_index.calls == 2
 
 
+def test_query_model_grid_does_not_use_isr_missingness_as_coordinate_mask():
+    class SpaceWeather:
+        def get_drivers_sequence(self, rel_hour):
+            return torch.zeros(len(rel_hour), 3, 2)
+
+    class Model:
+        alt_min, alt_max = 120.0, 500.0
+
+        def eval(self):
+            return self
+
+        def __call__(self, coords, sw_seq, **kwargs):
+            output = torch.full((len(coords), 1), 11.0)
+            return output, output, output, output, {
+                'ne_bkg': output - 0.1,
+                'ne_iri': output - 0.2,
+            }
+
+    record = {
+        'alt_1d': np.array([200.0, 300.0], np.float32),
+        'ts_1d': np.array([0.0, 3600.0]),
+        'ne_2d': np.array([[1.0, np.nan], [np.nan, 1.0]], np.float32),
+        'lat': 10.0,
+        'lon': 20.0,
+        'coordinate_mask': np.ones((2, 2), dtype=bool),
+    }
+    prediction, background, iri = query_model_grid(
+        Model(), SpaceWeather(), record, 0.0, torch.device('cpu'), batch_size=8)
+    np.testing.assert_allclose(prediction, 11.0)
+    np.testing.assert_allclose(background, 10.9)
+    np.testing.assert_allclose(iri, 10.8)
+
+
 def test_infer_grid_reports_raw_background_and_four_modes():
     class SpaceWeather:
         def get_drivers_sequence(self, rel_hour):

@@ -49,7 +49,9 @@ def query_model_grid(model, sw_manager, day_record, start_unix, device,
 
     Returns:
         analysis, background, raw_iri: three [n_alt, n_time] log10(Ne) grids.
-        NaN where ne_2d is NaN or coordinates are invalid.
+        NaN only where coordinates are invalid or outside the model domain.  ISR
+        density missingness is intentionally independent: it gates point metrics,
+        not model peak searches.
     """
     model.eval()
 
@@ -77,14 +79,21 @@ def query_model_grid(model, sw_manager, day_record, start_unix, device,
         lat_2d = np.full((n_alt, n_time), lat_scalar, dtype=np.float32)
         lon_2d = np.full((n_alt, n_time), lon_scalar, dtype=np.float32)
 
-    # 有效掩码（ne_2d 非 NaN 且坐标有效）
+    # Coordinate coverage is deliberately separate from ISR density coverage.
+    # A finite model profile may be evaluated where the ISR observation is absent;
+    # otherwise a missing ISR level would silently truncate an F2 peak search.
     valid_mask = (
-        np.isfinite(ne_2d) &
         np.isfinite(lat_2d) &
         np.isfinite(lon_2d) &
         np.isfinite(alts_2d) &
         np.isfinite(rh_2d)
     )
+    declared_coordinate_mask = day_record.get('coordinate_mask')
+    if declared_coordinate_mask is not None:
+        declared_coordinate_mask = np.asarray(declared_coordinate_mask, dtype=bool)
+        if declared_coordinate_mask.shape != valid_mask.shape:
+            raise ValueError('day_record coordinate_mask shape does not match grid')
+        valid_mask &= declared_coordinate_mask
     model_lower = float(getattr(model, 'alt_min', -np.inf))
     model_upper = float(getattr(model, 'alt_max', np.inf))
     valid_mask &= ((alts_2d >= model_lower) & (alts_2d <= model_upper))

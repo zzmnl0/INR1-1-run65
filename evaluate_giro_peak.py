@@ -33,6 +33,12 @@ from inr_modules.mdia.sliding_dataset import (
     attach_observation_background,
     query_observation_payload,
 )
+from isr_evaluation.peak_qa import (
+    DEFAULT_PEAK_CONTRACT,
+    PeakSearchContract,
+    results_to_arrays,
+    search_peak_profile,
+)
 
 
 _COARSE_STEP = 10.0
@@ -44,6 +50,26 @@ _M2W_DOMAINS = {
 }
 _HISTORICAL_EPOCH12_SHA256 = (
     '486ffe73722cde1ff2909da93898e02d4d1e173700c9e4fa9dd2f0990e2fe56a')
+
+
+def _peak_contract(alt_range):
+    lower, upper = map(float, alt_range)
+    if (lower, upper) != (200.0, 500.0):
+        raise ValueError('P0-A GIRO peak QA is fixed to 200--500 km')
+    return PeakSearchContract(
+        lower_km=lower,
+        upper_km=upper,
+        coarse_step_km=DEFAULT_PEAK_CONTRACT.coarse_step_km,
+        fine_step_km=DEFAULT_PEAK_CONTRACT.fine_step_km,
+        fine_half_window_km=DEFAULT_PEAK_CONTRACT.fine_half_window_km,
+        min_finite_levels=DEFAULT_PEAK_CONTRACT.min_finite_levels,
+        max_local_gap_km=DEFAULT_PEAK_CONTRACT.max_local_gap_km,
+        flank_support_km=DEFAULT_PEAK_CONTRACT.flank_support_km,
+        prominence_dex=DEFAULT_PEAK_CONTRACT.prominence_dex,
+        secondary_separation_km=DEFAULT_PEAK_CONTRACT.secondary_separation_km,
+        near_tie_dex=DEFAULT_PEAK_CONTRACT.near_tie_dex,
+        boundary_margin_km=DEFAULT_PEAK_CONTRACT.boundary_margin_km,
+    )
 
 
 def _json_safe(value):
@@ -69,6 +95,22 @@ def _metrics(observation, prediction):
         'mae': float(np.mean(np.abs(error))) if len(error) else np.nan,
     })
     return values
+
+
+def _safe_paired_bootstrap(observation, candidate, baseline, unit_ids):
+    finite = (np.isfinite(observation) & np.isfinite(candidate)
+              & np.isfinite(baseline))
+    if finite.sum() < 2 or np.unique(np.asarray(unit_ids)[finite]).size < 2:
+        return {
+            'status': 'insufficient_data',
+            'n': int(finite.sum()),
+            'sampling_units': int(np.unique(np.asarray(unit_ids)[finite]).size),
+            'decision': 'inconclusive',
+        }
+    return paired_group_bootstrap(
+        np.asarray(observation)[finite], np.asarray(candidate)[finite],
+        np.asarray(baseline)[finite], np.asarray(unit_ids)[finite],
+        replicates=2000, seed=42)
 
 
 def _record_ids(records):
@@ -194,123 +236,131 @@ def _query_fields_many(coords_np, models, sw_manager, iri_peak_manager,
     }
 
 
+def _pack_peak_results(results, legacy_hmf2, legacy_nmf2):
+    packed = results_to_arrays(results)
+    # Preserve the old finite argmax result solely for QA-v2/legacy comparison.
+    packed.update({
+        'hmf2': packed['hmf2_km'],
+        'nmf2': packed['nmf2_log10'],
+        'legacy_hmf2': np.asarray(legacy_hmf2, dtype=np.float32),
+        'legacy_nmf2': np.asarray(legacy_nmf2, dtype=np.float32),
+    })
+    return packed
+
+
+def _coarse_and_fine_peak_results(coarse_altitudes, coarse_values,
+                                  fine_altitudes, fine_values, contract):
+    """Apply the common QA contract to model values queried on 10/1 km grids."""
+    results, legacy_hmf2, legacy_nmf2 = [], [], []
+    for coarse_value, fine_altitude, fine_value in zip(
+            coarse_values, fine_altitudes, fine_values):
+        raw_index = int(np.nanargmax(fine_value))
+        legacy_hmf2.append(float(fine_altitude[raw_index]))
+        legacy_nmf2.append(float(fine_value[raw_index]))
+        results.append(search_peak_profile(
+            np.concatenate([coarse_altitudes, fine_altitude]),
+            np.concatenate([coarse_value, fine_value]), contract))
+    return results, legacy_hmf2, legacy_nmf2
+
+
 def _predict_peaks(records, model, managers, allowed, device, alt_range):
-    lower, upper = map(float, alt_range)
+    contract = _peak_contract(alt_range)
+    lower, upper = contract.lower_km, contract.upper_km
     coarse_altitudes = np.arange(
-        lower, upper + 0.5 * _COARSE_STEP, _COARSE_STEP,
+        lower, upper + 0.5 * contract.coarse_step_km, contract.coarse_step_km,
         dtype=np.float32)
     fine_offsets = np.arange(
-        -_FINE_HALF, _FINE_HALF + 1, dtype=np.float32)
-    result = {
-        source: {
-            'hmf2': np.full(len(records), np.nan, dtype=np.float32),
-            'nmf2': np.full(len(records), np.nan, dtype=np.float32),
-        }
-        for source in ('M11', 'M00', 'IRI')
-    }
+        -contract.fine_half_window_km, contract.fine_half_window_km
+        + 0.5 * contract.fine_step_km, contract.fine_step_km, dtype=np.float32)
+    sources = ('M11', 'M00', 'IRI')
+    results = {source: [] for source in sources}
+    legacy_hmf2 = {source: [] for source in sources}
+    legacy_nmf2 = {source: [] for source in sources}
     fy_index, cosmic_index, sw_manager, iri_peak_manager = managers
     for start in range(0, len(records), _STATION_BATCH):
         selected = np.arange(start, min(start + _STATION_BATCH, len(records)))
         rows = records[selected]
         n_station, n_coarse = len(rows), len(coarse_altitudes)
         coarse_coords = np.column_stack([
-            np.repeat(rows[:, 0], n_coarse),
-            np.repeat(rows[:, 1], n_coarse),
-            np.tile(coarse_altitudes, n_station),
-            np.repeat(rows[:, 2], n_coarse),
+            np.repeat(rows[:, 0], n_coarse), np.repeat(rows[:, 1], n_coarse),
+            np.tile(coarse_altitudes, n_station), np.repeat(rows[:, 2], n_coarse),
         ]).astype(np.float32)
-        coarse = _query_fields(
-            coarse_coords, model, sw_manager, iri_peak_manager,
-            fy_index, cosmic_index, allowed, device)
+        coarse = _query_fields(coarse_coords, model, sw_manager, iri_peak_manager,
+                               fy_index, cosmic_index, allowed, device)
+        coarse_values = {
+            source: values.reshape(n_station, n_coarse)
+            for source, values in coarse.items()}
         coarse_peak = {
-            source: coarse_altitudes[
-                values.reshape(n_station, n_coarse).argmax(axis=1)]
-            for source, values in coarse.items()
-        }
-
-        sources = ('M11', 'M00', 'IRI')
-        fine_altitudes = np.stack([
-            np.clip(coarse_peak[source][:, None] + fine_offsets[None, :],
-                    lower, upper)
-            for source in sources
-        ]).astype(np.float32)
+            source: coarse_altitudes[np.nanargmax(values, axis=1)]
+            for source, values in coarse_values.items()}
         n_fine = len(fine_offsets)
+        fine_altitudes = np.stack([
+            np.clip(coarse_peak[source][:, None] + fine_offsets[None, :], lower, upper)
+            for source in sources]).astype(np.float32)
         fine_coords = np.column_stack([
             np.tile(np.repeat(rows[:, 0], n_fine), len(sources)),
             np.tile(np.repeat(rows[:, 1], n_fine), len(sources)),
             fine_altitudes.reshape(-1),
             np.tile(np.repeat(rows[:, 2], n_fine), len(sources)),
         ]).astype(np.float32)
-        fine = _query_fields(
-            fine_coords, model, sw_manager, iri_peak_manager,
-            fy_index, cosmic_index, allowed, device)
+        fine = _query_fields(fine_coords, model, sw_manager, iri_peak_manager,
+                             fy_index, cosmic_index, allowed, device)
         for source_index, source in enumerate(sources):
-            values = fine[source].reshape(len(sources), n_station, n_fine)[
-                source_index]
-            peak_index = values.argmax(axis=1)
-            result[source]['hmf2'][selected] = fine_altitudes[
-                source_index, np.arange(n_station), peak_index]
-            result[source]['nmf2'][selected] = values[
-                np.arange(n_station), peak_index]
+            fine_values = fine[source].reshape(len(sources), n_station, n_fine)[source_index]
+            block, old_hmf2, old_nmf2 = _coarse_and_fine_peak_results(
+                coarse_altitudes, coarse_values[source], fine_altitudes[source_index],
+                fine_values, contract)
+            results[source].extend(block)
+            legacy_hmf2[source].extend(old_hmf2)
+            legacy_nmf2[source].extend(old_nmf2)
         print(f'  {selected[-1] + 1:>6}/{len(records)} records')
-    return result
+    return {source: _pack_peak_results(
+        results[source], legacy_hmf2[source], legacy_nmf2[source]) for source in sources}
 
 
 def _predict_peaks_many(records, models, managers, allowed_by_model, device,
                         alt_range):
-    """Run independent F2 searches for each model in the same record loop."""
-    lower, upper = map(float, alt_range)
+    """Infer all checkpoints in one record/token loop, with independent peak QA."""
+    contract = _peak_contract(alt_range)
+    lower, upper = contract.lower_km, contract.upper_km
     coarse_altitudes = np.arange(
-        lower, upper + 0.5 * _COARSE_STEP, _COARSE_STEP, dtype=np.float32)
-    fine_offsets = np.arange(-_FINE_HALF, _FINE_HALF + 1, dtype=np.float32)
-    labels = tuple(models)
-    sources = ('M11', 'M00', 'IRI')
-    result = {
-        label: {
-            source: {
-                'hmf2': np.full(len(records), np.nan, dtype=np.float32),
-                'nmf2': np.full(len(records), np.nan, dtype=np.float32),
-            }
-            for source in sources
-        }
-        for label in labels
-    }
+        lower, upper + 0.5 * contract.coarse_step_km, contract.coarse_step_km,
+        dtype=np.float32)
+    fine_offsets = np.arange(
+        -contract.fine_half_window_km, contract.fine_half_window_km
+        + 0.5 * contract.fine_step_km, contract.fine_step_km, dtype=np.float32)
+    labels, sources = tuple(models), ('M11', 'M00', 'IRI')
+    results = {label: {source: [] for source in sources} for label in labels}
+    legacy_hmf2 = {label: {source: [] for source in sources} for label in labels}
+    legacy_nmf2 = {label: {source: [] for source in sources} for label in labels}
     fy_index, cosmic_index, sw_manager, iri_peak_manager = managers
     for start in range(0, len(records), _STATION_BATCH):
         selected = np.arange(start, min(start + _STATION_BATCH, len(records)))
         rows = records[selected]
         n_station, n_coarse = len(rows), len(coarse_altitudes)
         coarse_coords = np.column_stack([
-            np.repeat(rows[:, 0], n_coarse),
-            np.repeat(rows[:, 1], n_coarse),
-            np.tile(coarse_altitudes, n_station),
-            np.repeat(rows[:, 2], n_coarse),
+            np.repeat(rows[:, 0], n_coarse), np.repeat(rows[:, 1], n_coarse),
+            np.tile(coarse_altitudes, n_station), np.repeat(rows[:, 2], n_coarse),
         ]).astype(np.float32)
         coarse = _query_fields_many(
             coarse_coords, models, sw_manager, iri_peak_manager, fy_index,
             cosmic_index, allowed_by_model, device)
-        coarse_peak = {
-            label: {
-                source: coarse_altitudes[coarse[label][source].reshape(
-                    n_station, n_coarse).argmax(axis=1)]
-                for source in sources
-            }
-            for label in labels
-        }
+        coarse_values = {
+            label: {source: coarse[label][source].reshape(n_station, n_coarse)
+                    for source in sources}
+            for label in labels}
+        fine_altitudes, coordinate_groups = {}, []
         n_fine = len(fine_offsets)
-        fine_altitudes = {}
-        coordinate_groups = []
         for label in labels:
             for source in sources:
-                altitudes = np.clip(
-                    coarse_peak[label][source][:, None] + fine_offsets[None, :],
-                    lower, upper).astype(np.float32)
+                coarse_peak = coarse_altitudes[np.nanargmax(
+                    coarse_values[label][source], axis=1)]
+                altitudes = np.clip(coarse_peak[:, None] + fine_offsets[None, :],
+                                    lower, upper).astype(np.float32)
                 fine_altitudes[label, source] = altitudes
                 coordinate_groups.append(np.column_stack([
-                    np.repeat(rows[:, 0], n_fine),
-                    np.repeat(rows[:, 1], n_fine),
-                    altitudes.reshape(-1),
-                    np.repeat(rows[:, 2], n_fine),
+                    np.repeat(rows[:, 0], n_fine), np.repeat(rows[:, 1], n_fine),
+                    altitudes.reshape(-1), np.repeat(rows[:, 2], n_fine),
                 ]).astype(np.float32))
         fine = _query_fields_many(
             np.concatenate(coordinate_groups), models, sw_manager,
@@ -319,28 +369,44 @@ def _predict_peaks_many(records, models, managers, allowed_by_model, device,
         for label_index, label in enumerate(labels):
             for source_index, source in enumerate(sources):
                 group_index = label_index * len(sources) + source_index
-                values = fine[label][source][
+                fine_values = fine[label][source][
                     group_index * group_size:(group_index + 1) * group_size
                 ].reshape(n_station, n_fine)
-                peak_index = values.argmax(axis=1)
-                result[label][source]['hmf2'][selected] = fine_altitudes[
-                    label, source][np.arange(n_station), peak_index]
-                result[label][source]['nmf2'][selected] = values[
-                    np.arange(n_station), peak_index]
+                block, old_hmf2, old_nmf2 = _coarse_and_fine_peak_results(
+                    coarse_altitudes, coarse_values[label][source],
+                    fine_altitudes[label, source], fine_values, contract)
+                results[label][source].extend(block)
+                legacy_hmf2[label][source].extend(old_hmf2)
+                legacy_nmf2[label][source].extend(old_nmf2)
         print(f'  {selected[-1] + 1:>6}/{len(records)} records')
-    return result
+    return {
+        label: {source: _pack_peak_results(
+            results[label][source], legacy_hmf2[label][source],
+            legacy_nmf2[label][source]) for source in sources}
+        for label in labels}
 
 
-def _evaluate_quantity(records, field, predictions):
+def _peak_values(prediction, source, field, *, primary):
+    values = prediction[source][field].astype(np.float64)
+    if not primary:
+        return prediction[source][f'legacy_{field}'].astype(np.float64)
+    valid_key = 'hmf2_valid' if field == 'hmf2' else 'nmf2_valid'
+    return np.where(prediction[source][valid_key], values, np.nan)
+
+
+def _evaluate_quantity(records, field, predictions, *, primary=True):
     observation = records[:, 3].astype(np.float64)
     units = _record_ids(records)
     metrics = {
-        source: _metrics(observation, values[field].astype(np.float64))
-        for source, values in predictions.items()
+        source: _metrics(observation, _peak_values(predictions, source, field,
+                                                    primary=primary))
+        for source in predictions
     }
-    bootstrap = paired_group_bootstrap(
-        observation, predictions['M11'][field], predictions['IRI'][field],
-        units, replicates=2000, seed=42)
+    candidate = _peak_values(predictions, 'M11', field, primary=primary)
+    iri = _peak_values(predictions, 'IRI', field, primary=primary)
+    common = np.isfinite(observation) & np.isfinite(candidate) & np.isfinite(iri)
+    bootstrap = _safe_paired_bootstrap(
+        observation[common], candidate[common], iri[common], units[common])
     return metrics, bootstrap
 
 
@@ -396,31 +462,50 @@ def _load_model_context(checkpoint, device, historical_sha256=None):
 def _paired_model_bootstrap(records, field, candidate, baseline):
     observation = records[:, 3].astype(np.float64)
     units = _record_ids(records)
-    return paired_group_bootstrap(
-        observation, candidate['M11'][field], baseline['M11'][field], units,
-        replicates=2000, seed=42)
+    candidate_values = _peak_values(candidate, 'M11', field, primary=True)
+    baseline_values = _peak_values(baseline, 'M11', field, primary=True)
+    common = (np.isfinite(observation) & np.isfinite(candidate_values)
+              & np.isfinite(baseline_values))
+    return _safe_paired_bootstrap(
+        observation[common], candidate_values[common], baseline_values[common],
+        units[common])
 
 
 def evaluate_giro_peak(checkpoint, save_dir=None, baseline_checkpoint=None,
-                       baseline_checkpoint_sha256=None):
+                       baseline_checkpoint_sha256=None, baseline_labels=None):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model, config, summary, peak_range, allowed = _load_model_context(
         checkpoint, device)
     candidate_contract = _checkpoint_contract(checkpoint, config, summary)
-    baseline_model = baseline_config = baseline_summary = baseline_contract = None
-    baseline_allowed = None
-    if baseline_checkpoint is not None:
-        if (_is_historical_epoch_checkpoint(baseline_checkpoint)
-                and not baseline_checkpoint_sha256):
-            raise ValueError(
-                'historical GIRO baseline requires --baseline-checkpoint-sha256')
-        if (Path(baseline_checkpoint).name == 'epoch_12_model.pth'
-                and baseline_checkpoint_sha256 != _HISTORICAL_EPOCH12_SHA256):
+    if baseline_checkpoint is None:
+        baseline_paths = []
+    elif isinstance(baseline_checkpoint, (str, os.PathLike)):
+        baseline_paths = [str(baseline_checkpoint)]
+    else:
+        baseline_paths = list(baseline_checkpoint)
+    if baseline_checkpoint_sha256 is None:
+        baseline_hashes = []
+    elif isinstance(baseline_checkpoint_sha256, str):
+        baseline_hashes = [baseline_checkpoint_sha256]
+    else:
+        baseline_hashes = list(baseline_checkpoint_sha256)
+    if len(baseline_hashes) > len(baseline_paths):
+        raise ValueError('more baseline SHA256 values than baseline checkpoints')
+    requested_labels = list(baseline_labels or [])
+    if len(requested_labels) > len(baseline_paths):
+        raise ValueError('more baseline labels than baseline checkpoints')
+    baseline_models, baseline_allowed, baseline_contract = {}, {}, []
+    for index, path in enumerate(baseline_paths):
+        expected_sha = baseline_hashes[index] if index < len(baseline_hashes) else None
+        if _is_historical_epoch_checkpoint(path) and not expected_sha:
+            raise ValueError('historical GIRO baseline requires --baseline-checkpoint-sha256')
+        if (Path(path).name == 'epoch_12_model.pth'
+                and expected_sha != _HISTORICAL_EPOCH12_SHA256):
             raise ValueError('historical epoch12 GIRO baseline SHA256 is not approved')
         (baseline_model, baseline_config, baseline_summary,
-         baseline_peak_range, baseline_allowed) = _load_model_context(
-            baseline_checkpoint, device, baseline_checkpoint_sha256)
-        if (Path(baseline_checkpoint).name == 'epoch_12_model.pth'
+         baseline_peak_range, item_allowed) = _load_model_context(
+            path, device, expected_sha)
+        if (Path(path).name == 'epoch_12_model.pth'
                 and baseline_config.get('background_trust_gate_enabled', False)):
             raise ValueError('historical epoch12 GIRO baseline must be gate-off')
         if baseline_peak_range != peak_range:
@@ -431,9 +516,20 @@ def evaluate_giro_peak(checkpoint, save_dir=None, baseline_checkpoint=None,
                 or config['iri_hmf2_path'] != baseline_config['iri_hmf2_path']
                 or config['iri_nmf2_path'] != baseline_config['iri_nmf2_path']):
             raise ValueError('paired GIRO evaluation requires shared FY/COSMIC/IRI inputs')
-        baseline_contract = _checkpoint_contract(
-            baseline_checkpoint, baseline_config, baseline_summary)
+        default_label = ('historical_epoch12' if _is_historical_epoch_checkpoint(path)
+                         else f"checkpoint_v{baseline_config.get('checkpoint_format_version', index)}")
+        label = requested_labels[index] if index < len(requested_labels) else default_label
+        if label in baseline_models:
+            raise ValueError(f'duplicate baseline label: {label}')
+        baseline_models[label] = baseline_model
+        baseline_allowed[label] = item_allowed
+        baseline_contract.append({
+            'label': label,
+            **_checkpoint_contract(path, baseline_config, baseline_summary)})
     save_dir = Path(save_dir or Path(checkpoint).resolve().parent / 'giro_peak_eval')
+    if save_dir.exists() and any(save_dir.iterdir()):
+        raise FileExistsError(
+            f'GIRO output directory already contains artifacts: {save_dir}')
     save_dir.mkdir(parents=True, exist_ok=True)
 
     sw_manager = SpaceWeatherManager(
@@ -448,38 +544,45 @@ def evaluate_giro_peak(checkpoint, save_dir=None, baseline_checkpoint=None,
 
     h_records = np.load(config['giro_hmf2_path']).astype(np.float32)
     n_records = np.load(config['giro_nmf2_path']).astype(np.float32)
-    if baseline_model is None:
+    if not baseline_models:
         print('[GIRO] independent hmF2 profiles')
         h_prediction = _predict_peaks(
             h_records, model, managers, allowed, device, peak_range)
         print('[GIRO] independent NmF2 profiles')
         n_prediction = _predict_peaks(
             n_records, model, managers, allowed, device, peak_range)
-        baseline_h_prediction = baseline_n_prediction = None
+        baseline_h_predictions = baseline_n_predictions = {}
     else:
-        models = {'candidate': model, 'baseline': baseline_model}
-        allowed_by_model = {'candidate': allowed, 'baseline': baseline_allowed}
+        models = {'candidate': model, **baseline_models}
+        allowed_by_model = {'candidate': allowed, **baseline_allowed}
         print('[GIRO] paired independent hmF2 profiles')
         h_predictions = _predict_peaks_many(
             h_records, models, managers, allowed_by_model, device, peak_range)
         print('[GIRO] paired independent NmF2 profiles')
         n_predictions = _predict_peaks_many(
             n_records, models, managers, allowed_by_model, device, peak_range)
-        h_prediction, baseline_h_prediction = (
-            h_predictions['candidate'], h_predictions['baseline'])
-        n_prediction, baseline_n_prediction = (
-            n_predictions['candidate'], n_predictions['baseline'])
+        h_prediction, n_prediction = h_predictions['candidate'], n_predictions['candidate']
+        baseline_h_predictions = {
+            label: h_predictions[label] for label in baseline_models}
+        baseline_n_predictions = {
+            label: n_predictions[label] for label in baseline_models}
     h_metrics, h_bootstrap = _evaluate_quantity(
-        h_records, 'hmf2', h_prediction)
+        h_records, 'hmf2', h_prediction, primary=True)
     n_metrics, n_bootstrap = _evaluate_quantity(
-        n_records, 'nmf2', n_prediction)
-    comparisons = None
-    if baseline_h_prediction is not None:
+        n_records, 'nmf2', n_prediction, primary=True)
+    h_legacy_metrics, _ = _evaluate_quantity(
+        h_records, 'hmf2', h_prediction, primary=False)
+    n_legacy_metrics, _ = _evaluate_quantity(
+        n_records, 'nmf2', n_prediction, primary=False)
+    comparisons = {}
+    for label in baseline_models:
+        baseline_h_prediction = baseline_h_predictions[label]
+        baseline_n_prediction = baseline_n_predictions[label]
         baseline_h_metrics, _ = _evaluate_quantity(
-            h_records, 'hmf2', baseline_h_prediction)
+            h_records, 'hmf2', baseline_h_prediction, primary=True)
         baseline_n_metrics, _ = _evaluate_quantity(
-            n_records, 'nmf2', baseline_n_prediction)
-        comparisons = {
+            n_records, 'nmf2', baseline_n_prediction, primary=True)
+        comparisons[label] = {
             'hmF2_m11_candidate_vs_baseline_bootstrap': _paired_model_bootstrap(
                 h_records, 'hmf2', h_prediction, baseline_h_prediction),
             'NmF2_m11_candidate_vs_baseline_bootstrap': _paired_model_bootstrap(
@@ -488,18 +591,27 @@ def evaluate_giro_peak(checkpoint, save_dir=None, baseline_checkpoint=None,
             'baseline_NmF2_metrics': baseline_n_metrics,
         }
     contract = {
-        'schema_version': 14,
+        'evaluation_schema_version': 2,
         'token_partitions': ['train', 'development'],
         'candidate_checkpoint': candidate_contract,
-        'baseline_checkpoint': baseline_contract,
+        'baseline_checkpoints': baseline_contract,
         'quality_thresholds': {'finite_peak_required': True},
         'peak_search': {
-            'semantics': 'independent_coarse_10km_then_fine_1km_per_field_v1',
+            **_peak_contract(peak_range).as_dict(),
             'alt_range_km': list(peak_range),
-            'coarse_step_km': _COARSE_STEP,
-            'fine_half_window_km': _FINE_HALF,
             'bootstrap': {'replicates': 2000, 'seed': 42,
                           'group': 'station_time_record'},
+        },
+        'quality_thresholds': {
+            'finite_peak_required': True,
+            'hmf2_public_mask': 'observation_finite_and_all_compared_fields_valid',
+            'nmf2_public_mask': 'observation_finite_and_all_compared_fields_nmf2_valid',
+        },
+        'giro_input_sha256': {
+            'hmf2_path': str(Path(config['giro_hmf2_path']).resolve()),
+            'hmf2_sha256': _sha256(config['giro_hmf2_path']),
+            'nmf2_path': str(Path(config['giro_nmf2_path']).resolve()),
+            'nmf2_sha256': _sha256(config['giro_nmf2_path']),
         },
     }
     report = {
@@ -513,13 +625,28 @@ def evaluate_giro_peak(checkpoint, save_dir=None, baseline_checkpoint=None,
         'token_partitions': contract['token_partitions'],
         'peak_search': contract['peak_search']['semantics'],
         'hmF2': {'metrics': h_metrics,
+                 'legacy_argmax_metrics': h_legacy_metrics,
                  'm11_vs_raw_iri_bootstrap': h_bootstrap},
         'NmF2': {'metrics': n_metrics,
+                 'legacy_argmax_metrics': n_legacy_metrics,
                  'm11_vs_raw_iri_bootstrap': n_bootstrap},
         'candidate_vs_baseline': comparisons,
         'passed_m2w_m11_vs_raw_iri_gate': (
-            h_bootstrap['decision'] == 'pass'
-            and n_bootstrap['decision'] == 'pass'),
+            h_bootstrap.get('decision') == 'pass'
+            and n_bootstrap.get('decision') == 'pass'),
+        'peak_qc_counts': {
+            quantity: {
+                source: {
+                    'status': {key: int(value) for key, value in zip(
+                        *np.unique(prediction[source]['status'], return_counts=True))},
+                    'hmf2_valid': int(prediction[source]['hmf2_valid'].sum()),
+                    'nmf2_valid': int(prediction[source]['nmf2_valid'].sum()),
+                }
+                for source in prediction
+            }
+            for quantity, prediction in (
+                ('hmF2_records', h_prediction), ('NmF2_records', n_prediction))
+        },
     }
     cache = {
         'hm_record_id': _record_ids(h_records),
@@ -531,13 +658,14 @@ def evaluate_giro_peak(checkpoint, save_dir=None, baseline_checkpoint=None,
                                ('candidate_nm', n_prediction)):
         field = 'hmf2' if prefix.endswith('hm') else 'nmf2'
         for source, values in prediction.items():
-            cache[f'{prefix}_{source}'] = values[field]
-    if baseline_h_prediction is not None:
-        for prefix, prediction in (('baseline_hm', baseline_h_prediction),
-                                   ('baseline_nm', baseline_n_prediction)):
-            field = 'hmf2' if prefix.endswith('hm') else 'nmf2'
+            for key, value in values.items():
+                cache[f'{prefix}_{source}_{key}'] = value
+    for label in baseline_models:
+        for prefix, prediction in ((f'baseline_{label}_hm', baseline_h_predictions[label]),
+                                   (f'baseline_{label}_nm', baseline_n_predictions[label])):
             for source, values in prediction.items():
-                cache[f'{prefix}_{source}'] = values[field]
+                for key, value in values.items():
+                    cache[f'{prefix}_{source}_{key}'] = value
     np.savez_compressed(save_dir / 'giro_peak_cache.npz', **cache)
     with (save_dir / 'giro_peak_contract.json').open('w', encoding='utf-8') as stream:
         json.dump(_json_safe(contract), stream, ensure_ascii=False,
@@ -556,7 +684,7 @@ def evaluate_giro_peak(checkpoint, save_dir=None, baseline_checkpoint=None,
             stream.write(json.dumps(
                 _json_safe(report[quantity]['m11_vs_raw_iri_bootstrap']),
                 ensure_ascii=False) + '\n')
-        if comparisons is not None:
+        if comparisons:
             stream.write('[candidate_vs_baseline]\n')
             stream.write(json.dumps(_json_safe(comparisons), ensure_ascii=False) + '\n')
     _plot_density(
@@ -569,9 +697,11 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--checkpoint', required=True)
     parser.add_argument('--save-dir')
-    parser.add_argument('--baseline-checkpoint')
-    parser.add_argument('--baseline-checkpoint-sha256')
+    parser.add_argument('--baseline-checkpoint', action='append')
+    parser.add_argument('--baseline-checkpoint-sha256', action='append')
+    parser.add_argument('--baseline-label', action='append')
     arguments = parser.parse_args()
     evaluate_giro_peak(arguments.checkpoint, arguments.save_dir,
                        arguments.baseline_checkpoint,
-                       arguments.baseline_checkpoint_sha256)
+                       arguments.baseline_checkpoint_sha256,
+                       arguments.baseline_label)

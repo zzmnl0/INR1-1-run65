@@ -61,13 +61,18 @@ def cgm_to_geo_batch(cgm_lats, cgm_lons, alts_km, unix_times):
 
 def convert_day_record_cgm(day_record):
     """
-    将 DayRecord 中的 cgm_lat_2d / cgm_lon_2d 原地转换为 geo_lat_2d / geo_lon_2d。
+    Convert AACGM coordinates for a diagnostic cross-check only.
+
+    P0-A uses radar line-of-sight WGS84 coordinates as the model coordinates.
+    AACGM inverse conversion is retained to expose disagreements, never to replace
+    the LOS coordinates or to determine model-query coverage.
 
     Args:
         day_record: dict（由 isr_loader.load_poker_flat 返回，含 cgm_lat_2d 等字段）
 
     Returns:
-        同一 dict，添加了 'geo_lat_2d', 'geo_lon_2d' 字段。
+        同一 dict，添加 'aacgm_geo_lat_2d', 'aacgm_geo_lon_2d' and a small
+        geometry diagnostic.  It never overwrites ``geo_lat_2d``/``geo_lon_2d``.
         若原始 cgm 字段为 None 则跳过。
     """
     cgm_lat_2d = day_record.get('cgm_lat_2d')
@@ -76,8 +81,10 @@ def convert_day_record_cgm(day_record):
     alt_1d     = day_record.get('alt_1d')
 
     if cgm_lat_2d is None or cgm_lon_2d is None:
-        day_record['geo_lat_2d'] = None
-        day_record['geo_lon_2d'] = None
+        day_record['aacgm_geo_lat_2d'] = None
+        day_record['aacgm_geo_lon_2d'] = None
+        day_record.setdefault('geometry_qc', {})['aacgm_crosscheck'] = {
+            'status': 'not_available'}
         return day_record
 
     n_alt, n_time = cgm_lat_2d.shape
@@ -93,6 +100,30 @@ def convert_day_record_cgm(day_record):
         times_2d.flatten()
     )
 
-    day_record['geo_lat_2d'] = geo_lat.reshape(n_alt, n_time).astype(np.float32)
-    day_record['geo_lon_2d'] = geo_lon.reshape(n_alt, n_time).astype(np.float32)
+    aacgm_lat = geo_lat.reshape(n_alt, n_time).astype(np.float32)
+    aacgm_lon = geo_lon.reshape(n_alt, n_time).astype(np.float32)
+    day_record['aacgm_geo_lat_2d'] = aacgm_lat
+    day_record['aacgm_geo_lon_2d'] = aacgm_lon
+    primary_lat = day_record.get('geo_lat_2d')
+    primary_lon = day_record.get('geo_lon_2d')
+    diagnostic = {'status': 'computed'}
+    if primary_lat is not None and primary_lon is not None:
+        valid = (np.isfinite(primary_lat) & np.isfinite(primary_lon)
+                 & np.isfinite(aacgm_lat) & np.isfinite(aacgm_lon))
+        if valid.any():
+            # Small-angle surface distance is sufficient for a cross-check; it is
+            # explicitly not used in the model coordinate path.
+            dlat = np.deg2rad(aacgm_lat[valid] - primary_lat[valid])
+            dlon = np.deg2rad(aacgm_lon[valid] - primary_lon[valid])
+            mean_lat = np.deg2rad(0.5 * (aacgm_lat[valid] + primary_lat[valid]))
+            diagnostic.update({
+                'n_compared': int(valid.sum()),
+                'median_horizontal_difference_km': float(np.median(
+                    6371.0 * np.hypot(dlat, np.cos(mean_lat) * dlon))),
+            })
+        else:
+            diagnostic['status'] = 'insufficient_data'
+    else:
+        diagnostic['status'] = 'primary_los_coordinate_missing'
+    day_record.setdefault('geometry_qc', {})['aacgm_crosscheck'] = diagnostic
     return day_record

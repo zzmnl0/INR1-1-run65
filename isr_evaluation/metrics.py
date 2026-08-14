@@ -9,6 +9,13 @@ ISR 验证指标计算模块
 
 import numpy as np
 
+from isr_evaluation.peak_qa import (
+    DEFAULT_PEAK_CONTRACT,
+    PeakSearchContract,
+    results_to_arrays,
+    search_peak_grid,
+)
+
 
 # ==================== 基础工具 ====================
 
@@ -41,7 +48,11 @@ def _ccc(obs, pred):
 
 def extract_grid_nmf2_hmf2(log10_grid, alt_1d, peak_search_alt_range,
                             coarse_step_km=10.0, fine_step_km=1.0):
-    """Independently search each field on a 10-km then 1-km F2 grid."""
+    """Legacy finite-argmax F2 extractor retained for regression comparison.
+
+    M2-W2 primary conclusions must use :func:`extract_grid_peak_qa`; this helper
+    intentionally preserves its earlier interpolation semantics for auditability.
+    """
     lower, upper = map(float, peak_search_alt_range)
     if not np.isfinite([lower, upper]).all() or lower >= upper:
         raise ValueError('peak_search_alt_range must be finite and increasing')
@@ -74,6 +85,27 @@ def extract_grid_nmf2_hmf2(log10_grid, alt_1d, peak_search_alt_range,
         nmf2[time_index], hmf2[time_index] = (
             fine_values[peak_index], fine[peak_index])
     return nmf2, hmf2
+
+
+def extract_grid_peak_qa(log10_grid, alt_1d,
+                         peak_contract: PeakSearchContract = DEFAULT_PEAK_CONTRACT):
+    """Return per-time peak values plus quality-status arrays under the P0-A contract."""
+    results = search_peak_grid(log10_grid, alt_1d, peak_contract)
+    return results_to_arrays(results)
+
+
+def peak_qc_counts(peak_arrays):
+    """Deterministic status/validity counts stored alongside aggregate metrics."""
+    status = np.asarray(peak_arrays['status']).astype(str)
+    unique, counts = np.unique(status, return_counts=True)
+    return {
+        'status': {name: int(count) for name, count in zip(unique, counts)},
+        'n_total': int(status.size),
+        'nmf2_valid': int(np.asarray(peak_arrays['nmf2_valid'], dtype=bool).sum()),
+        'hmf2_valid': int(np.asarray(peak_arrays['hmf2_valid'], dtype=bool).sum()),
+        'boundary_or_censored': int(np.isin(
+            status, ('lower_censored', 'upper_censored', 'boundary_sensitive')).sum()),
+    }
 
 
 def extract_isr_nmf2_hmf2(ne_2d, alt_1d, f2_alt_min=150.0,

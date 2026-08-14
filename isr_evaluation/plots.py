@@ -309,6 +309,25 @@ def plot_peak_lt_comparison(
     import pandas as pd
     import matplotlib.dates as mdates
 
+    def _segmented_values(times, values):
+        """Insert NaNs at local-date and long-cadence discontinuities."""
+        values = np.asarray(values, dtype=np.float64).copy()
+        finite_time = np.isfinite(times)
+        valid_times = times[finite_time]
+        cadence = np.diff(valid_times)
+        cadence = cadence[cadence > 0]
+        median_cadence = float(np.median(cadence)) if cadence.size else 0.0
+        break_after = max(3.0 * median_cadence, 900.0)
+        for index in range(1, len(times)):
+            if not (np.isfinite(times[index]) and np.isfinite(times[index - 1])):
+                values[index] = np.nan
+                continue
+            date_changed = int(np.floor(times[index] / 86400.0)) != int(
+                np.floor(times[index - 1] / 86400.0))
+            if date_changed or times[index] - times[index - 1] > break_after:
+                values[index] = np.nan
+        return values
+
     # LT Unix 时间戳 → pandas Timestamp（用于 matplotlib datetime 轴）
     lt_unix = np.asarray(lt_all,     dtype=np.float64)
     ih      = np.asarray(isr_hmf2,   dtype=np.float64)
@@ -328,36 +347,39 @@ def plot_peak_lt_comparison(
 
     lt_dt = pd.to_datetime(lt_unix, unit='s')   # LT datetime array
 
-    # 有效掩码
-    h_mask = np.isfinite(ih) & np.isfinite(mh) & np.isfinite(bh) & np.isfinite(rh)
-    n_mask = np.isfinite(in_) & np.isfinite(mn) & np.isfinite(bn) & np.isfinite(rn)
+    # Each field retains its own finite mask.  A missing background/model value
+    # must not erase an otherwise valid ISR or IRI curve.
+    h_values = [_segmented_values(lt_unix, values)
+                for values in (ih, rh, bh, mh)]
     in_plot = log10_density_to_display(in_)
     mn_plot = log10_density_to_display(mn)
     bn_plot = log10_density_to_display(bn)
     rn_plot = log10_density_to_display(rn)
+    n_values = [_segmented_values(lt_unix, values)
+                for values in (in_plot, rn_plot, bn_plot, mn_plot)]
 
     fig, (ax_h, ax_n) = plt.subplots(2, 1, figsize=(16, 8), sharex=True)
 
     # ---- hmF2 ----
-    ax_h.scatter(lt_dt[h_mask], ih[h_mask],
+    ax_h.scatter(lt_dt[np.isfinite(ih)], ih[np.isfinite(ih)],
                  s=10, alpha=0.5, color='#1f77b4', linewidths=0,
                  label='ISR', zorder=3)
-    ax_h.plot(lt_dt[h_mask], rh[h_mask],
+    ax_h.plot(lt_dt, h_values[1],
               color='black', lw=1.2, ls='--', label='Raw IRI', zorder=4)
-    ax_h.plot(lt_dt[h_mask], bh[h_mask],
+    ax_h.plot(lt_dt, h_values[2],
               color='gray', lw=1.2, ls=':', label='FNDA Background', zorder=4)
-    ax_h.plot(lt_dt[h_mask], mh[h_mask],
+    ax_h.plot(lt_dt, h_values[3],
               color='#2ca02c', lw=1.5, ls='-', label=model_name, zorder=5)
 
     # ---- NmF2 ----
-    ax_n.scatter(lt_dt[n_mask], in_plot[n_mask],
+    ax_n.scatter(lt_dt[np.isfinite(in_plot)], in_plot[np.isfinite(in_plot)],
                  s=10, alpha=0.5, color='#1f77b4', linewidths=0,
                  label='ISR', zorder=3)
-    ax_n.plot(lt_dt[n_mask], rn_plot[n_mask],
+    ax_n.plot(lt_dt, n_values[1],
               color='black', lw=1.2, ls='--', label='Raw IRI', zorder=4)
-    ax_n.plot(lt_dt[n_mask], bn_plot[n_mask],
+    ax_n.plot(lt_dt, n_values[2],
               color='gray', lw=1.2, ls=':', label='FNDA Background', zorder=4)
-    ax_n.plot(lt_dt[n_mask], mn_plot[n_mask],
+    ax_n.plot(lt_dt, n_values[3],
               color='#2ca02c', lw=1.5, ls='-', label=model_name, zorder=5)
 
     # ---- 轴格式：显示日期 + LT 小时 ----
@@ -390,8 +412,8 @@ def plot_peak_lt_comparison(
     ax_h.set_title(f'{station}  hmF2 vs Local Time', fontsize=11, fontweight='bold')
     ax_n.set_title(f'{station}  NmF2 vs Local Time', fontsize=11, fontweight='bold')
 
-    n_pts_h = int(h_mask.sum())
-    n_pts_n = int(n_mask.sum())
+    n_pts_h = int(np.isfinite(ih).sum())
+    n_pts_n = int(np.isfinite(in_plot).sum())
     fig.suptitle(
         f'{station}  |  hmF2: N={n_pts_h}  NmF2: N={n_pts_n}  (横轴为地方时)',
         fontsize=12, fontweight='bold',
