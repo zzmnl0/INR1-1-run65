@@ -55,6 +55,7 @@ from inr_modules.mdia.p0b_audit import (
     profile_precision_statistics,
     sha256_file,
     strict_json_loads,
+    tracked_git_status,
     validate_audit_tables,
     validate_cross_table_diagnostics,
     validate_train_token_directory_identity,
@@ -564,8 +565,7 @@ def _git_provenance(
             "rev-parse", f"{required_implementation_ref}^{{tag}}")
         implementation_ref_type = run(
             "cat-file", "-t", required_implementation_ref)
-        tracked_status = run(
-            "status", "--short", "--untracked-files=no").splitlines()
+        tracked_status = tracked_git_status(ROOT)
         ancestor = subprocess.run(
             [rtk, "git", "merge-base", "--is-ancestor",
              EXPECTED_BASE_ANCHOR, head],

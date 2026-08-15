@@ -626,8 +626,7 @@ def current_git_provenance(
         tag_commit = run("rev-parse", f"{required_tag}^{{commit}}")
         tag_object = run("rev-parse", f"{required_tag}^{{tag}}")
         tag_type = run("cat-file", "-t", required_tag)
-        tracked_status = run(
-            "status", "--short", "--untracked-files=no").splitlines()
+        tracked_status = tracked_git_status(root)
         ancestor = subprocess.run(
             [rtk, "git", "merge-base", "--is-ancestor", base_anchor, head],
             cwd=root, text=True, stdout=subprocess.PIPE,
@@ -683,6 +682,18 @@ def current_git_provenance(
         raise ValueError(
             "P0-B publication Git identity failed: " + ", ".join(failures))
     return result
+
+
+def tracked_git_status(repo_root: str | os.PathLike[str]) -> list[str]:
+    """Return raw machine Git tracked-status lines without RTK summarization."""
+    rtk = shutil.which("rtk")
+    if rtk is None:
+        raise RuntimeError("rtk is required for P0-B publication identity checks")
+    completed = subprocess.run(
+        [rtk, "proxy", "git", "status", "--short", "--untracked-files=no"],
+        cwd=Path(repo_root).resolve(), text=True, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, check=True)
+    return completed.stdout.splitlines()
 
 
 def _json_text(value: Any) -> str:
@@ -1866,6 +1877,7 @@ __all__ = [
     "predictive_nis_unlocalized",
     "sha256_file",
     "strict_json_loads",
+    "tracked_git_status",
     "validate_audit_tables",
     "validate_cross_table_diagnostics",
     "validate_edge_contribution_closures",

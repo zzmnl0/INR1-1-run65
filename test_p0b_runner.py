@@ -460,6 +460,35 @@ def test_runtime_rejects_tag_object_identity_change(monkeypatch):
             initial, runner.EXPECTED_IMPLEMENTATION_TAG)
 
 
+def test_runner_git_provenance_uses_shared_machine_status(monkeypatch):
+    calls = []
+    head = "a" * 40
+    tag_object = "b" * 40
+
+    def machine_status(root):
+        calls.append(root)
+        return []
+
+    def fake_run(arguments, **kwargs):
+        command = tuple(arguments[2:])
+        outputs = {
+            ("rev-parse", "HEAD"): head,
+            ("branch", "--show-current"): runner.EXPECTED_IMPLEMENTATION_BRANCH,
+            ("rev-parse", f"{runner.EXPECTED_IMPLEMENTATION_TAG}^{{commit}}"): head,
+            ("rev-parse", f"{runner.EXPECTED_IMPLEMENTATION_TAG}^{{tag}}"): tag_object,
+            ("cat-file", "-t", runner.EXPECTED_IMPLEMENTATION_TAG): "tag",
+        }
+        return type("Completed", (), {
+            "stdout": outputs.get(command, ""), "stderr": "", "returncode": 0})()
+
+    monkeypatch.setattr(runner, "tracked_git_status", machine_status)
+    monkeypatch.setattr(runner.shutil, "which", lambda name: "rtk")
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    provenance = runner._git_provenance(enforce=True)
+    assert provenance["tracked_status"] == []
+    assert calls == [runner.ROOT]
+
+
 def test_batch_ids_remain_unique_across_multiple_records_for_one_station_day():
     first = _selection(3)
     second = _selection(2)

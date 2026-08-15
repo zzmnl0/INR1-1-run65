@@ -5,6 +5,8 @@ from __future__ import annotations
 from copy import deepcopy
 import json
 from pathlib import Path
+import shutil
+import subprocess
 
 import numpy as np
 import pytest
@@ -22,6 +24,7 @@ from inr_modules.mdia.p0b_audit import (
     predictive_nis_unlocalized,
     profile_precision_statistics,
     strict_json_loads,
+    tracked_git_status,
     validate_audit_tables,
     validate_cross_table_diagnostics,
     validate_foreign_keys,
@@ -34,6 +37,29 @@ from inr_modules.mdia.p0b_audit import (
 
 ROOT = Path(__file__).resolve().parent
 CONTRACT_PATH = ROOT / "m2w2_contracts" / "p0b_audit_contract_v1.json"
+
+
+def test_tracked_git_status_preserves_machine_clean_and_dirty_states(tmp_path):
+    rtk = shutil.which("rtk")
+    assert rtk is not None
+
+    def git(*arguments):
+        return subprocess.run(
+            [rtk, "proxy", "git", *arguments], cwd=tmp_path, check=True,
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    git("init")
+    git("config", "user.email", "p0b@example.invalid")
+    git("config", "user.name", "P0-B Test")
+    tracked = tmp_path / "tracked.txt"
+    tracked.write_text("clean\n", encoding="utf-8")
+    git("add", "--", tracked.name)
+    git("commit", "-m", "fixture")
+    assert tracked_git_status(tmp_path) == []
+
+    tracked.write_text("dirty\n", encoding="utf-8")
+    status = tracked_git_status(tmp_path)
+    assert status and "tracked.txt" in status[0]
 
 
 def _scope(count):
