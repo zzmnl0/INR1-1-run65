@@ -17,6 +17,7 @@ import glob
 import os
 import traceback
 import hashlib
+import json
 
 
 _WGS84_A_KM = 6378.137
@@ -34,6 +35,290 @@ def _sha256(path):
         for block in iter(lambda: stream.read(1024 * 1024), b''):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _array_payload_sha256(values):
+    """Hash one already-materialized allowed payload without touching its HDF."""
+    array = np.ascontiguousarray(np.asarray(values))
+    digest = hashlib.sha256()
+    digest.update(array.dtype.str.encode('ascii'))
+    digest.update(np.asarray(array.shape, dtype=np.int64).tobytes())
+    digest.update(array.tobytes(order='C'))
+    return digest.hexdigest()
+
+
+def _new_allowed_content_hasher(path):
+    """Create a framed digest for only arrays materialized by an allowed query."""
+    digest = hashlib.sha256()
+    digest.update(b'isr_allowed_materialized_content_v1\x00')
+    return {
+        'path': os.path.normpath(os.path.abspath(os.fspath(path))),
+        'digest': digest,
+        'framed_array_count': 0,
+        'allowed_time_column_count': 0,
+    }
+
+
+def _frame_materialized_array(state, logical_name, values):
+    """Add an unambiguous dtype/shape/name/C-bytes frame to an allowed digest."""
+    array = np.asarray(values)
+    if array.dtype.hasobject:
+        raise ValueError('ISR allowed-content identity rejects object arrays')
+    array = np.ascontiguousarray(array)
+    header = json.dumps({
+        'logical_name': str(logical_name),
+        'dtype': array.dtype.str,
+        'shape': [int(value) for value in array.shape],
+        'order': 'C',
+    }, allow_nan=False, ensure_ascii=True, sort_keys=True,
+       separators=(',', ':')).encode('ascii')
+    payload = memoryview(array).cast('B')
+    digest = state['digest']
+    digest.update(len(header).to_bytes(8, byteorder='big', signed=False))
+    digest.update(header)
+    digest.update(len(payload).to_bytes(8, byteorder='big', signed=False))
+    digest.update(payload)
+    state['framed_array_count'] += 1
+
+
+def _frame_allowed_timestamps(state, segment_id, timestamps):
+    values = np.asarray(timestamps)
+    if values.ndim != 1 or values.size == 0:
+        raise ValueError('allowed ISR timestamps must be a non-empty vector')
+    _frame_materialized_array(
+        state, f'{segment_id}/timestamps_allowed', values)
+    state['allowed_time_column_count'] += int(values.size)
+
+
+def _finalize_allowed_content_identity(state):
+    framed = int(state['framed_array_count'])
+    allowed = int(state['allowed_time_column_count'])
+    if framed <= 0 or allowed <= 0:
+        raise ValueError('ISR allowed-content identity cannot be empty')
+    return {
+        'schema': 'isr_allowed_materialized_content_v1',
+        'path': state['path'],
+        'sha256': state['digest'].hexdigest(),
+        'framed_array_count': framed,
+        'allowed_time_column_count': allowed,
+    }
+
+
+def _declared_source_identity_map(h5_files, source_file_identities):
+    """Bind explicit files to P0-A identities without rereading whole HDF bytes."""
+    if source_file_identities is None:
+        return None
+    if isinstance(source_file_identities, (str, bytes, os.PathLike, dict)):
+        raise TypeError('source_file_identities must be an iterable of mappings')
+    result = {}
+    for row in source_file_identities:
+        if not isinstance(row, dict):
+            raise TypeError('source_file_identities entries must be mappings')
+        path = os.path.normpath(os.path.abspath(os.fspath(row.get('path', ''))))
+        key = os.path.normcase(path)
+        digest = str(row.get('sha256', '')).lower()
+        size = row.get('size_bytes')
+        if (key in result or len(digest) != 64
+                or any(character not in '0123456789abcdef' for character in digest)
+                or isinstance(size, bool) or not isinstance(size, int) or size <= 0):
+            raise ValueError('invalid or duplicate declared ISR source identity')
+        result[key] = {
+            'path': path,
+            'sha256': digest,
+            'size_bytes': int(size),
+        }
+    expected = {os.path.normcase(os.path.normpath(os.path.abspath(path)))
+                for path in h5_files}
+    if set(result) != expected:
+        raise ValueError('declared ISR source identities differ from explicit files')
+    return result
+
+
+def _materialized_source_identity(path, declared_identities):
+    """Return a P0-A-attested identity, or preserve the unrestricted legacy hash."""
+    absolute = os.path.normpath(os.path.abspath(path))
+    if declared_identities is None:
+        return {
+            'path': absolute,
+            'sha256': _sha256(path),
+            'size_bytes': int(os.path.getsize(path)),
+        }
+    identity = dict(declared_identities[os.path.normcase(absolute)])
+    if int(os.path.getsize(path)) != identity['size_bytes']:
+        raise ValueError('ISR source size differs from the P0-A identity')
+    return identity
+
+
+def _validate_identity_mode(allowed_dates_utc, declared_identities):
+    """Keep restricted attestation and unrestricted legacy hashing disjoint."""
+    restricted = allowed_dates_utc is not None
+    if restricted and declared_identities is None:
+        raise ValueError(
+            'restricted ISR loading requires P0-A source_file_identities')
+    if not restricted and declared_identities is not None:
+        raise ValueError(
+            'source_file_identities require an explicit allowed_dates_utc filter')
+
+
+def _select_hdf_files(data_dir, pattern, file_paths=None):
+    """Return historical glob results or a purely lexical explicit file list.
+
+    Explicit mode never scans or probes ``data_dir``.  Relative entries are
+    interpreted under ``data_dir``; normalization and duplicate detection do
+    not call ``exists``, ``stat``, hashing, or HDF readers.
+    """
+    if file_paths is None:
+        return sorted(glob.glob(os.path.join(data_dir, pattern)))
+    if isinstance(file_paths, (str, bytes, os.PathLike)):
+        raise TypeError('file_paths must be an iterable of paths, not one path')
+    selected = []
+    seen = set()
+    for value in file_paths:
+        path = os.fspath(value)
+        if isinstance(path, bytes):
+            raise TypeError('file_paths entries must resolve to text paths')
+        if not os.path.isabs(path):
+            path = os.path.join(data_dir, path)
+        path = os.path.normpath(os.path.abspath(path))
+        identity = os.path.normcase(path)
+        if identity in seen:
+            raise ValueError('file_paths contains duplicate lexical paths')
+        seen.add(identity)
+        selected.append(path)
+    return sorted(selected, key=os.path.normcase)
+
+
+def _allowed_time_indices(timestamps, allowed_dates_utc=None):
+    """Return sorted time-column indices whose UTC dates are explicitly allowed.
+
+    ``timestamps`` is metadata.  Callers must apply the returned indices while
+    slicing density datasets so excluded-date density columns are never
+    materialized.  ``None`` preserves the historical all-date loader behavior.
+    """
+    values = np.asarray(timestamps)
+    if values.ndim != 1 or not np.isfinite(values).all():
+        raise ValueError('ISR timestamps must be a finite one-dimensional array')
+    if allowed_dates_utc is None:
+        return np.arange(len(values), dtype=np.int64)
+    allowed = frozenset(str(value) for value in allowed_dates_utc)
+    if not allowed or any(len(value) != 8 or not value.isdigit() for value in allowed):
+        raise ValueError('allowed_dates_utc must contain YYYYMMDD strings')
+    dates = pd.to_datetime(values, unit='s', utc=True).strftime('%Y%m%d')
+    return np.flatnonzero(np.isin(np.asarray(dates), tuple(sorted(allowed))))
+
+
+def _column_spans(indices):
+    """Encode sorted column indices as inclusive compact spans."""
+    values = np.asarray(indices, dtype=np.int64)
+    if values.ndim != 1:
+        raise ValueError('ISR time-column indices must be one-dimensional')
+    if values.size == 0:
+        return []
+    if np.any(values < 0) or np.any(np.diff(values) <= 0):
+        raise ValueError('ISR time-column indices must be sorted and unique')
+    breaks = np.flatnonzero(np.diff(values) != 1) + 1
+    chunks = np.split(values, breaks)
+    return [[int(chunk[0]), int(chunk[-1])] for chunk in chunks]
+
+
+def _new_access_audit(station, allowed_dates_utc):
+    allowed = None if allowed_dates_utc is None else sorted(
+        {str(value) for value in allowed_dates_utc})
+    return {
+        'isr_column_access_audit_schema_version': 1,
+        'station': station,
+        'filter_semantics': (
+            'timestamps_metadata_first_then_explicit_2d_column_slice_v1'),
+        'allowed_dates_utc': allowed,
+        'excluded_date_values_persisted': False,
+        'files': [],
+    }
+
+
+def _new_segment_access_audit(
+        timestamps, time_indices, *, segment_id, allowed_dates_utc):
+    """Describe a metadata-only decision before any 2-D dataset is read."""
+    timestamps = np.asarray(timestamps)
+    indices = np.asarray(time_indices, dtype=np.int64)
+    if indices.size and int(indices[-1]) >= len(timestamps):
+        raise ValueError('ISR selected time column is outside the timestamp axis')
+    selected_dates = pd.to_datetime(
+        timestamps[indices], unit='s', utc=True).strftime('%Y%m%d')
+    selected_dates = sorted(set(map(str, selected_dates)))
+    if allowed_dates_utc is not None:
+        allowed = {str(value) for value in allowed_dates_utc}
+        if not set(selected_dates).issubset(allowed):
+            raise ValueError('ISR selected density date is outside the allowlist')
+    return {
+        'segment_id': str(segment_id),
+        'total_time_columns': int(len(timestamps)),
+        'allowed_time_columns': int(len(indices)),
+        'excluded_time_columns': int(len(timestamps) - len(indices)),
+        'allowed_column_spans_inclusive': _column_spans(indices),
+        'allowed_dates_utc': selected_dates,
+        'dataset_reads': [],
+    }
+
+
+def _read_allowed_columns(dataset, time_indices, segment_audit, dataset_name):
+    """Materialize only explicit allowed columns and record the exact access.
+
+    This function must remain the sole 2-D HDF read path used by the restricted
+    P0-B ISR loader.  In particular, it never reads ``dataset[:]`` before
+    applying the UTC-date allowlist.
+    """
+    indices = np.asarray(time_indices, dtype=np.int64)
+    shape = tuple(dataset.shape)
+    if len(shape) != 2:
+        raise ValueError(f'ISR {dataset_name} dataset must be two-dimensional')
+    if shape[1] != int(segment_audit['total_time_columns']):
+        raise ValueError(
+            f'ISR {dataset_name} time axis differs from timestamps metadata')
+    if indices.size and int(indices[-1]) >= shape[1]:
+        raise ValueError(f'ISR {dataset_name} selected column is out of bounds')
+    values = np.asarray(dataset[:, indices])
+    expected_shape = (shape[0], len(indices))
+    if values.shape != expected_shape:
+        raise ValueError(
+            f'ISR {dataset_name} column slice returned {values.shape}, '
+            f'expected {expected_shape}')
+    segment_audit['dataset_reads'].append({
+        'dataset': str(dataset_name),
+        'materialized_column_count': int(len(indices)),
+        'materialized_column_spans_inclusive': _column_spans(indices),
+        'materialized_dates_utc': list(segment_audit['allowed_dates_utc']),
+        'excluded_columns_materialized': 0,
+        'materialized_payload_sha256': _array_payload_sha256(values),
+    })
+    return values
+
+
+def _finalize_access_audit(access_audit):
+    """Validate and add machine-checkable aggregate column counts."""
+    total = allowed = excluded = density_reads = 0
+    for file_row in access_audit['files']:
+        for segment in file_row['segments']:
+            total += int(segment['total_time_columns'])
+            allowed += int(segment['allowed_time_columns'])
+            excluded += int(segment['excluded_time_columns'])
+            expected_spans = segment['allowed_column_spans_inclusive']
+            for read in segment['dataset_reads']:
+                if read['materialized_column_spans_inclusive'] != expected_spans:
+                    raise ValueError('ISR dataset read differs from allowed columns')
+                if int(read['excluded_columns_materialized']) != 0:
+                    raise ValueError('ISR excluded density column was materialized')
+                if read['dataset'] in {'ne', 'dne'}:
+                    density_reads += int(read['materialized_column_count'])
+    if allowed + excluded != total:
+        raise ValueError('ISR access-audit column accounting is inconsistent')
+    access_audit['totals'] = {
+        'time_columns': total,
+        'allowed_time_columns': allowed,
+        'excluded_time_columns': excluded,
+        'density_dataset_column_reads': density_reads,
+        'excluded_density_columns_materialized': 0,
+    }
+    return access_audit
 
 
 def _decode_hdf_text(value):
@@ -269,7 +554,10 @@ def _build_record(date_str, station, lat, lon,
 # ======================== Jicamarca ========================
 
 def load_jicamarca(data_dir, start_unix, end_unix,
-                   alt_min=120.0, alt_max=500.0, err_ratio_max=0.5):
+                   alt_min=120.0, alt_max=500.0, err_ratio_max=0.5,
+                   allowed_dates_utc=None, *, file_paths=None,
+                   source_file_identities=None, fail_on_file_error=False,
+                   return_access_audit=False):
     """
     读取 Jicamarca IS Radar HDF5 数据，按 UTC 日期分组，返回 DayRecord 列表。
 
@@ -285,14 +573,27 @@ def load_jicamarca(data_dir, start_unix, end_unix,
         end_unix:      MDIA 训练结束 Unix 时间戳
         alt_min/max:   高度过滤范围 (km)
         err_ratio_max: 最大 dne/ne 比值（误差棒过滤）
+        allowed_dates_utc: 可选YYYYMMDD白名单；先读时间元数据，再只读取白名单列
+        file_paths: 可选显式文件列表；提供时不扫描 ``data_dir``
+        source_file_identities: 受限模式必须提供的P0-A冻结整文件身份
+        fail_on_file_error: 文件读取失败时立即抛出；默认保留历史跳过语义
 
     Returns:
         list of DayRecord dicts，按日期排序
     """
-    h5_files = sorted(glob.glob(os.path.join(data_dir, '*.hdf5')))
+    access_audit = _new_access_audit('Jicamarca', allowed_dates_utc)
+    h5_files = _select_hdf_files(data_dir, '*.hdf5', file_paths)
+    declared_identities = _declared_source_identity_map(
+        h5_files, source_file_identities)
+    _validate_identity_mode(allowed_dates_utc, declared_identities)
+    if file_paths is not None and any(
+            not path.lower().endswith('.hdf5') for path in h5_files):
+        raise ValueError('Jicamarca file_paths must contain only .hdf5 files')
     if not h5_files:
         print(f'  [Jicamarca] 未找到 .hdf5 文件: {data_dir}')
-        return []
+        result = []
+        return (result, _finalize_access_audit(access_audit)) \
+            if return_access_audit else result
 
     print(f'  [Jicamarca] 找到 {len(h5_files)} 个 HDF5 文件')
 
@@ -301,19 +602,53 @@ def load_jicamarca(data_dir, start_unix, end_unix,
 
     for fp in h5_files:
         try:
+            content_hasher = _new_allowed_content_hasher(fp)
             with h5py.File(fp, 'r') as f:
                 al     = f['Data/Array Layout']
+                ts_all = al['timestamps'][:]
+                time_indices = _allowed_time_indices(
+                    ts_all, allowed_dates_utc=allowed_dates_utc)
+                segment_audit = _new_segment_access_audit(
+                    ts_all, time_indices, segment_id='array_layout',
+                    allowed_dates_utc=allowed_dates_utc)
+                file_audit = {
+                    'path': os.path.abspath(fp),
+                    'segments': [segment_audit],
+                }
+                access_audit['files'].append(file_audit)
+                if time_indices.size == 0:
+                    continue
                 gdalt  = al['gdalt'][:]
-                ts     = al['timestamps'][:]
-                ne     = al['2D Parameters/ne'][:]
-                dne    = al['2D Parameters/dne'][:]
+                ts     = ts_all[time_indices]
+                _frame_allowed_timestamps(
+                    content_hasher, 'array_layout', ts)
+                _frame_materialized_array(
+                    content_hasher, 'array_layout/gdalt', gdalt)
+                ne     = _read_allowed_columns(
+                    al['2D Parameters/ne'], time_indices, segment_audit, 'ne')
+                _frame_materialized_array(
+                    content_hasher, 'array_layout/ne_allowed', ne)
+                dne    = _read_allowed_columns(
+                    al['2D Parameters/dne'], time_indices, segment_audit, 'dne')
+                _frame_materialized_array(
+                    content_hasher, 'array_layout/dne_allowed', dne)
                 gdlatr = float(al['1D Parameters/gdlatr'][0])
                 gdlonr = float(al['1D Parameters/gdlonr'][0])
-                file_identity = {
-                    'path': os.path.abspath(fp),
-                    'sha256': _sha256(fp),
-                    'size_bytes': int(os.path.getsize(fp)),
-                }
+                _frame_materialized_array(
+                    content_hasher, 'array_layout/gdlatr',
+                    np.asarray([gdlatr], dtype=np.float64))
+                _frame_materialized_array(
+                    content_hasher, 'array_layout/gdlonr',
+                    np.asarray([gdlonr], dtype=np.float64))
+                file_identity = _materialized_source_identity(
+                    fp, declared_identities)
+                file_audit['materialized_source_identity'] = dict(file_identity)
+                file_audit['materialized_allowed_content_identity'] = (
+                    _finalize_allowed_content_identity(content_hasher))
+                file_audit['source_identity_semantics'] = (
+                    'p0a_contract_attested_no_whole_hdf_reread_v1'
+                    if declared_identities is not None
+                    else 'whole_file_sha256_v1')
 
             if lat_val is None:
                 lat_val, lon_val = gdlatr, gdlonr
@@ -337,6 +672,8 @@ def load_jicamarca(data_dir, start_unix, end_unix,
                     'file_identity': file_identity,
                 })
         except Exception as e:
+            if fail_on_file_error:
+                raise
             print(f'  [Jicamarca] 读取失败 {os.path.basename(fp)}: {e}')
             traceback.print_exc()
 
@@ -410,14 +747,18 @@ def load_jicamarca(data_dir, start_unix, end_unix,
                          'station_longitude_deg': float(lon_val)}))
 
     print(f'  [Jicamarca] 有效天数: {len(records)}')
-    return records
+    return (records, _finalize_access_audit(access_audit)) \
+        if return_access_audit else records
 
 
 # ======================== Poker Flat ========================
 
 def load_poker_flat(data_dir, start_unix, end_unix,
                     alt_min=120.0, alt_max=500.0, err_ratio_max=0.5,
-                    beam_select='max_elm'):
+                    beam_select='max_elm', allowed_dates_utc=None,
+                    *, file_paths=None, source_file_identities=None,
+                    fail_on_file_error=False,
+                    return_access_audit=False):
     """
     读取 Poker Flat IS Radar HDF5 数据，按 UTC 日期分组，返回 DayRecord 列表。
 
@@ -431,14 +772,26 @@ def load_poker_flat(data_dir, start_unix, end_unix,
         beam_select: 'max_elm' 选最大仰角 beam（最接近垂直，默认）
                      'all' 合并所有 beam
                      int   按 beamid 指定
+        allowed_dates_utc: 可选YYYYMMDD白名单；先读时间元数据，再只读取白名单列
+        file_paths: 可选显式文件列表；提供时不扫描 ``data_dir``
+        fail_on_file_error: 文件读取失败时立即抛出；默认保留历史跳过语义
 
     Returns:
         list of DayRecord dicts（含 cgm_lat_2d / cgm_lon_2d，待坐标转换）
     """
-    h5_files = sorted(glob.glob(os.path.join(data_dir, '*.h5')))
+    access_audit = _new_access_audit('PokerFlat', allowed_dates_utc)
+    h5_files = _select_hdf_files(data_dir, '*.h5', file_paths)
+    declared_identities = _declared_source_identity_map(
+        h5_files, source_file_identities)
+    _validate_identity_mode(allowed_dates_utc, declared_identities)
+    if file_paths is not None and any(
+            not path.lower().endswith('.h5') for path in h5_files):
+        raise ValueError('Poker Flat file_paths must contain only .h5 files')
     if not h5_files:
         print(f'  [Poker Flat] 未找到 .h5 文件: {data_dir}')
-        return []
+        result = []
+        return (result, _finalize_access_audit(access_audit)) \
+            if return_access_audit else result
 
     print(f'  [Poker Flat] 找到 {len(h5_files)} 个 HDF5 文件')
 
@@ -446,18 +799,50 @@ def load_poker_flat(data_dir, start_unix, end_unix,
 
     for fp in h5_files:
         try:
+            content_hasher = _new_allowed_content_hasher(fp)
+            station_geometry_framed = False
             with h5py.File(fp, 'r') as f:
                 layout = f['Data/Array Layout']
                 station_geometry = _read_experiment_geometry(f)
-                file_identity = {
-                    'path': os.path.abspath(fp),
-                    'sha256': _sha256(fp),
-                    'size_bytes': int(os.path.getsize(fp)),
-                }
                 beams  = []
-                for bname in layout.keys():
+                file_audit = {
+                    'path': os.path.abspath(fp),
+                    'segments': [],
+                }
+                access_audit['files'].append(file_audit)
+                for bname in sorted(layout.keys(), key=str):
                     b = layout[bname]
+                    ts_all = b['timestamps'][:]
+                    time_indices = _allowed_time_indices(
+                        ts_all, allowed_dates_utc=allowed_dates_utc)
+                    segment_audit = _new_segment_access_audit(
+                        ts_all, time_indices, segment_id=bname,
+                        allowed_dates_utc=allowed_dates_utc)
+                    file_audit['segments'].append(segment_audit)
+                    if time_indices.size == 0:
+                        continue
+                    if not station_geometry_framed:
+                        for name in ('latitude_deg', 'longitude_deg', 'altitude_km'):
+                            _frame_materialized_array(
+                                content_hasher, f'station/{name}',
+                                np.asarray([station_geometry[name]], dtype=np.float64))
+                        station_geometry_framed = True
+                    allowed_timestamps = ts_all[time_indices]
+                    _frame_allowed_timestamps(
+                        content_hasher, bname, allowed_timestamps)
                     beam_geometry = _validate_beam_geometry(b, station_geometry)
+                    _frame_materialized_array(
+                        content_hasher, f'{bname}/range_m',
+                        beam_geometry['slant_range_m'])
+                    _frame_materialized_array(
+                        content_hasher, f'{bname}/azimuth_deg',
+                        np.asarray([beam_geometry['azimuth_deg']], dtype=np.float64))
+                    _frame_materialized_array(
+                        content_hasher, f'{bname}/elevation_deg',
+                        np.asarray([beam_geometry['elevation_deg']], dtype=np.float64))
+                    _frame_materialized_array(
+                        content_hasher, f'{bname}/beam_id',
+                        np.asarray([beam_geometry['beam_id']], dtype=np.int64))
                     geo_lat_1d, geo_lon_1d, geo_alt_1d = _wgs84_los_to_geodetic(
                         station_geometry['latitude_deg'],
                         station_geometry['longitude_deg'],
@@ -466,6 +851,23 @@ def load_poker_flat(data_dir, start_unix, end_unix,
                         beam_geometry['azimuth_deg'],
                         beam_geometry['elevation_deg'],
                     )
+                    ne_allowed = _read_allowed_columns(
+                        b['2D Parameters/ne'], time_indices, segment_audit, 'ne')
+                    dne_allowed = _read_allowed_columns(
+                        b['2D Parameters/dne'], time_indices, segment_audit, 'dne')
+                    cgm_lat_allowed = _read_allowed_columns(
+                        b['2D Parameters/cgm_lat'], time_indices,
+                        segment_audit, 'cgm_lat')
+                    cgm_lon_allowed = _read_allowed_columns(
+                        b['2D Parameters/cgm_long'], time_indices,
+                        segment_audit, 'cgm_lon')
+                    for logical_name, values in (
+                            ('ne_allowed', ne_allowed),
+                            ('dne_allowed', dne_allowed),
+                            ('cgm_lat_allowed', cgm_lat_allowed),
+                            ('cgm_lon_allowed', cgm_lon_allowed)):
+                        _frame_materialized_array(
+                            content_hasher, f'{bname}/{logical_name}', values)
                     beams.append({
                         'azm':      beam_geometry['azimuth_deg'],
                         'elm':      beam_geometry['elevation_deg'],
@@ -482,13 +884,25 @@ def load_poker_flat(data_dir, start_unix, end_unix,
                                 geo_alt_1d - beam_geometry['slant_range_m']
                                 * _POKER_RANGE_TO_KM)),
                         },
-                        'ts':       b['timestamps'][:],
-                        'ne':       b['2D Parameters/ne'][:],
-                        'dne':      b['2D Parameters/dne'][:],
-                        'cgm_lat':  b['2D Parameters/cgm_lat'][:],
-                        'cgm_lon':  b['2D Parameters/cgm_long'][:],
-                        'file_identity': file_identity,
+                        'ts':       allowed_timestamps,
+                        'ne':       ne_allowed,
+                        'dne':      dne_allowed,
+                        'cgm_lat':  cgm_lat_allowed,
+                        'cgm_lon':  cgm_lon_allowed,
                     })
+
+                if beams:
+                    file_identity = _materialized_source_identity(
+                        fp, declared_identities)
+                    file_audit['materialized_source_identity'] = dict(file_identity)
+                    file_audit['materialized_allowed_content_identity'] = (
+                        _finalize_allowed_content_identity(content_hasher))
+                    file_audit['source_identity_semantics'] = (
+                        'p0a_contract_attested_no_whole_hdf_reread_v1'
+                        if declared_identities is not None
+                        else 'whole_file_sha256_v1')
+                    for beam in beams:
+                        beam['file_identity'] = file_identity
 
             if not beams:
                 continue
@@ -542,6 +956,8 @@ def load_poker_flat(data_dir, start_unix, end_unix,
                     })
 
         except Exception as e:
+            if fail_on_file_error:
+                raise
             print(f'  [Poker Flat] 读取失败 {os.path.basename(fp)}: {e}')
             traceback.print_exc()
 
@@ -640,4 +1056,5 @@ def load_poker_flat(data_dir, start_unix, end_unix,
 
     print(f'  [Poker Flat] 有效天数: {len(records)}  '
           f'(beam: {beam_select})')
-    return records
+    return (records, _finalize_access_audit(access_audit)) \
+        if return_access_audit else records

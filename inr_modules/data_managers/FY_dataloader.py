@@ -238,6 +238,199 @@ def _load_profile_index(index_path, row_count):
     return row_ids, profile_ids
 
 
+def _strict_preload_profile_ranges(raw, index_path, allowed_profile_ids):
+    """Validate an allowlist and resolve its passing-profile row ranges."""
+    allowed_raw = np.asarray(allowed_profile_ids)
+    if allowed_raw.ndim != 1:
+        raise ValueError(
+            'strict_preload_allowed_profile_ids must be one-dimensional')
+    if allowed_raw.dtype.kind not in 'iu' or allowed_raw.dtype.kind == 'b':
+        raise ValueError(
+            'strict_preload_allowed_profile_ids must contain integers')
+    allowed = allowed_raw.astype(np.int64, copy=False)
+    if len(allowed) == 0:
+        raise ValueError(
+            'strict_preload_allowed_profile_ids must not be empty')
+    if np.any(allowed < 0):
+        raise ValueError(
+            'strict_preload_allowed_profile_ids must be nonnegative')
+    if len(allowed) > 1 and np.any(allowed[1:] <= allowed[:-1]):
+        raise ValueError(
+            'strict_preload_allowed_profile_ids must be sorted and unique')
+    if index_path is None:
+        raise ValueError(
+            'strict preload requires a profile_index_path with output boundaries')
+    if raw.ndim != 2 or raw.shape[1] < 5:
+        raise ValueError('strict preload physical data must have at least five columns')
+
+    with np.load(index_path, allow_pickle=False) as index:
+        required = {'profile_id', 'pass_profile', 'output_start', 'output_end'}
+        missing = required.difference(index.files)
+        if missing:
+            raise ValueError(f'profile index missing arrays: {sorted(missing)}')
+        profile_raw = np.asarray(index['profile_id'])
+        passed = np.asarray(index['pass_profile'], dtype=bool)
+        starts_raw = np.asarray(index['output_start'])
+        ends_raw = np.asarray(index['output_end'])
+    arrays = (profile_raw, passed, starts_raw, ends_raw)
+    if any(value.ndim != 1 for value in arrays):
+        raise ValueError('profile index arrays must be one-dimensional')
+    if len({len(value) for value in arrays}) != 1:
+        raise ValueError('profile index arrays must have equal length')
+    for name, values in (
+            ('profile_id', profile_raw), ('output_start', starts_raw),
+            ('output_end', ends_raw)):
+        if values.dtype.kind not in 'iu':
+            if (values.dtype.kind not in 'f'
+                    or not np.isfinite(values).all()
+                    or not np.array_equal(values, np.rint(values))):
+                raise ValueError(f'profile index {name} must contain integers')
+    profile_ids = np.asarray(np.rint(profile_raw), dtype=np.int64)
+    starts = np.asarray(np.rint(starts_raw), dtype=np.int64)
+    ends = np.asarray(np.rint(ends_raw), dtype=np.int64)
+    if len(profile_ids) != len(np.unique(profile_ids)):
+        raise ValueError('profile index profile_id values must be unique')
+
+    failed = ~passed
+    if np.any((starts[failed] != -1) | (ends[failed] != -1)):
+        raise ValueError('failed profile must use output boundary -1')
+    passing_rows = np.flatnonzero(passed)
+    if len(passing_rows) == 0:
+        raise ValueError('profile index contains no passing profiles')
+    passing_starts = starts[passing_rows]
+    passing_ends = ends[passing_rows]
+    if (np.any(passing_starts < 0)
+            or np.any(passing_ends <= passing_starts)
+            or np.any(passing_ends > len(raw))):
+        raise ValueError('invalid passing-profile output boundary')
+    boundary_order = np.argsort(passing_starts, kind='stable')
+    ordered_rows = passing_rows[boundary_order]
+    ordered_starts = starts[ordered_rows]
+    ordered_ends = ends[ordered_rows]
+    if (ordered_starts[0] != 0 or ordered_ends[-1] != len(raw)
+            or np.any(ordered_starts[1:] != ordered_ends[:-1])):
+        raise ValueError(
+            'passing-profile output boundaries must exactly cover the NPY rows')
+
+    passing_by_id = {
+        int(profile_ids[row]): int(row) for row in passing_rows
+    }
+    absent = [int(value) for value in allowed if int(value) not in passing_by_id]
+    if absent:
+        raise ValueError(
+            'strict preload profile IDs are absent or non-passing: '
+            f'{absent[:8]}')
+    selected_rows = np.asarray(
+        [passing_by_id[int(value)] for value in allowed], dtype=np.int64)
+    return (
+        allowed,
+        profile_ids[selected_rows],
+        starts[selected_rows],
+        ends[selected_rows],
+    )
+
+
+def _strict_preload_profile_rows(raw, index_path, allowed_profile_ids):
+    """Read physical rows only for an explicit sorted profile allowlist.
+
+    This path is intentionally separate from ``_load_profile_index``: it uses
+    the profile-level output boundaries to select ranges before any ``[:5]``
+    physical columns are materialized.  It is used by the read-only P0-B audit
+    so development and locked-test density rows are never preloaded.
+    """
+    allowed, profile_ids, starts, ends = _strict_preload_profile_ranges(
+        raw, index_path, allowed_profile_ids)
+    selected_rows = np.argsort(starts, kind='stable')
+
+    physical_chunks = []
+    profile_chunks = []
+    for row in selected_rows:
+        start, end = int(starts[row]), int(ends[row])
+        # This is the only physical-data access in the strict path.  Disallowed
+        # ranges are never sliced, including for finite-value checks.
+        physical = np.array(raw[start:end, :5], dtype=np.float32, copy=True)
+        physical_chunks.append(physical)
+        profile_chunks.append(np.full(
+            end - start, profile_ids[row], dtype=np.int64))
+    return (
+        np.concatenate(physical_chunks, axis=0),
+        np.concatenate(profile_chunks, axis=0),
+        allowed,
+    )
+
+
+def _strict_preload_token_profiles(
+        raw, index_path, allowed_profile_ids, observation_alt_range, n_alt):
+    """Build profile/token inputs without retaining selected physical rows."""
+    allowed, profile_ids, starts, ends = _strict_preload_profile_ranges(
+        raw, index_path, allowed_profile_ids)
+    frac = np.linspace(0.0, 1.0, n_alt)
+    n_profiles = len(profile_ids)
+    prof_meta = np.empty((n_profiles, 3), dtype=np.float32)
+    prof_abs = np.empty((n_profiles, n_alt, 5), dtype=np.float32)
+    prof_vmask = np.empty((n_profiles, n_alt), dtype=bool)
+    compact_start = 0
+
+    for index, (profile_id, start, end) in enumerate(
+            zip(profile_ids, starts, ends)):
+        # Read exactly one allowed range at a time.  The copied physical rows
+        # become unreachable after this loop iteration.
+        physical = np.array(
+            raw[int(start):int(end), :5], dtype=np.float32, copy=True)
+        valid = (np.isfinite(physical[:, :5]).all(axis=1)
+                 & _altitude_mask(physical[:, 2], observation_alt_range))
+        data = np.array(physical[valid, :5], dtype=np.float32, copy=True)
+        count = len(data)
+        if count == 0:
+            raise ValueError(
+                'strict preload profiles have no finite rows in the configured '
+                f'altitude range: [{int(profile_id)}]')
+
+        count_float = float(count)
+        meta = np.asarray([
+            np.add.reduceat(
+                data[:, column].astype(np.float64), [0])[0] / count_float
+            for column in (0, 1, 3)
+        ], dtype=np.float32)
+
+        # Match the full strict path exactly: its sampling indices are rounded
+        # after adding the start in the profile-id-sorted concatenation.
+        absolute_idx = np.round(
+            float(compact_start) + frac * (count_float - 1.0)).astype(np.int64)
+        absolute_idx = np.clip(
+            absolute_idx, compact_start, compact_start + count - 1)
+        if count < n_alt:
+            absolute_idx = compact_start + np.arange(n_alt, dtype=np.int64)
+            absolute_idx = np.clip(
+                absolute_idx, compact_start, compact_start + count - 1)
+        local_idx = absolute_idx - compact_start
+
+        prof_meta[index] = meta
+        prof_abs[index] = data[local_idx]
+        prof_vmask[index] = np.arange(n_alt) < count
+        compact_start += count
+
+    return (
+        allowed,
+        np.asarray(profile_ids, dtype=np.int64),
+        prof_meta,
+        prof_abs,
+        prof_vmask,
+        compact_start,
+    )
+
+
+def _require_strict_profile_hits(profile_ids, allowed_profile_ids):
+    """Require every strict allowlist profile to survive physical filtering."""
+    loaded = np.unique(np.asarray(profile_ids, dtype=np.int64))
+    if not np.array_equal(loaded, allowed_profile_ids):
+        missing = np.setdiff1d(
+            allowed_profile_ids, loaded, assume_unique=True).tolist()
+        raise ValueError(
+            'strict preload profiles have no finite rows in the configured '
+            f'altitude range: {missing[:8]}')
+
+
 class FY3D_Dataset(Dataset):
     """
     FY3D 卫星电离层数据 Dataset。
@@ -645,44 +838,6 @@ class FYNeighborhoodIndex:
     def __init__(self, fy_data_path, config=None):
         if config is None:
             config = {}
-        raw = np.load(fy_data_path, mmap_mode='r')
-        profile_index_path = config.get('fy_profile_index_path')
-        if profile_index_path:
-            profile_ids_raw, _ = _load_profile_index(
-                profile_index_path, len(raw))
-        else:
-            profile_path = config.get('fy_profile_path')
-            if not profile_path:
-                profile_path = str(fy_data_path).replace(
-                    '_clean1.npy', '_clean3.npy')
-            profile_raw = np.load(profile_path, mmap_mode='r')
-            if (raw.ndim != 2 or profile_raw.ndim != 2 or raw.shape[1] < 5
-                    or raw.shape[0] != profile_raw.shape[0]
-                    or profile_raw.shape[1] <= 6):
-                raise ValueError(
-                    'FY clean1/clean3 rows are not aligned or profile_id is missing')
-            for start in range(0, len(raw), 1_000_000):
-                end = min(start + 1_000_000, len(raw))
-                if not np.array_equal(
-                        raw[start:end, :5], profile_raw[start:end, :5],
-                        equal_nan=True):
-                    raise ValueError(
-                        f'FY clean1/clean3 physical columns differ at {start}:{end}')
-            profile_ids_raw = profile_raw[:, 6]
-        if raw.ndim != 2 or raw.shape[1] < 5:
-            raise ValueError('FY physical data must have at least five columns')
-        observation_alt_range = (
-            config.get('observation_alt_range') or config.get('alt_range'))
-        valid = (np.isfinite(raw[:, :5]).all(axis=1)
-                 & _altitude_mask(raw[:, 2], observation_alt_range))
-        if not np.isfinite(profile_ids_raw).all() or not np.array_equal(
-                profile_ids_raw, np.rint(profile_ids_raw)):
-            raise ValueError('FY profile_id must contain finite integers')
-        data = np.array(raw[valid, :5], dtype=np.float32)
-        profile_ids = np.rint(profile_ids_raw[valid]).astype(np.int64)
-        if len(data) == 0:
-            raise ValueError('FY contains no finite physical rows')
-
         self.dt       = float(config.get('fy_nb_dt',       1.5))
         self.dlat     = float(config.get('fy_nb_dlat',     5.0))
         self.dlon     = float(config.get('fy_nb_dlon',    15.0))
@@ -694,66 +849,159 @@ class FYNeighborhoodIndex:
             config.get('physical_localization_time_hours', self.dt))
         self.token_mode = config.get('neighbor_directory_semantics') == (
             'token_exact_positive_support_v1')
-        # ---- 1. 以 clean3 profile_id 聚合，保留剖面内原始点顺序 ----
-        sort_idx          = np.argsort(profile_ids, kind='stable')
-        self.sorted_data  = data[sort_idx]
-        sorted_pids       = profile_ids[sort_idx]
+        token_only_raw = config.get('strict_preload_token_only', False)
+        if not isinstance(token_only_raw, (bool, np.bool_)):
+            raise ValueError('strict_preload_token_only must be boolean')
+        self.strict_preload_token_only = bool(token_only_raw)
+        strict_preload = 'strict_preload_allowed_profile_ids' in config
+        if self.strict_preload_token_only and not strict_preload:
+            raise ValueError(
+                'strict_preload_token_only requires '
+                'strict_preload_allowed_profile_ids')
+        if self.strict_preload_token_only and not self.token_mode:
+            raise ValueError(
+                'strict_preload_token_only requires '
+                'neighbor_directory_semantics=token_exact_positive_support_v1')
 
-        # ---- 2. profile_id 变化即新剖面 ----
-        breaks           = np.where(np.diff(sorted_pids) != 0)[0] + 1
-        starts           = np.concatenate([[0], breaks]).astype(np.int32)
-        ends             = np.concatenate([breaks, [len(self.sorted_data)]]).astype(np.int32)
-        self.prof_starts = starts
-        self.prof_ends   = ends
-        self.prof_ids    = sorted_pids[starts]
-        N_prof           = len(starts)
-        counts           = (ends - starts).astype(np.float64)
-        print(f'[FYNeighborhoodIndex] 原始点={len(self.sorted_data):,}  '
-              f'掩星剖面={N_prof:,}  压缩比={len(self.sorted_data)/N_prof:.0f}×')
+        raw = np.load(fy_data_path, mmap_mode='r')
+        if raw.ndim != 2 or raw.shape[1] < 5:
+            raise ValueError('FY physical data must have at least five columns')
+        profile_index_path = config.get('fy_profile_index_path')
+        observation_alt_range = (
+            config.get('observation_alt_range') or config.get('alt_range'))
+        if self.strict_preload_token_only:
+            (strict_allowed, self.prof_ids, self.prof_meta,
+             self.prof_abs_data, self.prof_valid_mask,
+             retained_count) = _strict_preload_token_profiles(
+                 raw, profile_index_path,
+                 config['strict_preload_allowed_profile_ids'],
+                 observation_alt_range, self.n_alt)
+            if not np.array_equal(self.prof_ids, strict_allowed):
+                raise AssertionError('compact strict preload profile order drifted')
+            N_prof = len(self.prof_ids)
+            print(f'[FYNeighborhoodIndex] 审计token-only点={retained_count:,}  '
+                  f'掩星剖面={N_prof:,}  压缩比={retained_count/N_prof:.0f}×')
+        else:
+            strict_allowed = None
+            if strict_preload:
+                physical_rows, profile_ids_raw, strict_allowed = (
+                    _strict_preload_profile_rows(
+                        raw, profile_index_path,
+                        config['strict_preload_allowed_profile_ids']))
+            elif profile_index_path:
+                profile_ids_raw, _ = _load_profile_index(
+                    profile_index_path, len(raw))
+            else:
+                profile_path = config.get('fy_profile_path')
+                if not profile_path:
+                    profile_path = str(fy_data_path).replace(
+                        '_clean1.npy', '_clean3.npy')
+                profile_raw = np.load(profile_path, mmap_mode='r')
+                if (profile_raw.ndim != 2
+                        or raw.shape[0] != profile_raw.shape[0]
+                        or profile_raw.shape[1] <= 6):
+                    raise ValueError(
+                        'FY clean1/clean3 rows are not aligned or profile_id is missing')
+                for start in range(0, len(raw), 1_000_000):
+                    end = min(start + 1_000_000, len(raw))
+                    if not np.array_equal(
+                            raw[start:end, :5], profile_raw[start:end, :5],
+                            equal_nan=True):
+                        raise ValueError(
+                            f'FY clean1/clean3 physical columns differ at {start}:{end}')
+                profile_ids_raw = profile_raw[:, 6]
+            physical_source = physical_rows if strict_preload else raw
+            valid = (np.isfinite(physical_source[:, :5]).all(axis=1)
+                     & _altitude_mask(
+                         physical_source[:, 2], observation_alt_range))
+            if not np.isfinite(profile_ids_raw).all() or not np.array_equal(
+                    profile_ids_raw, np.rint(profile_ids_raw)):
+                raise ValueError('FY profile_id must contain finite integers')
+            data = np.array(physical_source[valid, :5], dtype=np.float32)
+            profile_ids = np.rint(profile_ids_raw[valid]).astype(np.int64)
+            if strict_preload:
+                _require_strict_profile_hits(profile_ids, strict_allowed)
+            if len(data) == 0:
+                raise ValueError('FY contains no finite physical rows')
 
-        # ---- 3. 剖面代表点（均值中心）[N_prof, 3]: lat_c, lon_c, t_c ----
-        lat_c = np.add.reduceat(self.sorted_data[:, 0].astype(np.float64), starts) / counts
-        lon_c = np.add.reduceat(self.sorted_data[:, 1].astype(np.float64), starts) / counts
-        t_c   = np.add.reduceat(self.sorted_data[:, 3].astype(np.float64), starts) / counts
-        self.prof_meta = np.stack([lat_c, lon_c, t_c], axis=1).astype(np.float32)
+            # ---- 1. 以 clean3 profile_id 聚合，保留剖面内原始点顺序 ----
+            sort_idx = np.argsort(profile_ids, kind='stable')
+            self.sorted_data = data[sort_idx]
+            sorted_pids = profile_ids[sort_idx]
 
-        # ---- 4. 每剖面均匀预采样 n_alt 个高度点 → [N_prof, n_alt, 5] ----
-        frac     = np.linspace(0.0, 1.0, self.n_alt)                          # [n_alt]
-        row_idx  = (starts[:, None].astype(np.float64)
-                    + frac[None, :] * (counts[:, None] - 1))                  # [N_prof, n_alt]
-        row_idx  = np.round(row_idx).astype(np.int32)
-        row_idx  = np.clip(row_idx, starts[:, None], ends[:, None] - 1)
-        short = counts < self.n_alt
-        if np.any(short):
-            row_idx[short] = starts[short, None] + np.arange(self.n_alt)[None, :]
-            row_idx[short] = np.clip(
-                row_idx[short], starts[short, None], ends[short, None] - 1)
-        self.prof_abs_data   = self.sorted_data[row_idx.ravel()].reshape(N_prof, self.n_alt, 5)
-        # 有效性：counts[p] < n_alt 时末尾槽是重复点，标为无效
-        self.prof_valid_mask = (np.arange(self.n_alt)[None, :] <
-                                counts[:, None].astype(int))                   # [N_prof, n_alt]
+            # ---- 2. profile_id 变化即新剖面 ----
+            breaks = np.where(np.diff(sorted_pids) != 0)[0] + 1
+            starts = np.concatenate([[0], breaks]).astype(np.int32)
+            ends = np.concatenate(
+                [breaks, [len(self.sorted_data)]]).astype(np.int32)
+            self.prof_starts = starts
+            self.prof_ends = ends
+            self.prof_ids = sorted_pids[starts]
+            N_prof = len(starts)
+            counts = (ends - starts).astype(np.float64)
+            print(f'[FYNeighborhoodIndex] 原始点={len(self.sorted_data):,}  '
+                  f'掩星剖面={N_prof:,}  '
+                  f'压缩比={len(self.sorted_data)/N_prof:.0f}×')
+
+            lat_c = np.add.reduceat(
+                self.sorted_data[:, 0].astype(np.float64), starts) / counts
+            lon_c = np.add.reduceat(
+                self.sorted_data[:, 1].astype(np.float64), starts) / counts
+            t_c = np.add.reduceat(
+                self.sorted_data[:, 3].astype(np.float64), starts) / counts
+            self.prof_meta = np.stack(
+                [lat_c, lon_c, t_c], axis=1).astype(np.float32)
+
+            frac = np.linspace(0.0, 1.0, self.n_alt)
+            row_idx = (starts[:, None].astype(np.float64)
+                       + frac[None, :] * (counts[:, None] - 1))
+            row_idx = np.round(row_idx).astype(np.int32)
+            row_idx = np.clip(row_idx, starts[:, None], ends[:, None] - 1)
+            short = counts < self.n_alt
+            if np.any(short):
+                row_idx[short] = (
+                    starts[short, None] + np.arange(self.n_alt)[None, :])
+                row_idx[short] = np.clip(
+                    row_idx[short], starts[short, None], ends[short, None] - 1)
+            self.prof_abs_data = self.sorted_data[
+                row_idx.ravel()].reshape(N_prof, self.n_alt, 5)
+            self.prof_valid_mask = (np.arange(self.n_alt)[None, :]
+                                    < counts[:, None].astype(int))
 
         # ---- 5. 时间分箱索引建立在剖面代表点上 ----
-        prof_sort_t              = np.argsort(self.prof_meta[:, 2])
-        self.prof_sorted_idx     = prof_sort_t.astype(np.int32)
-        self.prof_sorted_meta    = self.prof_meta[prof_sort_t]                 # [N_prof, 3]
-        self.prof_sorted_abs     = self.prof_abs_data[prof_sort_t]             # [N_prof, n_alt, 5]
-        self.prof_sorted_vmask   = self.prof_valid_mask[prof_sort_t]           # [N_prof, n_alt]
-        self.prof_sorted_ids     = self.prof_ids[prof_sort_t]
+        prof_sort_t = np.argsort(self.prof_meta[:, 2])
+        if self.strict_preload_token_only:
+            prof_sorted_meta = self.prof_meta[prof_sort_t]
+            prof_sorted_abs = self.prof_abs_data[prof_sort_t]
+            prof_sorted_vmask = self.prof_valid_mask[prof_sort_t]
+            prof_sorted_ids = self.prof_ids[prof_sort_t]
+        else:
+            self.prof_sorted_idx = prof_sort_t.astype(np.int32)
+            self.prof_sorted_meta = self.prof_meta[prof_sort_t]
+            self.prof_sorted_abs = self.prof_abs_data[prof_sort_t]
+            self.prof_sorted_vmask = self.prof_valid_mask[prof_sort_t]
+            self.prof_sorted_ids = self.prof_ids[prof_sort_t]
+            prof_sorted_meta = self.prof_sorted_meta
+            prof_sorted_abs = self.prof_sorted_abs
+            prof_sorted_vmask = self.prof_sorted_vmask
+            prof_sorted_ids = self.prof_sorted_ids
 
         # Exact token directory: at most n_alt valid sampled heights per profile,
         # with stable (profile_id, token_id) identity and no profile top-k.
-        token_valid = self.prof_sorted_vmask.reshape(-1)
-        self.token_coords = self.prof_sorted_abs.reshape(-1, 5)[token_valid, :4]
-        self.token_values = self.prof_sorted_abs.reshape(-1, 5)[token_valid, 4]
+        token_valid = prof_sorted_vmask.reshape(-1)
+        self.token_coords = prof_sorted_abs.reshape(-1, 5)[token_valid, :4]
+        self.token_values = prof_sorted_abs.reshape(-1, 5)[token_valid, 4]
         self.token_profile_ids = np.repeat(
-            self.prof_sorted_ids, self.n_alt)[token_valid]
+            prof_sorted_ids, self.n_alt)[token_valid]
         self.token_ids = np.tile(np.arange(self.n_alt, dtype=np.int64), N_prof)[token_valid]
         token_order = np.argsort(self.token_coords[:, 3], kind='stable')
         self.token_coords = self.token_coords[token_order]
         self.token_values = self.token_values[token_order]
         self.token_profile_ids = self.token_profile_ids[token_order]
         self.token_ids = self.token_ids[token_order]
+
+        if self.strict_preload_token_only:
+            return
 
         self.bin_size = self.dt
         self.t_min    = float(self.prof_sorted_meta[0, 2])
@@ -793,6 +1041,9 @@ class FYNeighborhoodIndex:
                 't_q'        : [B] float32
                 'K_p'        : int
         """
+        if getattr(self, 'strict_preload_token_only', False):
+            raise RuntimeError(
+                'strict_preload_token_only supports exact-token queries only')
         B   = coords_np.shape[0]
         K_p = self.k_prof
 
@@ -959,6 +1210,19 @@ class COSMICNeighborhoodIndex:
             config.get('physical_localization_time_hours', self.dt))
         self.token_mode = config.get('neighbor_directory_semantics') == (
             'token_exact_positive_support_v1')
+        token_only_raw = config.get('strict_preload_token_only', False)
+        if not isinstance(token_only_raw, (bool, np.bool_)):
+            raise ValueError('strict_preload_token_only must be boolean')
+        self.strict_preload_token_only = bool(token_only_raw)
+        strict_preload = 'strict_preload_allowed_profile_ids' in config
+        if self.strict_preload_token_only and not strict_preload:
+            raise ValueError(
+                'strict_preload_token_only requires '
+                'strict_preload_allowed_profile_ids')
+        if self.strict_preload_token_only and not self.token_mode:
+            raise ValueError(
+                'strict_preload_token_only requires '
+                'neighbor_directory_semantics=token_exact_positive_support_v1')
 
         raw   = np.load(cosmic_path, mmap_mode='r')
         profile_index_path = config.get('cosmic_profile_index_path')
@@ -966,78 +1230,124 @@ class COSMICNeighborhoodIndex:
             raise ValueError('COSMIC physical data must have at least five columns')
         observation_alt_range = (
             config.get('observation_alt_range') or config.get('alt_range'))
-        valid = (np.isfinite(raw[:, :5]).all(axis=1)
-                 & _altitude_mask(raw[:, 2], observation_alt_range))
-        if profile_index_path:
-            pid_raw, _ = _load_profile_index(profile_index_path, len(raw))
-        elif raw.shape[1] > 5:
-            pid_raw = raw[:, 5]
+        if self.strict_preload_token_only:
+            (strict_allowed, self.prof_ids, self.prof_meta,
+             self.prof_abs_data, self.prof_valid_mask,
+             retained_count) = _strict_preload_token_profiles(
+                 raw, profile_index_path,
+                 config['strict_preload_allowed_profile_ids'],
+                 observation_alt_range, self.n_alt)
+            if not np.array_equal(self.prof_ids, strict_allowed):
+                raise AssertionError('compact strict preload profile order drifted')
+            N_prof = len(self.prof_ids)
+            print(f'[COSMICNeighborhoodIndex] 审计token-only点={retained_count:,}  '
+                  f'掩星剖面={N_prof:,}  压缩比={retained_count/N_prof:.0f}×')
         else:
-            raise ValueError(
-                'COSMIC requires column 6 profile_id or cosmic_profile_index_path')
-        if not np.isfinite(pid_raw).all() or not np.array_equal(pid_raw, np.rint(pid_raw)):
-            raise ValueError('COSMIC profile_id must contain finite integers')
-        data  = np.array(raw[valid, :5], dtype=np.float32)   # [N, 5]
-        pids  = np.rint(pid_raw[valid]).astype(np.int64)     # profile_id
-        if len(data) == 0:
-            raise ValueError('COSMIC contains no finite physical rows')
+            strict_allowed = None
+            if strict_preload:
+                physical_rows, pid_raw, strict_allowed = (
+                    _strict_preload_profile_rows(
+                        raw, profile_index_path,
+                        config['strict_preload_allowed_profile_ids']))
+            else:
+                physical_rows = raw
+            valid = (np.isfinite(physical_rows[:, :5]).all(axis=1)
+                     & _altitude_mask(
+                         physical_rows[:, 2], observation_alt_range))
+            if not strict_preload:
+                if profile_index_path:
+                    pid_raw, _ = _load_profile_index(
+                        profile_index_path, len(raw))
+                elif raw.shape[1] > 5:
+                    pid_raw = raw[:, 5]
+                else:
+                    raise ValueError(
+                        'COSMIC requires column 6 profile_id or '
+                        'cosmic_profile_index_path')
+            if not np.isfinite(pid_raw).all() or not np.array_equal(
+                    pid_raw, np.rint(pid_raw)):
+                raise ValueError('COSMIC profile_id must contain finite integers')
+            data = np.array(physical_rows[valid, :5], dtype=np.float32)
+            pids = np.rint(pid_raw[valid]).astype(np.int64)
+            if strict_preload:
+                _require_strict_profile_hits(pids, strict_allowed)
+            if len(data) == 0:
+                raise ValueError('COSMIC contains no finite physical rows')
 
-        sort_idx         = np.argsort(pids, kind='stable')
-        self.sorted_data = data[sort_idx]
-        sorted_pids      = pids[sort_idx]
+            sort_idx = np.argsort(pids, kind='stable')
+            self.sorted_data = data[sort_idx]
+            sorted_pids = pids[sort_idx]
 
-        # 以 profile_id 变化标记剖面边界
-        breaks = np.where(np.diff(sorted_pids) != 0)[0] + 1
-        starts = np.concatenate([[0], breaks]).astype(np.int32)
-        ends   = np.concatenate([breaks, [len(self.sorted_data)]]).astype(np.int32)
-        self.prof_starts = starts
-        self.prof_ends   = ends
-        self.prof_ids    = sorted_pids[starts]
-        N_prof  = len(starts)
-        counts  = (ends - starts).astype(np.float64)
-        print(f'[COSMICNeighborhoodIndex] 原始点={len(self.sorted_data):,}  '
-              f'掩星剖面={N_prof:,}  压缩比={len(self.sorted_data)/N_prof:.0f}×')
+            breaks = np.where(np.diff(sorted_pids) != 0)[0] + 1
+            starts = np.concatenate([[0], breaks]).astype(np.int32)
+            ends = np.concatenate(
+                [breaks, [len(self.sorted_data)]]).astype(np.int32)
+            self.prof_starts = starts
+            self.prof_ends = ends
+            self.prof_ids = sorted_pids[starts]
+            N_prof = len(starts)
+            counts = (ends - starts).astype(np.float64)
+            print(f'[COSMICNeighborhoodIndex] 原始点={len(self.sorted_data):,}  '
+                  f'掩星剖面={N_prof:,}  '
+                  f'压缩比={len(self.sorted_data)/N_prof:.0f}×')
 
-        # 剖面中心 meta: [N_prof, 3] (lat_c, lon_c, t_c)
-        lat_c = np.add.reduceat(self.sorted_data[:, 0].astype(np.float64), starts) / counts
-        lon_c = np.add.reduceat(self.sorted_data[:, 1].astype(np.float64), starts) / counts
-        t_c   = np.add.reduceat(self.sorted_data[:, 3].astype(np.float64), starts) / counts
-        self.prof_meta = np.stack([lat_c, lon_c, t_c], axis=1).astype(np.float32)
+            lat_c = np.add.reduceat(
+                self.sorted_data[:, 0].astype(np.float64), starts) / counts
+            lon_c = np.add.reduceat(
+                self.sorted_data[:, 1].astype(np.float64), starts) / counts
+            t_c = np.add.reduceat(
+                self.sorted_data[:, 3].astype(np.float64), starts) / counts
+            self.prof_meta = np.stack(
+                [lat_c, lon_c, t_c], axis=1).astype(np.float32)
 
-        # 每剖面均匀采样 n_alt 个高度点
-        frac    = np.linspace(0.0, 1.0, self.n_alt)
-        row_idx = (starts[:, None].astype(np.float64)
-                   + frac[None, :] * (counts[:, None] - 1))
-        row_idx = np.round(row_idx).astype(np.int32)
-        row_idx = np.clip(row_idx, starts[:, None], ends[:, None] - 1)
-        short = counts < self.n_alt
-        if np.any(short):
-            row_idx[short] = starts[short, None] + np.arange(self.n_alt)[None, :]
-            row_idx[short] = np.clip(
-                row_idx[short], starts[short, None], ends[short, None] - 1)
-        self.prof_abs_data   = self.sorted_data[row_idx.ravel()].reshape(N_prof, self.n_alt, 5)
-        self.prof_valid_mask = (np.arange(self.n_alt)[None, :]
-                                < counts[:, None].astype(int))
+            frac = np.linspace(0.0, 1.0, self.n_alt)
+            row_idx = (starts[:, None].astype(np.float64)
+                       + frac[None, :] * (counts[:, None] - 1))
+            row_idx = np.round(row_idx).astype(np.int32)
+            row_idx = np.clip(row_idx, starts[:, None], ends[:, None] - 1)
+            short = counts < self.n_alt
+            if np.any(short):
+                row_idx[short] = (
+                    starts[short, None] + np.arange(self.n_alt)[None, :])
+                row_idx[short] = np.clip(
+                    row_idx[short], starts[short, None], ends[short, None] - 1)
+            self.prof_abs_data = self.sorted_data[
+                row_idx.ravel()].reshape(N_prof, self.n_alt, 5)
+            self.prof_valid_mask = (np.arange(self.n_alt)[None, :]
+                                    < counts[:, None].astype(int))
 
         # 按时间排序的剖面序列（用于时间窗口二分查找）
-        prof_sort_t              = np.argsort(self.prof_meta[:, 2])
-        self.prof_sorted_idx     = prof_sort_t.astype(np.int32)
-        self.prof_sorted_meta    = self.prof_meta[prof_sort_t]
-        self.prof_sorted_abs     = self.prof_abs_data[prof_sort_t]
-        self.prof_sorted_vmask   = self.prof_valid_mask[prof_sort_t]
-        self.prof_sorted_ids     = self.prof_ids[prof_sort_t]
+        prof_sort_t = np.argsort(self.prof_meta[:, 2])
+        if self.strict_preload_token_only:
+            prof_sorted_meta = self.prof_meta[prof_sort_t]
+            prof_sorted_abs = self.prof_abs_data[prof_sort_t]
+            prof_sorted_vmask = self.prof_valid_mask[prof_sort_t]
+            prof_sorted_ids = self.prof_ids[prof_sort_t]
+        else:
+            self.prof_sorted_idx = prof_sort_t.astype(np.int32)
+            self.prof_sorted_meta = self.prof_meta[prof_sort_t]
+            self.prof_sorted_abs = self.prof_abs_data[prof_sort_t]
+            self.prof_sorted_vmask = self.prof_valid_mask[prof_sort_t]
+            self.prof_sorted_ids = self.prof_ids[prof_sort_t]
+            prof_sorted_meta = self.prof_sorted_meta
+            prof_sorted_abs = self.prof_sorted_abs
+            prof_sorted_vmask = self.prof_sorted_vmask
+            prof_sorted_ids = self.prof_sorted_ids
 
-        token_valid = self.prof_sorted_vmask.reshape(-1)
-        self.token_coords = self.prof_sorted_abs.reshape(-1, 5)[token_valid, :4]
-        self.token_values = self.prof_sorted_abs.reshape(-1, 5)[token_valid, 4]
+        token_valid = prof_sorted_vmask.reshape(-1)
+        self.token_coords = prof_sorted_abs.reshape(-1, 5)[token_valid, :4]
+        self.token_values = prof_sorted_abs.reshape(-1, 5)[token_valid, 4]
         self.token_profile_ids = np.repeat(
-            self.prof_sorted_ids, self.n_alt)[token_valid]
+            prof_sorted_ids, self.n_alt)[token_valid]
         self.token_ids = np.tile(np.arange(self.n_alt, dtype=np.int64), N_prof)[token_valid]
         token_order = np.argsort(self.token_coords[:, 3], kind='stable')
         self.token_coords = self.token_coords[token_order]
         self.token_values = self.token_values[token_order]
         self.token_profile_ids = self.token_profile_ids[token_order]
         self.token_ids = self.token_ids[token_order]
+
+        if self.strict_preload_token_only:
+            return
 
         self.bin_size = self.dt
         self.t_min    = float(self.prof_sorted_meta[0, 2])
@@ -1063,6 +1373,9 @@ class COSMICNeighborhoodIndex:
         """
         [B,4] → cached dict（与 FYNeighborhoodIndex 接口兼容）
         """
+        if getattr(self, 'strict_preload_token_only', False):
+            raise RuntimeError(
+                'strict_preload_token_only supports exact-token queries only')
         B = len(coords_np)
         K_p = self.k_prof
 
