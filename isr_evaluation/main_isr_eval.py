@@ -85,6 +85,8 @@ _HISTORICAL_EPOCH12_SHA256 = (
 # 分层指标工具（分高度 × 分昼夜）
 # ─────────────────────────────────────────────
 _DAY_LT_RANGE    = (6.0, 18.0)   # 白天：LT 06-18h
+_STRATIFIED_SPLIT_KM = 300.0
+_STRATIFIED_METRIC_NAMES = ('n', 'rmse', 'bias', 'mae', 'pearson_r', 'ccc')
 
 
 def _lt_from_relhour_lon(rel_hour, lon_deg):
@@ -124,6 +126,61 @@ def _strat_metrics_1d(pred_log10, obs_log10):
     ccc = _ccc(obs_log10, pred_log10)
     return {'n': n, 'rmse': rmse, 'bias': bias, 'mae': mae,
             'pearson_r': r, 'ccc': ccc}
+
+
+def _stratified_altitude_masks(altitude, alt_range):
+    """Yield the frozen [low, 300), [300, high] ISR reporting strata."""
+    domain_min, domain_max = map(float, alt_range)
+    if not domain_min < _STRATIFIED_SPLIT_KM < domain_max:
+        raise ValueError('ISR reporting domain must straddle 300 km')
+    altitude = np.asarray(altitude)
+    bins = ((domain_min, _STRATIFIED_SPLIT_KM),
+            (_STRATIFIED_SPLIT_KM, domain_max))
+    for index, (lower, upper) in enumerate(bins):
+        upper_mask = altitude <= upper if index == len(bins) - 1 else altitude < upper
+        yield lower, upper, (altitude >= lower) & upper_mask
+
+
+def _grouped_error_metric_bootstrap(observation, prediction, unit_ids,
+                                    replicates=2000, seed=42):
+    """Profile-grouped CIs for one model's bias, RMSE, and MAE."""
+    observation = np.asarray(observation, dtype=np.float64)
+    prediction = np.asarray(prediction, dtype=np.float64)
+    unit_ids = np.asarray(unit_ids)
+    finite = np.isfinite(observation) & np.isfinite(prediction)
+    error, unit_ids = prediction[finite] - observation[finite], unit_ids[finite]
+    _, inverse = np.unique(unit_ids, return_inverse=True)
+    count = np.bincount(inverse).astype(np.float64)
+    if len(count) < 2:
+        return {'status': 'insufficient_data', 'n': int(error.size),
+                'sampling_units': int(len(count))}
+    stats = np.stack([
+        count,
+        np.bincount(inverse, weights=error),
+        np.bincount(inverse, weights=error ** 2),
+        np.bincount(inverse, weights=np.abs(error)),
+    ], axis=1)
+    rng = np.random.default_rng(seed)
+    sampled = stats[rng.integers(0, len(stats), size=(replicates, len(stats)))].sum(axis=1)
+    values = {
+        'bias': sampled[:, 1] / sampled[:, 0],
+        'rmse': np.sqrt(sampled[:, 2] / sampled[:, 0]),
+        'mae': sampled[:, 3] / sampled[:, 0],
+    }
+    point = {
+        'bias': float(error.mean()),
+        'rmse': float(np.sqrt(np.mean(error ** 2))),
+        'mae': float(np.mean(np.abs(error))),
+    }
+    return {
+        'status': 'computed', 'n': int(error.size),
+        'sampling_units': int(len(stats)), 'replicates': int(replicates),
+        'seed': int(seed),
+        **{name: {'estimate': point[name],
+                  'ci95': [float(bound) for bound in
+                           np.quantile(sampled_values, [0.025, 0.975])]}
+           for name, sampled_values in values.items()},
+    }
 
 
 def _analysis_common_mask(observation, analysis, raw_iri):
@@ -174,8 +231,8 @@ def _compute_stratified_metrics(alt_all, lon_all, rh_all,
 
     Returns
     -------
-    dict  键形如  'model_alt_120-200km_day', 'iri_alt_300-500km_night', ...
-          每个值为 {'n', 'rmse', 'bias', 'mae', 'pearson_r'}
+    dict  键形如  'analysis_alt_120-300km_day', 'iri_alt_300-500km_night', ...
+          每个值为 {'n', 'rmse', 'bias', 'mae', 'pearson_r', 'ccc'}
     """
     lt = _lt_from_relhour_lon(rh_all, lon_all)
     day_mask = (lt >= _DAY_LT_RANGE[0]) & (lt < _DAY_LT_RANGE[1])
@@ -187,28 +244,10 @@ def _compute_stratified_metrics(alt_all, lon_all, rh_all,
     if iri_all is not None:
         sources.append(('iri', iri_all))
 
-    domain_min, domain_max = map(float, alt_range)
-    edges = [domain_min] + [
-        edge for edge in (200.0, 300.0)
-        if domain_min < edge < domain_max] + [domain_max]
-    altitude_bins = list(zip(edges[:-1], edges[1:]))
-    altitude_names = [f'{lower:g}-{upper:g}km'
-                      for lower, upper in altitude_bins]
     for src_name, src_pred in sources:
-        # 全高度分昼夜
-        for dn_label, dn_mask in [('day', day_mask), ('night', ~day_mask), ('all', np.ones(len(alt_all), bool))]:
-            m = dn_mask
-            key = f'{src_name}_all_alt_{dn_label}'
-            result[key] = _strat_metrics_1d(
-                src_pred[m].astype(np.float64),
-                obs_all[m].astype(np.float64),
-            )
         # 分高度层 × 分昼夜
-        for bin_index, ((lo, hi), alt_name) in enumerate(
-                zip(altitude_bins, altitude_names)):
-            upper_mask = (alt_all <= hi if bin_index == len(altitude_bins) - 1
-                          else alt_all < hi)
-            alt_mask = (alt_all >= lo) & upper_mask
+        for lo, hi, alt_mask in _stratified_altitude_masks(alt_all, alt_range):
+            alt_name = f'{lo:g}-{hi:g}km'
             for dn_label, dn_mask in [('day', day_mask), ('night', ~day_mask), ('all', np.ones(len(alt_all), bool))]:
                 m = alt_mask & dn_mask
                 key = f'{src_name}_alt_{alt_name}_{dn_label}'
@@ -224,18 +263,11 @@ def _compute_stratified_bootstrap(altitude, longitude, rel_hour,
                                   observation, analysis, raw_iri, unit_ids,
                                   alt_range):
     """Paired time-profile bootstrap for each M2-W altitude/day stratum."""
-    domain_min, domain_max = map(float, alt_range)
-    edges = [domain_min] + [
-        edge for edge in (200.0, 300.0)
-        if domain_min < edge < domain_max] + [domain_max]
     local_time = _lt_from_relhour_lon(rel_hour, longitude)
     day = (local_time >= _DAY_LT_RANGE[0]) & (local_time < _DAY_LT_RANGE[1])
-    masks = {'all_alt_day': day, 'all_alt_night': ~day,
-             'all_alt_all': np.ones(len(altitude), dtype=bool)}
-    for index, (lower, upper) in enumerate(zip(edges[:-1], edges[1:])):
-        in_altitude = (altitude >= lower) & (
-            altitude <= upper if index == len(edges) - 2
-            else altitude < upper)
+    masks = {}
+    for lower, upper, in_altitude in _stratified_altitude_masks(
+            altitude, alt_range):
         label = f'alt_{lower:g}-{upper:g}km'
         masks.update({f'{label}_day': in_altitude & day,
                       f'{label}_night': in_altitude & ~day,
@@ -375,8 +407,12 @@ def _build_isr_evaluation_contract(candidate_contract, baseline_contract,
     peak_contract = PeakSearchContract(
         lower_km=float(config['peak_search_alt_range'][0]),
         upper_km=float(config['peak_search_alt_range'][1]))
+    altitude_bins = [[float(lower), float(upper)]
+                     for lower, upper, _ in _stratified_altitude_masks(
+                         np.empty(0), config.get('alt_range', (120.0, 500.0)))]
     contract = {
         'evaluation_schema_version': 2,
+        'stratified_metrics_contract_version': 2,
         'evaluation_code_sha256': _evaluation_code_sha256(),
         'candidate_checkpoint': candidate_contract,
         'baseline_checkpoints': baseline_contract,
@@ -408,6 +444,26 @@ def _build_isr_evaluation_contract(candidate_contract, baseline_contract,
                 'CCC_candidate_minus_baseline',
                 'RMSE_baseline_minus_candidate',
                 'PearsonR_candidate_minus_baseline'],
+        },
+        'stratified_metrics': {
+            'altitude_bins_km': altitude_bins,
+            'interval_semantics': (
+                'left_closed_right_open_except_final_right_closed'),
+            'day_local_time_range_hours': list(_DAY_LT_RANGE),
+            'day_interval_semantics': 'left_closed_right_open',
+            'periods': ['day', 'night', 'all'],
+            'metrics': list(_STRATIFIED_METRIC_NAMES),
+            'source_labels': {
+                'analysis': 'M11', 'background': 'M00', 'iri': 'Raw IRI'},
+            'low_altitude_diagnostic': {
+                'altitude_range_km': [120.0, 200.0],
+                'interval_semantics': 'left_closed_right_open',
+                'independent_from_stratified_metrics': True,
+            },
+            'interpretation_warning': (
+                '120-300 km mixes 120-200 km without satellite-density targets '
+                'and 200-300 km with satellite-density targets; do not treat '
+                'the stratum as single-mechanism evidence.'),
         },
     }
     if output_artifacts is not None:
@@ -510,10 +566,20 @@ def _write_isr_final_artifacts(save_dir, station_reports, candidate_contract,
 
     report_json_path = os.path.join(save_dir, 'isr_validation_report.json')
     _write_json_atomically(report_json_path, public_reports)
+    stratified_csv_paths = []
+    for report in public_reports:
+        csv_path = os.path.join(
+            save_dir, report['station'],
+            f"{report['station']}_stratified_metrics.csv")
+        os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+        _save_stratified_csv(report.get('stratified', {}), csv_path)
+        stratified_csv_paths.append(csv_path)
     output_artifacts = {
         'report_text': _artifact_identity(report_text_path, save_dir),
         'report_json': _artifact_identity(report_json_path, save_dir),
         'caches': [_artifact_identity(path, save_dir) for path in cache_paths],
+        'stratified_csvs': [
+            _artifact_identity(path, save_dir) for path in stratified_csv_paths],
     }
     contract = _build_isr_evaluation_contract(
         candidate_contract, baseline_contract, isr_input_files,
@@ -1381,10 +1447,23 @@ def _process_station(station_name, day_records, model, sw_manager,
                     & np.isfinite(low_m00) & np.isfinite(low_iri))
         if (low_mask.sum() >= 2
                 and np.unique(low_units[low_mask]).size >= 2):
+            low_point_metrics = {}
+            low_bootstrap = {}
+            for label, prediction in (
+                    ('M11', low_m11), ('M00', low_m00), ('Raw IRI', low_iri)):
+                point = _strat_metrics_1d(
+                    prediction[low_mask], low_obs[low_mask])
+                low_point_metrics[label] = {
+                    key: point[key] for key in ('n', 'rmse', 'bias', 'mae')}
+                low_bootstrap[label] = _grouped_error_metric_bootstrap(
+                    low_obs[low_mask], prediction[low_mask],
+                    low_units[low_mask], replicates=2000, seed=42)
             low_altitude_diagnostic = {
                 'status': 'computed',
                 'altitude_range_km': [120.0, 200.0],
                 'models': ['M11', 'M00', 'Raw IRI'],
+                'point_metrics': low_point_metrics,
+                'bootstrap': low_bootstrap,
                 'm11_vs_m00_bootstrap': paired_group_bootstrap(
                     low_obs[low_mask], low_m11[low_mask], low_m00[low_mask],
                     low_units[low_mask], replicates=2000, seed=42),

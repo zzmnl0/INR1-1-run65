@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
 import json
 import math
@@ -36,6 +37,31 @@ _PEAK_EXPECTED = {
 }
 _LOW_ALTITUDE_STATUSES = {
     'computed', 'not_applicable', 'insufficient_data',
+}
+_STRATIFIED_SOURCES = {'analysis': 'M11_log10',
+                       'background': 'M00_log10',
+                       'iri': 'IRI_log10'}
+_STRATIFIED_BINS = ((120.0, 300.0), (300.0, 500.0))
+_STRATIFIED_PERIODS = ('day', 'night', 'all')
+_STRATIFIED_METRICS = ('n', 'rmse', 'bias', 'mae', 'pearson_r', 'ccc')
+_EXPECTED_STRATIFIED_CONTRACT = {
+    'altitude_bins_km': [[120.0, 300.0], [300.0, 500.0]],
+    'interval_semantics': 'left_closed_right_open_except_final_right_closed',
+    'day_local_time_range_hours': [6.0, 18.0],
+    'day_interval_semantics': 'left_closed_right_open',
+    'periods': ['day', 'night', 'all'],
+    'metrics': list(_STRATIFIED_METRICS),
+    'source_labels': {
+        'analysis': 'M11', 'background': 'M00', 'iri': 'Raw IRI'},
+    'low_altitude_diagnostic': {
+        'altitude_range_km': [120.0, 200.0],
+        'interval_semantics': 'left_closed_right_open',
+        'independent_from_stratified_metrics': True,
+    },
+    'interpretation_warning': (
+        '120-300 km mixes 120-200 km without satellite-density targets '
+        'and 200-300 km with satellite-density targets; do not treat '
+        'the stratum as single-mechanism evidence.'),
 }
 
 
@@ -122,6 +148,127 @@ def _array_equal(reference, candidate):
     return np.array_equal(reference, candidate)
 
 
+def _expected_stratified_keys():
+    return {
+        f'{source}_alt_{lower:g}-{upper:g}km_{period}'
+        for source in _STRATIFIED_SOURCES
+        for lower, upper in _STRATIFIED_BINS
+        for period in _STRATIFIED_PERIODS
+    }
+
+
+def _read_stratified_csv(path: Path):
+    expected_header = [
+        'key', 'source', 'layer', 'n', 'rmse', 'bias', 'mae',
+        'pearson_r', 'ccc']
+    try:
+        with path.open(newline='', encoding='utf-8') as stream:
+            reader = csv.DictReader(stream)
+            _require(reader.fieldnames == expected_header,
+                     f'ISR: unexpected stratified CSV header in {path}')
+            rows = {}
+            for row in reader:
+                key = row['key']
+                _require(key not in rows,
+                         f'ISR: duplicate stratified CSV key {key}')
+                rows[key] = {
+                    'source': row['source'], 'layer': row['layer'],
+                    'n': int(row['n']),
+                    **{name: float(row[name]) for name in
+                       _STRATIFIED_METRICS if name != 'n'},
+                }
+    except (OSError, TypeError, ValueError) as exc:
+        raise ContractError(f'ISR: unreadable stratified CSV {path}: {exc}') from exc
+    return rows
+
+
+def _metric_values(observation, prediction):
+    finite = np.isfinite(observation) & np.isfinite(prediction)
+    observation, prediction = observation[finite], prediction[finite]
+    error = prediction - observation
+    _require(error.size >= 5, 'ISR: stratified cache has fewer than five values')
+    obs_mean, pred_mean = observation.mean(), prediction.mean()
+    covariance = np.mean(
+        (observation - obs_mean) * (prediction - pred_mean))
+    denominator = np.sqrt(observation.var() * prediction.var())
+    ccc_denominator = (observation.var() + prediction.var()
+                       + (obs_mean - pred_mean) ** 2)
+    return {
+        'n': int(error.size),
+        'rmse': float(np.sqrt(np.mean(error ** 2))),
+        'bias': float(np.mean(error)),
+        'mae': float(np.mean(np.abs(error))),
+        'pearson_r': float(covariance / denominator) if denominator > 1e-30 else None,
+        'ccc': float(2.0 * covariance / ccc_denominator)
+        if ccc_denominator > 1e-30 else None,
+    }
+
+
+def _compare_metrics(expected, observed, context):
+    _require(set(observed) == set(_STRATIFIED_METRICS),
+             f'{context}: metric fields mismatch')
+    for name in _STRATIFIED_METRICS:
+        _finite(expected[name], f'{context}:{name}:expected')
+        _finite(observed[name], f'{context}:{name}')
+        if name == 'n':
+            _require(int(observed[name]) == int(expected[name]),
+                     f'{context}:{name} mismatch')
+        else:
+            _require(math.isclose(float(observed[name]), float(expected[name]),
+                                  rel_tol=0.0, abs_tol=1e-12),
+                     f'{context}:{name} mismatch')
+
+
+def _verify_stratified_reports(isr_dir: Path, reports, csv_identities):
+    expected_keys = _expected_stratified_keys()
+    csv_by_station = {}
+    for identity in csv_identities:
+        path = isr_dir / identity['relative_path']
+        station = path.parent.name
+        _require(station not in csv_by_station,
+                 f'ISR: duplicate stratified CSV for {station}')
+        csv_by_station[station] = _read_stratified_csv(path)
+    report_by_station = {report['station']: report for report in reports}
+    _require(set(csv_by_station) == set(report_by_station),
+             'ISR: stratified CSV station set does not match JSON report')
+
+    with _load_npz(isr_dir / 'isr_evaluation_cache.npz') as cache:
+        station_values = np.asarray(cache['station']).astype(str)
+        altitude = np.asarray(cache['altitude_km'], dtype=np.float64)
+        observation = np.asarray(cache['observation_log10'], dtype=np.float64)
+        for station, report in report_by_station.items():
+            stratified = report.get('stratified')
+            _require(isinstance(stratified, dict),
+                     f'ISR {station}: missing stratified metrics')
+            _require(set(stratified) == expected_keys,
+                     f'ISR {station}: old or incomplete stratified metric keys')
+            csv_rows = csv_by_station[station]
+            _require(set(csv_rows) == expected_keys,
+                     f'ISR {station}: old or incomplete stratified CSV keys')
+            for key, values in stratified.items():
+                row = csv_rows[key]
+                source, layer = key.split('_', 1)
+                _require(row['source'] == source and row['layer'] == layer,
+                         f'ISR {station}:{key}: CSV labels mismatch')
+                _compare_metrics(values, {name: row[name]
+                                          for name in _STRATIFIED_METRICS},
+                                 f'ISR {station}:{key}:CSV/JSON')
+
+            station_mask = station_values == station
+            for source, cache_key in _STRATIFIED_SOURCES.items():
+                prediction = np.asarray(cache[cache_key], dtype=np.float64)
+                for index, (lower, upper) in enumerate(_STRATIFIED_BINS):
+                    altitude_mask = ((altitude >= lower)
+                                     & (altitude <= upper if index == 1
+                                        else altitude < upper))
+                    selected = station_mask & altitude_mask
+                    expected = _metric_values(
+                        observation[selected], prediction[selected])
+                    key = f'{source}_alt_{lower:g}-{upper:g}km_all'
+                    _compare_metrics(expected, stratified[key],
+                                     f'ISR {station}:{key}:cache/JSON')
+
+
 def _compare_reference_caches(reference_dir: Path, output_dir: Path):
     names = (
         'isr_evaluation_cache.npz',
@@ -206,11 +353,19 @@ def _verify_isr(isr_dir: Path, expected_candidate, expected_baselines,
     reports = _strict_json(isr_dir / 'isr_validation_report.json')
     _validate_contract_common(contract, expected_candidate, expected_baselines,
                               expected_date_split, 'ISR')
+    _require(contract.get('stratified_metrics_contract_version') == 2,
+             'ISR: stratified_metrics_contract_version must be 2')
+    _require(contract.get('stratified_metrics') == _EXPECTED_STRATIFIED_CONTRACT,
+             'ISR: stratified metrics contract mismatch')
     _require(isinstance(contract.get('output_artifacts'), dict),
              'ISR: missing output artifact identities')
+    csv_identities = contract['output_artifacts'].get('stratified_csvs')
+    _require(isinstance(csv_identities, list) and len(csv_identities) == 2,
+             'ISR: expected two contracted stratified CSV files')
     for identity in ([contract['output_artifacts'].get('report_text'),
                       contract['output_artifacts'].get('report_json')]
-                     + contract['output_artifacts'].get('caches', [])):
+                     + contract['output_artifacts'].get('caches', [])
+                     + csv_identities):
         _require(isinstance(identity, dict), 'ISR: malformed output artifact identity')
         path = isr_dir / identity.get('relative_path', '')
         _require(path.is_file(), f'ISR: missing contracted artifact {path}')
@@ -240,6 +395,32 @@ def _verify_isr(isr_dir: Path, expected_candidate, expected_baselines,
                  f'ISR {station}: low_altitude_diagnostic must be an object')
         _require(diagnostic.get('status') in _LOW_ALTITUDE_STATUSES,
                  f'ISR {station}: invalid low-altitude diagnostic status')
+        _require(diagnostic.get('altitude_range_km') == [120.0, 200.0],
+                 f'ISR {station}: low-altitude diagnostic range mismatch')
+        if diagnostic.get('status') == 'computed':
+            point_metrics = diagnostic.get('point_metrics')
+            bootstrap = diagnostic.get('bootstrap')
+            _require(set(point_metrics or {}) == {'M11', 'M00', 'Raw IRI'},
+                     f'ISR {station}: low-altitude point metrics missing')
+            _require(set(bootstrap or {}) == {'M11', 'M00', 'Raw IRI'},
+                     f'ISR {station}: low-altitude bootstrap missing')
+            for model in ('M11', 'M00', 'Raw IRI'):
+                metrics = point_metrics[model]
+                _require(set(metrics) == {'n', 'rmse', 'bias', 'mae'},
+                         f'ISR {station}: malformed low-altitude {model} metrics')
+                for name, value in metrics.items():
+                    _finite(value, f'ISR {station}:low-altitude:{model}:{name}')
+                _require(bootstrap[model].get('status') == 'computed',
+                         f'ISR {station}: low-altitude {model} bootstrap incomplete')
+                for name in ('rmse', 'bias', 'mae'):
+                    interval = bootstrap[model].get(name, {})
+                    _finite(interval.get('estimate'),
+                            f'ISR {station}:low-altitude:{model}:{name}:estimate')
+                    _require(isinstance(interval.get('ci95'), list)
+                             and len(interval['ci95']) == 2,
+                             f'ISR {station}: low-altitude {model} CI missing')
+                    for bound in interval['ci95']:
+                        _finite(bound, f'ISR {station}:low-altitude:{model}:{name}:CI')
         _require(isinstance(report.get('primary_peak_metrics'), dict),
                  f'ISR {station}: missing primary peak metrics')
         _require(isinstance(report.get('legacy_peak_metrics'), dict),
@@ -261,6 +442,7 @@ def _verify_isr(isr_dir: Path, expected_candidate, expected_baselines,
     for status_counts in summary_once['peak_status_counts'].values():
         _require(set(status_counts).issubset(set(PEAK_STATUSES)),
                  'ISR: peak cache contains an unknown status')
+    _verify_stratified_reports(isr_dir, reports, csv_identities)
     if reference_dir is not None:
         _compare_reference_caches(reference_dir, isr_dir)
     return {

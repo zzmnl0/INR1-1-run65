@@ -29,19 +29,40 @@ def _checkpoint(sha256):
 
 
 def _station_report(station):
-    cache_key = [f'{station}-0', f'{station}-1']
-    values = [10.0, 10.1]
+    altitude = np.concatenate([
+        np.linspace(120.0, 290.0, 10), np.linspace(300.0, 500.0, 10)])
+    rel_hour = np.tile(np.array([6, 7, 8, 9, 10, 0, 1, 2, 3, 4]), 2)
+    values = np.linspace(10.0, 10.5, altitude.size)
+    m11 = values + 0.02
+    m00 = values - 0.02
+    iri = values + 0.01
+    cache_key = [f'{station}-{index}' for index in range(altitude.size)]
+    unit_ids = list(range(altitude.size))
     primary = {
         'keys': cache_key,
-        'observation_log10': values,
-        'candidate_M11_log10': [10.02, 10.12],
-        'candidate_M00_log10': [9.98, 10.08],
-        'candidate_IRI_log10': [10.0, 10.1],
-        'baseline_M11_log10': [10.01, 10.11],
-        'baseline_M00_log10': [9.99, 10.09],
-        'baseline_IRI_log10': [10.0, 10.1],
-        'altitude_km': [250.0, 300.0],
-        'unit_id': [1, 2],
+        'observation_log10': values.tolist(),
+        'candidate_M11_log10': m11.tolist(),
+        'candidate_M00_log10': m00.tolist(),
+        'candidate_IRI_log10': iri.tolist(),
+        'baseline_M11_log10': (values + 0.03).tolist(),
+        'baseline_M00_log10': (values - 0.03).tolist(),
+        'baseline_IRI_log10': iri.tolist(),
+        'altitude_km': altitude.tolist(),
+        'unit_id': unit_ids,
+    }
+    stratified = isr_eval._compute_stratified_metrics(
+        altitude, np.zeros_like(altitude), rel_hour, m11, values,
+        background_all=m00, iri_all=iri, alt_range=(120.0, 500.0))
+    low_bootstrap = {
+        model: {
+            'status': 'computed', 'n': 10, 'sampling_units': 10,
+            'replicates': 2000, 'seed': 42,
+            **{metric: {'estimate': estimate, 'ci95': [estimate, estimate]}
+               for metric, estimate in (
+                   ('rmse', abs(offset)), ('bias', offset),
+                   ('mae', abs(offset)))},
+        }
+        for model, offset in (('M11', 0.02), ('M00', -0.02), ('Raw IRI', 0.01))
     }
     return {
         'station': station,
@@ -93,8 +114,16 @@ def _station_report(station):
         'background_hmf2_ccc': 0.8,
         'background_hmf2_bias': 0.0,
         'passed_m2w_m11_vs_raw_iri_gate': True,
+        'stratified': stratified,
         'low_altitude_diagnostic': {
             'status': 'computed', 'altitude_range_km': [120.0, 200.0],
+            'point_metrics': {
+                model: {'n': 10, 'rmse': abs(offset), 'bias': offset,
+                        'mae': abs(offset)}
+                for model, offset in (
+                    ('M11', 0.02), ('M00', -0.02), ('Raw IRI', 0.01))
+            },
+            'bootstrap': low_bootstrap,
         },
         'primary_peak_metrics': {'analysis': {'hmf2_mae': 2.0}},
         'legacy_peak_metrics': {'analysis': {'hmf2_mae': 3.0}},
@@ -102,12 +131,12 @@ def _station_report(station):
         'peak_qc_counts': {'M11': {'status': {'valid': 2}}},
         'evaluation_cache': {
             'keys': cache_key,
-            'observation_log10': values,
-            'M11_log10': [10.02, 10.12],
-            'M00_log10': [9.98, 10.08],
-            'IRI_log10': values,
-            'altitude_km': [250.0, 300.0],
-            'unit_id': [1, 2],
+            'observation_log10': values.tolist(),
+            'M11_log10': m11.tolist(),
+            'M00_log10': m00.tolist(),
+            'IRI_log10': iri.tolist(),
+            'altitude_km': altitude.tolist(),
+            'unit_id': unit_ids,
         },
         'peak_cache': {
             'station': [station, station],
@@ -138,7 +167,8 @@ def _write_isr(tmp_path):
         [{'path': 'D:/isr/poker.h5', 'sha256': 'e' * 64}],
         [{'date': '2024-09-01', 'geometry_qc': {
             'legacy_range_as_height_delta_km_median': 0.215}}],
-        {'peak_search_alt_range': (200.0, 500.0)})
+        {'peak_search_alt_range': (200.0, 500.0),
+         'alt_range': (120.0, 500.0)})
     return output_dir, reports, contract
 
 
@@ -152,6 +182,7 @@ def _refresh_artifact_identity(output_dir, contract, relative_path):
     identities = [contract['output_artifacts']['report_text'],
                   contract['output_artifacts']['report_json']]
     identities.extend(contract['output_artifacts']['caches'])
+    identities.extend(contract['output_artifacts'].get('stratified_csvs', []))
     for identity in identities:
         if identity['relative_path'] == relative_path:
             identity['sha256'] = isr_eval._sha256(str(path))
@@ -164,6 +195,9 @@ def test_isr_finalizer_is_non_destructive_and_writes_completion_contract(tmp_pat
     output_dir, reports, contract = _write_isr(tmp_path)
     assert all('evaluation_cache' in report for report in reports)
     assert contract['baseline_checkpoints'][1]['label'] == 'historical-epoch12'
+    assert contract['stratified_metrics_contract_version'] == 2
+    assert contract['stratified_metrics']['altitude_bins_km'] == [
+        [120.0, 300.0], [300.0, 500.0]]
     assert not (output_dir / 'isr_evaluation_contract.json').is_symlink()
     assert (output_dir / 'isr_validation_report.json').is_file()
     assert (output_dir / 'isr_evaluation_contract.json').is_file()
@@ -188,7 +222,8 @@ def test_isr_finalizer_does_not_leave_contract_when_report_write_fails(tmp_path,
             str(output_dir), reports, _checkpoint(_CANDIDATE_SHA),
             [{'label': label, **_checkpoint(sha256)}
              for label, sha256 in _BASELINES], [], [],
-            {'peak_search_alt_range': (200.0, 500.0)})
+            {'peak_search_alt_range': (200.0, 500.0),
+             'alt_range': (120.0, 500.0)})
     assert not (output_dir / 'isr_evaluation_contract.json').exists()
 
 
@@ -203,6 +238,45 @@ def test_isr_verifier_rejects_null_low_altitude_diagnostic(tmp_path):
     _refresh_artifact_identity(output_dir, contract, 'isr_validation_report.json')
     _rewrite_contract(output_dir, contract)
     with pytest.raises(ContractError, match='low_altitude_diagnostic'):
+        _verify_isr(output_dir, _CANDIDATE_SHA, _BASELINES, _SPLIT_SHA, None)
+
+
+def test_isr_verifier_rejects_old_strata_merged_low_altitude_and_csv_drift(
+        tmp_path):
+    output_dir, _, _ = _write_isr(tmp_path)
+    contract_path = output_dir / 'isr_evaluation_contract.json'
+    contract = json.loads(contract_path.read_text(encoding='utf-8'))
+    contract['stratified_metrics']['altitude_bins_km'] = [
+        [120.0, 200.0], [200.0, 300.0], [300.0, 500.0]]
+    _rewrite_contract(output_dir, contract)
+    with pytest.raises(ContractError, match='stratified metrics contract'):
+        _verify_isr(output_dir, _CANDIDATE_SHA, _BASELINES, _SPLIT_SHA, None)
+
+    output_dir, _, _ = _write_isr(tmp_path / 'low')
+    report_path = output_dir / 'isr_validation_report.json'
+    report = json.loads(report_path.read_text(encoding='utf-8'))
+    report[0]['low_altitude_diagnostic']['altitude_range_km'] = [120.0, 300.0]
+    isr_eval._write_json_atomically(str(report_path), report)
+    contract_path = output_dir / 'isr_evaluation_contract.json'
+    contract = json.loads(contract_path.read_text(encoding='utf-8'))
+    _refresh_artifact_identity(output_dir, contract, 'isr_validation_report.json')
+    _rewrite_contract(output_dir, contract)
+    with pytest.raises(ContractError, match='low-altitude diagnostic range'):
+        _verify_isr(output_dir, _CANDIDATE_SHA, _BASELINES, _SPLIT_SHA, None)
+
+    output_dir, _, _ = _write_isr(tmp_path / 'csv')
+    csv_path = output_dir / 'Jicamarca' / 'Jicamarca_stratified_metrics.csv'
+    lines = csv_path.read_text(encoding='utf-8').splitlines()
+    fields = lines[1].split(',')
+    fields[4] = '999.0'
+    lines[1] = ','.join(fields)
+    csv_path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+    contract_path = output_dir / 'isr_evaluation_contract.json'
+    contract = json.loads(contract_path.read_text(encoding='utf-8'))
+    _refresh_artifact_identity(
+        output_dir, contract, 'Jicamarca/Jicamarca_stratified_metrics.csv')
+    _rewrite_contract(output_dir, contract)
+    with pytest.raises(ContractError, match='CSV/JSON'):
         _verify_isr(output_dir, _CANDIDATE_SHA, _BASELINES, _SPLIT_SHA, None)
 
 

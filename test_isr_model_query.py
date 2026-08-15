@@ -5,6 +5,7 @@ import torch
 
 from isr_evaluation.model_query import query_model_grid
 from isr_evaluation.main_isr_eval import (
+    _compute_stratified_bootstrap,
     _compute_stratified_metrics,
     _require_m2v_config,
     _resolve_checkpoint,
@@ -181,12 +182,12 @@ def test_stratified_metrics_keep_three_model_stages():
         background_all=np.full(n, 10.1),
         iri_all=np.full(n, 10.0),
     )
-    assert 'analysis_all_alt_all' in metrics
-    assert 'background_all_alt_all' in metrics
-    assert 'iri_all_alt_all' in metrics
+    assert 'analysis_alt_120-300km_all' in metrics
+    assert 'background_alt_120-300km_all' in metrics
+    assert 'iri_alt_120-300km_all' in metrics
 
 
-def test_stratified_metrics_use_three_height_bins_with_inclusive_top_boundary():
+def test_stratified_metrics_and_bootstrap_share_two_height_bins():
     alt = np.array([120.0, 199.999, 200.0, 299.999, 300.0, 500.0])
     metrics = _compute_stratified_metrics(
         alt_all=alt,
@@ -197,9 +198,24 @@ def test_stratified_metrics_use_three_height_bins_with_inclusive_top_boundary():
         background_all=np.zeros_like(alt),
         iri_all=np.zeros_like(alt),
     )
-    assert metrics['analysis_alt_120-200km_all']['n'] == 2
-    assert metrics['analysis_alt_200-300km_all']['n'] == 2
+    assert metrics['analysis_alt_120-300km_all']['n'] == 4
     assert metrics['analysis_alt_300-500km_all']['n'] == 2
+    assert not any('120-200km' in key or '200-300km' in key
+                   for key in metrics)
+
+    bootstrap = _compute_stratified_bootstrap(
+        altitude=alt,
+        longitude=np.zeros_like(alt),
+        rel_hour=np.array([6.0, 7.0, 8.0, 9.0, 10.0, 11.0]),
+        observation=np.linspace(10.0, 10.5, len(alt)),
+        analysis=np.linspace(10.1, 10.6, len(alt)),
+        raw_iri=np.linspace(9.9, 10.4, len(alt)),
+        unit_ids=np.arange(len(alt)),
+        alt_range=(120.0, 500.0),
+    )
+    assert set(bootstrap) == {
+        'alt_120-300km_day', 'alt_120-300km_all',
+        'alt_300-500km_day', 'alt_300-500km_all'}
 
 
 def test_isr_requires_explicit_frozen_m2v_epoch():
