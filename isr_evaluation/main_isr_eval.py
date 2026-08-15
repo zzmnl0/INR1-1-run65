@@ -25,6 +25,7 @@ import sys
 import csv
 import json
 import datetime
+import tempfile
 import numpy as np
 import torch
 
@@ -39,6 +40,7 @@ for _p in [_FSIA_DIR, _INR_MODULES]:
         sys.path.insert(0, _p)
 
 from inr_modules.mdia.evaluation_stats import paired_group_bootstrap
+from isr_evaluation.peak_qa import PeakSearchContract
 
 # ─────────────────────────────────────────────
 # ==================== 配置 ====================
@@ -301,12 +303,224 @@ def _json_safe(value):
     return value
 
 
+def _json_text(value):
+    """Serialize a public artifact before opening its destination path."""
+    return json.dumps(_json_safe(value), ensure_ascii=False, indent=2,
+                      allow_nan=False)
+
+
+def _write_json_atomically(path, value):
+    """Write a fully serialized JSON artifact without a partial final pathname."""
+    payload = _json_text(value)
+    directory = os.path.dirname(os.path.abspath(path))
+    os.makedirs(directory, exist_ok=True)
+    temporary_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+                mode='w', encoding='utf-8', dir=directory, delete=False,
+                prefix=f'.{os.path.basename(path)}.', suffix='.tmp') as stream:
+            temporary_path = stream.name
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_path, path)
+        temporary_path = None
+    finally:
+        if temporary_path and os.path.exists(temporary_path):
+            os.unlink(temporary_path)
+
+
 def _sha256(path):
     digest = hashlib.sha256()
     with open(path, 'rb') as stream:
         for block in iter(lambda: stream.read(1024 * 1024), b''):
             digest.update(block)
     return digest.hexdigest()
+
+
+_REPORT_CACHE_KEYS = frozenset({
+    'evaluation_cache',
+    'peak_cache',
+    'paired_evaluation_cache',
+    'additional_paired_evaluation_caches',
+})
+
+
+def _public_station_reports(station_reports):
+    """Return JSON-facing reports while keeping in-memory cache payloads intact."""
+    return [
+        {key: value for key, value in report.items()
+         if key not in _REPORT_CACHE_KEYS}
+        for report in station_reports
+    ]
+
+
+def _artifact_identity(path, save_dir):
+    return {
+        'relative_path': os.path.relpath(path, save_dir).replace(os.sep, '/'),
+        'sha256': _sha256(path),
+        'size_bytes': int(os.path.getsize(path)),
+    }
+
+
+def _build_isr_evaluation_contract(candidate_contract, baseline_contract,
+                                   isr_input_files, poker_geometry_audit,
+                                   config, output_artifacts=None):
+    """Build the schema-v2 ISR contract independently of report finalization."""
+    unique_isr_files = {
+        item['sha256']: item
+        for item in isr_input_files
+        if isinstance(item, dict) and item.get('sha256')
+    }
+    peak_contract = PeakSearchContract(
+        lower_km=float(config['peak_search_alt_range'][0]),
+        upper_km=float(config['peak_search_alt_range'][1]))
+    contract = {
+        'evaluation_schema_version': 2,
+        'evaluation_code_sha256': _evaluation_code_sha256(),
+        'candidate_checkpoint': candidate_contract,
+        'baseline_checkpoints': baseline_contract,
+        'token_partitions': ['train', 'development'],
+        'isr_input_files': sorted(unique_isr_files.values(),
+                                  key=lambda item: item['path']),
+        'poker_geometry': {
+            'semantics': 'wgs84_enu_los_to_ecef_to_geodetic_v1',
+            'range_scale_to_km': 1e-3,
+            'aacgm_inverse_role': 'diagnostic_only_v1',
+            'audit': poker_geometry_audit,
+        },
+        'quality_thresholds': {
+            'finite_observation_required': True,
+            'coordinate_mask_separate_from_observation_mask': True,
+            'hmf2_public_mask': 'all_compared_fields_status_valid',
+            'nmf2_public_mask': 'all_compared_fields_nmf2_valid',
+        },
+        'peak_search': {
+            **peak_contract.as_dict(),
+            'alt_range_km': list(config['peak_search_alt_range']),
+        },
+        'legacy_peak_metrics_semantics': (
+            'finite_argmax_with_unbounded_linear_interpolation_v1'),
+        'paired_bootstrap': {
+            'replicates': 2000, 'seed': 42,
+            'group': 'station_time_profile',
+            'positive_deltas': [
+                'CCC_candidate_minus_baseline',
+                'RMSE_baseline_minus_candidate',
+                'PearsonR_candidate_minus_baseline'],
+        },
+    }
+    if output_artifacts is not None:
+        contract['output_artifacts'] = output_artifacts
+    return contract
+
+
+def _write_isr_final_artifacts(save_dir, station_reports, candidate_contract,
+                               baseline_contract, isr_input_files,
+                               poker_geometry_audit, config):
+    """Persist ISR public reports, caches, and completion contract in that order."""
+    from isr_evaluation.plots import save_metrics_report
+
+    public_reports = _public_station_reports(station_reports)
+    report_text_path = os.path.join(save_dir, 'isr_validation_report.txt')
+    save_metrics_report(public_reports, report_text_path)
+
+    evaluation_cache = {
+        'station': [], 'key': [], 'observation_log10': [], 'M11_log10': [],
+        'M00_log10': [], 'IRI_log10': [], 'altitude_km': [], 'unit_id': [],
+    }
+    for report in station_reports:
+        cache = report.get('evaluation_cache', {})
+        count = len(cache.get('keys', []))
+        evaluation_cache['station'].extend([report['station']] * count)
+        for output_key, cache_key in (
+                ('key', 'keys'), ('observation_log10', 'observation_log10'),
+                ('M11_log10', 'M11_log10'), ('M00_log10', 'M00_log10'),
+                ('IRI_log10', 'IRI_log10'), ('altitude_km', 'altitude_km'),
+                ('unit_id', 'unit_id')):
+            evaluation_cache[output_key].extend(cache.get(cache_key, []))
+    cache_paths = []
+    evaluation_cache_path = os.path.join(save_dir, 'isr_evaluation_cache.npz')
+    np.savez_compressed(
+        evaluation_cache_path,
+        **{key: np.asarray(value) for key, value in evaluation_cache.items()})
+    cache_paths.append(evaluation_cache_path)
+
+    peak_cache = {}
+    for report in station_reports:
+        for key, value in report.get('peak_cache', {}).items():
+            peak_cache.setdefault(key, []).extend(value)
+    if peak_cache:
+        peak_cache_path = os.path.join(save_dir, 'isr_peak_cache.npz')
+        np.savez_compressed(
+            peak_cache_path,
+            **{key: np.asarray(value) for key, value in peak_cache.items()})
+        cache_paths.append(peak_cache_path)
+
+    paired_cache = {
+        'station': [], 'key': [], 'observation_log10': [],
+        'candidate_M11_log10': [], 'candidate_M00_log10': [],
+        'candidate_IRI_log10': [], 'baseline_M11_log10': [],
+        'baseline_M00_log10': [], 'baseline_IRI_log10': [],
+        'altitude_km': [], 'unit_id': [],
+    }
+    for report in station_reports:
+        cache = report.get('paired_evaluation_cache', {})
+        count = len(cache.get('keys', []))
+        paired_cache['station'].extend([report['station']] * count)
+        for output_key, cache_key in (
+                ('key', 'keys'), ('observation_log10', 'observation_log10'),
+                ('candidate_M11_log10', 'candidate_M11_log10'),
+                ('candidate_M00_log10', 'candidate_M00_log10'),
+                ('candidate_IRI_log10', 'candidate_IRI_log10'),
+                ('baseline_M11_log10', 'baseline_M11_log10'),
+                ('baseline_M00_log10', 'baseline_M00_log10'),
+                ('baseline_IRI_log10', 'baseline_IRI_log10'),
+                ('altitude_km', 'altitude_km'), ('unit_id', 'unit_id')):
+            paired_cache[output_key].extend(cache.get(cache_key, []))
+    if paired_cache['key']:
+        paired_cache_path = os.path.join(
+            save_dir, 'isr_paired_evaluation_cache.npz')
+        np.savez_compressed(
+            paired_cache_path,
+            **{key: np.asarray(value) for key, value in paired_cache.items()})
+        cache_paths.append(paired_cache_path)
+
+    additional_pair_caches = {}
+    for report in station_reports:
+        for label, cache in report.get(
+                'additional_paired_evaluation_caches', {}).items():
+            target = additional_pair_caches.setdefault(
+                label, {key: [] for key in cache})
+            count = len(cache.get('keys', []))
+            target.setdefault('station', []).extend([report['station']] * count)
+            for key, value in cache.items():
+                target.setdefault(key, []).extend(value)
+    for label, cache in additional_pair_caches.items():
+        if cache.get('keys'):
+            safe_label = ''.join(
+                char if char.isalnum() or char in '-_' else '_'
+                for char in label)
+            cache_path = os.path.join(
+                save_dir, f'isr_paired_evaluation_cache_{safe_label}.npz')
+            np.savez_compressed(
+                cache_path,
+                **{key: np.asarray(value) for key, value in cache.items()})
+            cache_paths.append(cache_path)
+
+    report_json_path = os.path.join(save_dir, 'isr_validation_report.json')
+    _write_json_atomically(report_json_path, public_reports)
+    output_artifacts = {
+        'report_text': _artifact_identity(report_text_path, save_dir),
+        'report_json': _artifact_identity(report_json_path, save_dir),
+        'caches': [_artifact_identity(path, save_dir) for path in cache_paths],
+    }
+    contract = _build_isr_evaluation_contract(
+        candidate_contract, baseline_contract, isr_input_files,
+        poker_geometry_audit, config, output_artifacts=output_artifacts)
+    contract_path = os.path.join(save_dir, 'isr_evaluation_contract.json')
+    _write_json_atomically(contract_path, contract)
+    return public_reports, contract
 
 
 def _evaluation_code_sha256():
@@ -568,7 +782,6 @@ def _process_station(station_name, day_records, model, sw_manager,
                                         compute_nmf2_hmf2_metrics,
                                         extract_grid_peak_qa,
                                         peak_qc_counts)
-    from isr_evaluation.peak_qa import PeakSearchContract
     from isr_evaluation.plots import (plot_time_altitude_comparison,
                                       plot_nmf2_scatter,
                                       plot_peak_lt_comparison)
@@ -1443,126 +1656,9 @@ def main(checkpoint=None, save_dir=None, preflight_only=False,
 
     # ==================== 汇总报告 ====================
     if station_reports:
-        from isr_evaluation.plots import save_metrics_report
-        report_path = os.path.join(save_dir, 'isr_validation_report.txt')
-        save_metrics_report(station_reports, report_path)
-        evaluation_cache = {
-            'station': [], 'key': [], 'observation_log10': [], 'M11_log10': [],
-            'M00_log10': [], 'IRI_log10': [], 'altitude_km': [], 'unit_id': [],
-        }
-        for report in station_reports:
-            cache = report.pop('evaluation_cache', {})
-            count = len(cache.get('keys', []))
-            evaluation_cache['station'].extend([report['station']] * count)
-            for output_key, cache_key in (
-                    ('key', 'keys'), ('observation_log10', 'observation_log10'),
-                    ('M11_log10', 'M11_log10'), ('M00_log10', 'M00_log10'),
-                    ('IRI_log10', 'IRI_log10'), ('altitude_km', 'altitude_km'),
-                    ('unit_id', 'unit_id')):
-                evaluation_cache[output_key].extend(cache.get(cache_key, []))
-        np.savez_compressed(
-            os.path.join(save_dir, 'isr_evaluation_cache.npz'),
-            **{key: np.asarray(value) for key, value in evaluation_cache.items()})
-        peak_cache = {}
-        for report in station_reports:
-            cache = report.pop('peak_cache', {})
-            for key, value in cache.items():
-                peak_cache.setdefault(key, []).extend(value)
-        if peak_cache:
-            np.savez_compressed(
-                os.path.join(save_dir, 'isr_peak_cache.npz'),
-                **{key: np.asarray(value) for key, value in peak_cache.items()})
-        paired_cache = {
-            'station': [], 'key': [], 'observation_log10': [],
-            'candidate_M11_log10': [], 'candidate_M00_log10': [],
-            'candidate_IRI_log10': [], 'baseline_M11_log10': [],
-            'baseline_M00_log10': [], 'baseline_IRI_log10': [],
-            'altitude_km': [], 'unit_id': [],
-        }
-        for report in station_reports:
-            cache = report.pop('paired_evaluation_cache', {})
-            count = len(cache.get('keys', []))
-            paired_cache['station'].extend([report['station']] * count)
-            for output_key, cache_key in (
-                    ('key', 'keys'), ('observation_log10', 'observation_log10'),
-                    ('candidate_M11_log10', 'candidate_M11_log10'),
-                    ('candidate_M00_log10', 'candidate_M00_log10'),
-                    ('candidate_IRI_log10', 'candidate_IRI_log10'),
-                    ('baseline_M11_log10', 'baseline_M11_log10'),
-                    ('baseline_M00_log10', 'baseline_M00_log10'),
-                    ('baseline_IRI_log10', 'baseline_IRI_log10'),
-                    ('altitude_km', 'altitude_km'), ('unit_id', 'unit_id')):
-                paired_cache[output_key].extend(cache.get(cache_key, []))
-        if paired_cache['key']:
-            np.savez_compressed(
-                os.path.join(save_dir, 'isr_paired_evaluation_cache.npz'),
-                **{key: np.asarray(value) for key, value in paired_cache.items()})
-        additional_pair_caches = {}
-        for report in station_reports:
-            for label, cache in report.pop(
-                    'additional_paired_evaluation_caches', {}).items():
-                target = additional_pair_caches.setdefault(
-                    label, {key: [] for key in cache})
-                count = len(cache.get('keys', []))
-                target.setdefault('station', []).extend([report['station']] * count)
-                for key, value in cache.items():
-                    target.setdefault(key, []).extend(value)
-        for label, cache in additional_pair_caches.items():
-            if cache.get('keys'):
-                safe_label = ''.join(char if char.isalnum() or char in '-_' else '_'
-                                     for char in label)
-                np.savez_compressed(
-                    os.path.join(save_dir,
-                                 f'isr_paired_evaluation_cache_{safe_label}.npz'),
-                    **{key: np.asarray(value) for key, value in cache.items()})
-        unique_isr_files = {
-            item['sha256']: item for item in isr_input_files if item.get('sha256')}
-        peak_contract = PeakSearchContract(
-            lower_km=float(CONFIG['peak_search_alt_range'][0]),
-            upper_km=float(CONFIG['peak_search_alt_range'][1]))
-        contract = {
-            'evaluation_schema_version': 2,
-            'evaluation_code_sha256': _evaluation_code_sha256(),
-            'candidate_checkpoint': candidate_contract,
-            'baseline_checkpoint': baseline_contract,
-            'token_partitions': ['train', 'development'],
-            'isr_input_files': sorted(unique_isr_files.values(),
-                                      key=lambda item: item['path']),
-            'poker_geometry': {
-                'semantics': 'wgs84_enu_los_to_ecef_to_geodetic_v1',
-                'range_scale_to_km': 1e-3,
-                'aacgm_inverse_role': 'diagnostic_only_v1',
-                'audit': poker_geometry_audit,
-            },
-            'quality_thresholds': {
-                'finite_observation_required': True,
-                'coordinate_mask_separate_from_observation_mask': True,
-                'hmf2_public_mask': 'all_compared_fields_status_valid',
-                'nmf2_public_mask': 'all_compared_fields_nmf2_valid',
-            },
-            'peak_search': {
-                **peak_contract.as_dict(),
-                'alt_range_km': list(CONFIG['peak_search_alt_range']),
-            },
-            'legacy_peak_metrics_semantics': (
-                'finite_argmax_with_unbounded_linear_interpolation_v1'),
-            'paired_bootstrap': {
-                'replicates': 2000, 'seed': 42,
-                'group': 'station_time_profile',
-                'positive_deltas': [
-                    'CCC_candidate_minus_baseline',
-                    'RMSE_baseline_minus_candidate',
-                    'PearsonR_candidate_minus_baseline'],
-            },
-        }
-        with open(os.path.join(save_dir, 'isr_evaluation_contract.json'),
-                  'w', encoding='utf-8') as stream:
-            json.dump(_json_safe(contract), stream,
-                      ensure_ascii=False, indent=2, allow_nan=False)
-        with open(os.path.join(save_dir, 'isr_validation_report.json'),
-                  'w', encoding='utf-8') as stream:
-            json.dump(_json_safe(station_reports), stream,
-                      ensure_ascii=False, indent=2, allow_nan=False)
+        _write_isr_final_artifacts(
+            save_dir, station_reports, candidate_contract, baseline_contract,
+            isr_input_files, poker_geometry_audit, CONFIG)
         gate_summary = {
             report['station']: bool(
                 report['passed_m2w_m11_vs_raw_iri_gate'])
