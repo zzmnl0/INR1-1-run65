@@ -1,6 +1,6 @@
 # M2-W2 升级、归因与验证主计划
 
-_版本 1.0 · 2026-08-14 · 状态：M2-W v14 基线已冻结，M2-W2 尚未实施_
+_版本 1.1 · 2026-08-15 · 状态：M2-W v14 基线已冻结；P0-A代码已合入，正式QA产物尚未闭环；M2-W2训练尚未启动_
 
 ---
 
@@ -18,8 +18,8 @@ _版本 1.0 · 2026-08-14 · 状态：M2-W v14 基线已冻结，M2-W2 尚未实
 2. 当前两站的主要偏差在 M00 Background 中已经存在，M11 Analysis 通常只做较小修正；这是直接观测事实。
 3. “FY/COSMIC 条件偏差写入 M00”“Global R 与 profile 点独立累计导致过置信”“共享垂直表示导致低空泄漏或 hmF2 损伤”“事件态驱动缺失导致夜间误差”均是与现象相容、但仍需消融验证的工作假设，不得提前写成已证明根因。
 4. 120–200 km bottomside 绝对密度与 200–500 km F2 峰高/峰形是两个独立误差轴，必须拆成 `V_low` 与 `V_peak`；NmF2 改善不代表 hmF2 或完整垂直形状改善。
-5. 推荐主顺序是：评估 QA 与无训练归因审计 → 条件偏差 `B` → 条件/相关观测误差 `R` 与 profile precision 控制 → 磁坐标定位 `L` → `V_low` → `V_peak` → 高/低纬事件驱动 `D_H/D_L`。
-6. 如果只能先做一套新模型，工程优先级是 `B+R`；但在启动 `B+R` 前仍应完成 `S0/B/R/B+R` 的配对多 seed 设计，否则只能知道组合有效，不能知道偏差合同、R合同及其交互分别贡献多少。
+5. 推荐主顺序是：评估QA闭环与无训练归因审计 → `S0/B/R/B+R`条件偏差—观测误差矩阵 → 从四臂中选择最简单的合格底座 → 有独立峰值证据的`V_peak` → P0支持时的磁坐标定位`L` → 只有获得独立低空证据时才进入`V_low` → 高/低纬事件驱动`D_H/D_L`。
+6. 工程上`B+R`是优先候选而不是强制底座。后续应选择同时通过机制门、任务门和安全门的最简单arm；只运行`B+R`只能判断bundle是否有效，不能识别B、R及其交互。
 
 ### 1.3 证据标签
 
@@ -56,7 +56,8 @@ _版本 1.0 · 2026-08-14 · 状态：M2-W v14 基线已冻结，M2-W2 尚未实
 
 | 项目 | 冻结值 |
 | --- | --- |
-| 分支 | `codex/run66-m2w-120-500-obs-200-500` |
+| v14训练来源分支 | `codex/run66-m2w-120-500-obs-200-500` |
+| 当前M2-W2/P0-A分支 | `codex/run67-m2w2`；QA实现`86bfb7b`，ISR最终汇总修复`5d5c214` |
 | checkpoint格式 | `14` |
 | 域语义 | `hybrid_120_500_model_200_500_observation_v1` |
 | 模型域 | 闭区间 `[120,500] km` |
@@ -180,7 +181,7 @@ _版本 1.0 · 2026-08-14 · 状态：M2-W v14 基线已冻结，M2-W2 尚未实
 | Poker Flat hmF2 MAE | `50.41` | `59.70` | `59.56 km` |
 | Poker Flat hmF2 bias | `-12.81` | `-40.25` | `-39.61 km` |
 
-`[本地事实 F]` 两站NmF2均获益，但M11没有稳定改善hmF2；Poker Flat甚至显著损伤峰高。Jicamarca的M00 hmF2 CCC高于M11，也说明Analysis增量可能改善密度幅值却扰动峰位置。
+`[本地事实 F]` 这些旧argmax指标表明两站NmF2均获益，但M11没有稳定改善hmF2；Poker Flat甚至显著损伤峰高。Jicamarca的M00 hmF2 CCC高于M11，也说明Analysis增量可能改善密度幅值却扰动峰位置。P0-A严格峰QA显示该旧hmF2口径混入大量边界、平峰和多峰，故本表自v1.1起仅保留为问题发现证据，不再作为确认性hmF2主结果。
 
 ### 3.6 v14对v13的ISR公共掩码比较
 
@@ -207,7 +208,7 @@ v14 epoch15 对 v13 development-selected：
 
 v14仍显著优于Raw IRI，但不优于v13。v14内部M00 hmF2为CCC `0.66583`、RMSE `34.644 km`，优于M11，再次显示Analysis增量与峰高/垂直形状存在独立冲突。
 
-截至本文档冻结时，v14对历史epoch12的GIRO仍在运行，尚无完整contract/cache/report，不能写入最终结论。历史epoch12本身由同一ISR sweep选择，只能作描述性基准。
+v14对历史epoch12的旧GIRO任务已在`96,216/105,490`条hmF2记录处结束，状态文件记录`return_code=1`，stderr为空且没有正式contract/cache/report；真实根因未被日志识别，不能把“运行中”或任何部分结果写入结论。P0-A新GIRO目录截至v1.1仍无正式产物。历史epoch12本身由同一ISR sweep选择，只能作描述性基准。
 
 ### 3.8 来源、纬度与日期混杂
 
@@ -217,14 +218,15 @@ v14仍显著优于Raw IRI，但不优于v13。v14内部M00 hmF2为CCC `0.66583`�
 
 `[QA阻断 Q]` 在完成FY-only、COSMIC-only、coverage/precision和活动度分层前，不得把两站差异直接归因为低纬与高纬物理机制。
 
-### 3.9 必须先修复的评估QA问题
+### 3.9 P0-A评估QA进展与剩余阻断
 
-1. `[QA阻断 Q]` ISR正式JSON中的`low_altitude_diagnostic`为`null`。入口没有传递完整`alt_range`，CSV和逐点cache虽然有效，但正式paired低空JSON必须修复后在新目录重跑。
-2. `[QA阻断 Q]` Poker Flat loader当前把HDF `range/1000`作为近似高度。必须核验它是斜距还是几何高度，并纳入仰角、站高、地球曲率和所需地理高度换算；未确认前120–200 km与hmF2仅作探索性证据。
-3. `[QA阻断 Q]` 峰值时序图跨缺测段直接连线，造成Poker Flat视觉伪影。必须按时间间隔阈值分段。
-4. `[QA阻断 Q]` Jicamarca约32.7%的ISR峰位于`>=490 km`，但正式报告尚未脚本化记录。边界峰应按右删失/边界事件处理，不能直接使用普通hmF2误差。
-5. `[QA阻断 Q]` 峰值提取缺少峰显著性、曲率、多峰间隔和边界规则；200/500 km边界argmax会产生大幅跳变。
-6. `[QA阻断 Q]` 当前两站ISR已经参与问题发现和M2-W2路线选择，后续只能称“设计知情的两站回顾性外部回归基准”，不能再称完全未触碰的独立盲测。
+1. `[本地事实 F]` 提交`86bfb7b`已实现共享峰QA、无外推粗细寻峰、边界/删失、平峰、多峰、缺测跨度、Poker Flat几何高度和缺测分段绘图，并为ISR/GIRO补充合同接口与测试；提交`5d5c214`修复ISR最终汇总和合同发布。
+2. `[本地事实 F]` Poker Flat全部41个HDF文件的`max_elm`均为`90.0°`；站点高度约`0.215 km`。在该观测几何下，原`range/1000`与几何高度只相差约站高量级，不能解释约40 km的旧hmF2偏差。几何合同仍须保留，但不再是当前首要根因候选。
+3. `[本地事实 F]` 首次P0-A qav2 ISR已生成两站图、CSV和四个NPZ cache，但因最终汇总作用域错误缺少contract/report，目录永久NO-GO；修复后的`qav2-r1`已在新目录生成schema-v2 contract/report及完整cache，ISR基础设施合同通过且未覆盖历史目录。
+4. `[本地事实 F]` qav2 cache显示严格QA的形状淘汰极高：Jicamarca共1676时刻，ISR/M11/M00/IRI的hmF2有效数分别为159/121/86/44；M11中936个为平峰、535个为上界删失。Poker Flat共6400时刻，ISR/M11/M00/IRI的hmF2有效数分别为1785/1294/1218/0；M11中4504个为平峰、602个为近等高多峰，IRI全部为平峰或多峰。
+5. `[推断 I]` 这些计数证明“有限argmax不等于可识别hmF2”，并强化独立`V_peak`问题；但`0.03 dex`显著性/近等高阈值本身仍需在未看模型胜负的前提下做预注册敏感性，不能把阈值造成的淘汰直接解释为物理失败。
+6. `[QA阻断 Q]` qav2当前主hmF2公共mask同时要求各模型自身`hmf2_valid`，会把模型产生的边界峰、平峰或多峰从其误差样本中删去。正式口径必须冻结“仅由观测质量和输入可用性决定”的eligibility；模型失败状态应进入边界/无效率及删失评分，不能用于删除自身困难样本。
+7. `[QA阻断 Q]` 在采用观测侧固定eligibility、冻结峰QA敏感性并完成GIRO同口径产物前，P0-A仍为`PARTIAL`。用户已明确授权GIRO后台继续、无需等待即可执行P0-B只读审计；因此P0-B结论在P0-A闭环前一律标为`provisional`，P0-C及训练仍锁定。当前两站又已参与问题发现和路线选择，后续只能称“设计知情的两站回顾性外部回归基准”，不能再称完全未触碰的独立盲测。
 
 ## 🔗 4. 误差链条、可证伪假设与独立垂直问题
 
@@ -307,13 +309,14 @@ Desroziers残差诊断只能作为迭代校准依据，不是R真值；其成立
 
 ### 4.6 H_Vpeak：200–500 km峰高/峰形问题
 
-`[本地事实 F]` M11改善NmF2却没有稳定改善hmF2；当前训练没有直接hmF2、峰曲率、B0/B1或垂直位移目标；评估采用离散argmax，且存在边界删失和多峰。
+`[本地事实 F]` M11改善NmF2却没有稳定改善hmF2；当前训练没有直接hmF2、峰曲率、B0/B1或垂直位移目标。P0-A又显示模型剖面大量落入平峰、多峰或上界删失，说明峰高可识别性是独立端点，而不只是逐点幅值误差的别名。
 
 `[工作假设 H_Vpeak]` 共享密度基函数与点损失更容易拟合幅值，不能稳定识别峰的垂直位置，Analysis增量可能改变曲线形状并引发argmax跳跃。
 
 可证伪预测：
 
-- 剔除边界、弱峰和多峰后若hmF2误差基本消失，则主要问题是评估提峰，而非训练形状
+- 在仅由观测质量定义的固定eligibility上，如果模型边界/平峰/多峰率仍高，且全eligible删失评分或argmax误差恶化，则支持训练形状问题
+- 如果只改变合理的峰QA阈值就使结论反转，而模型无效率不高，则主要问题是评价提峰合同
 - 在参数量匹配条件下，显式峰位/形状表示或shape loss应改善hmF2而不损伤NmF2
 - 若只提高网络容量也得到相同收益，则不能归因于垂直解耦
 
@@ -346,6 +349,7 @@ Desroziers残差诊断只能作为迭代校准依据，不是R真值；其成立
 - `model_family=m2w2`
 - `model_domain_semantics=hybrid_120_500_model_200_500_observation_v1`
 - `experiment_arm`与`seed`
+- `rng_substream_contract`与各命名子流seed
 - `bias_contract`、`bias_artifact_sha256`
 - `observation_error_contract`、`r_artifact_sha256`
 - `profile_precision_contract`
@@ -355,6 +359,7 @@ Desroziers残差诊断只能作为迭代校准依据，不是R真值；其成立
 - `driver_contract`及每个新输入文件SHA256
 - `parameter_count`与参数量匹配对照ID
 - `checkpoint_selection_contract_sha256`
+- `peak_eligibility_contract_sha256`与删失评分语义
 - `date_split_sha256`、全部输入/QC哈希、代码提交SHA
 
 训练、resume、严格加载和评估必须使用同一canonical builder；任何字段或SHA差异在加载模型/优化器前拒绝。
@@ -459,7 +464,7 @@ Huber、Student-t或污染混合只用于剩余重尾/离群profile，不能替�
 - 高纬：使用MLT与磁纬的各向异性距离；活动时可采用不同半径
 - 时间：保留连续Gaspari–Cohn，不使用硬窗口作为最终权重
 
-`L`不得同时改变R、bias、token数上限和网络容量。依赖库未安装或转换不有限时必须在preflight失败，不允许静默退回地理坐标。
+`L`不得同时改变R、bias、token数上限和网络容量。必须增加`L_geo_matched_sham`：仍用地理坐标，但匹配磁坐标arm的unique profile数、token数和总precision分布，用来区分“磁拓扑更合理”与“只是减少/重加权观测”。依赖库未安装或转换不有限时必须在preflight失败，不允许静默退回地理坐标。
 
 ### 5.6 V_low：独立bottomside表示
 
@@ -480,15 +485,17 @@ Huber、Student-t或污染混合只用于剩余重尾/离群profile，不能替�
 
 先修复提峰QA，再决定是否训练shape目标。推荐顺序：
 
-1. 为每个profile计算边界标记、峰显著性、局部曲率、第一/第二峰间隔和缺测跨度
-2. `>=490 km`或`<=210 km`作为边界/删失事件单列；主hmF2只对有效内点峰计算
-3. 粗10 km、粗峰±10 km内细1 km搜索保持模型间一致
-4. 训练候选使用可微soft peak或显式`δhmF2/δlogNmF2/B0/B1`形状头
-5. 若GIRO/ionosonde提供shape target，必须使用train/development站点×日期分块，永久留出不参与选择
+1. 为每个观测profile计算边界标记、峰显著性、局部曲率、第一/第二峰间隔和缺测跨度；只用观测质量与输入可用性冻结`hmf2_eligible_obs`
+2. 观测峰`>=490 km`或`<=210 km`作为真值侧删失事件单列，不进入普通双侧hmF2误差；所有方法共享同一观测侧eligibility
+3. 模型自身的边界、平峰、多峰或非有限状态不得删除该模型样本；必须作为共同eligible集合上的失败率/删失端点，并在固定边界上保留argmax误差或采用预注册区间删失评分
+4. 同时报告：观测侧固定eligible上的hmF2误差、模型边界/平峰/多峰率，以及“所有模型均有效”公共mask敏感性；后者只能作诊断
+5. 粗10 km、粗峰±10 km内细1 km搜索保持模型间一致；`prominence_dex`、`near_tie_dex`和边界margin在看新arm前冻结，并报告少量预注册阈值敏感性
+6. 训练候选使用可微soft peak或显式`δhmF2/δlogNmF2/B0/B1`形状头
+7. 若GIRO/ionosonde提供shape target，必须使用train/development站点×日期分块，永久留出不参与选择
 
 推荐可解释参数化是把密度幅值与垂直位移分开：`δlogNmF2`控制幅值，`δhmF2`控制平滑垂直warp，bottomside参数控制厚度/曲率。任何warp必须保持高度单调、边界有限和密度正值。
 
-`V_peak`也需要等参数量sham。它只在`B+R`稳定后评估，以免把观测偏差修正收益误认为shape head收益。
+`V_peak`也需要等参数量、等计算量sham。它只在观测误差矩阵选出的冻结底座上评估，以免把B/R收益误认为shape head收益。由于已有GIRO/峰值证据而`V_low`缺少独立低空target，默认先完成`V_peak`，再决定是否进入`V_low`。
 
 ### 5.8 D_H与D_L：事件态驱动
 
@@ -501,7 +508,7 @@ Huber、Student-t或污染混合只用于剩余重尾/离群profile，不能替�
 - 每一来源有时间分辨率、插值、时区、缺测标志、版本和SHA合同
 - 驱动仅从合法train/development时间读取
 - 分开做`D_H`与`D_L`，不能用一个driver bundle宣称两种物理机制
-- 增加等维零值或按日期块置乱驱动对照，排除网络容量和missingness编码收益
+- 每个驱动arm同时增加等维零值对照和按日期块置乱对照；前者排除容量/missingness收益，后者检验真实时间配准与物理信息
 - 新驱动实施前补充低纬电动力学、高纬耦合和磁坐标直接文献
 
 ### 5.9 长期观测算子方向
@@ -514,25 +521,29 @@ Huber、Student-t或污染混合只用于剩余重尾/离群profile，不能替�
 
 ### 6.1 P0-A：评估QA修复，不训练
 
-任务：
+当前状态：`PARTIAL`。QA实现已在`86bfb7b`合入，ISR最终汇总修复已在`5d5c214`合入；`qav2-r1`的ISR schema-v2合同和报告已发布，Poker Flat几何已排除为40 km级主因。GIRO仍后台运行，观测侧固定eligibility与模型失败公平计分仍未完成。
 
-- 修复ISR `low_altitude_diagnostic=null`
-- 核验Poker Flat range到高度的几何转换及单位
-- 峰值图按缺测间隔分段
-- 增加边界/删失、峰显著性、曲率和多峰标记
+剩余任务：
+
+- 核验并归档`qav2-r1` ISR acceptance；首次失败目录永久NO-GO，不补写、不复用
+- 让ISR `low_altitude_diagnostic`在正式JSON中保持非null并可由cache重算
+- 固定观测侧hmF2 eligibility；模型自身边界/平峰/多峰不得删除自身样本
+- 为模型无效率、边界率和删失评分增加主报告字段
 - 公共mask外同时报告各模型自身finite率/缺失率
-- 在全新目录重跑v14对v13与历史基准，不覆盖旧产物
+- 完成后台同口径GIRO并核验合同；不覆盖旧产物、不因P0-B自动重启
 
-通过条件：所有合同JSON非空、单位正确、两站报告有限、边界率可复现、相同cache可重复得到相同指标。
+通过条件：所有合同JSON非空、单位正确、两站报告有限、边界率可复现、eligibility只依赖观测、模型失败不被删样本、相同cache可重复得到相同指标。P0-A只做评价口径验收，不设模型性能胜负门。
 
 ### 6.2 P0-B：无训练误差链审计
+
+当前状态：`IN PROGRESS / PROVISIONAL`。实现分支固定为`codex/run67-m2w2-p0b`，基于不可移动的P0-A代码锚点`codex/run67-m2w2@5d5c214`。P0-B只允许train token及train/development ISR日期；locked-test在模型查询、token检索、cache和peak join前排除。GIRO和观测侧eligibility未闭环前，六问可给出 provisional 状态，但不得解锁P0-C。
 
 新增逐查询/逐profile诊断cache，至少包含：
 
 - 观测、Raw IRI、M00、M10、M01、M11及`M11−M00`
 - no-token输出；应与M00逐点严格一致
 - FY-only、COSMIC-only和联合模式的增量/gain
-- 每来源unique profile数、token数、raw/capped总precision
+- 每来源unique profile数、token数、unlocalized/localized总precision；v14没有profile cap，必须明确记为`not_applicable`
 - 有效样本量 `N_eff=(Σq)^2/Σ(q^2)`、最大profile precision占比
 - innovation中位数/MAD、NIS、来源一致性、尾部率
 - profile内垂直残差相关与token高度间隔
@@ -548,7 +559,7 @@ P0输出必须回答：
 3. profile点数是否主导总precision
 4. 来源覆盖与纬度是否可分离
 5. 低空输出是否随高空token/innovation漂移
-6. hmF2问题在剔除边界/弱峰后是否仍存在
+6. hmF2问题在观测侧固定eligibility及显式边界/弱峰/多峰后是否仍存在；eligibility未闭环时只能为`insufficient_evidence`
 
 若P0不能支持某假设，则删除或降级对应训练因素，不因既定叙事强行实施。
 
@@ -559,6 +570,7 @@ P0输出必须回答：
 - `m2w2_experiment_contract.json`
 - `m2w2_gate_contract.json`
 - `m2w2_input_identity.json`
+- `m2w2_rng_contract.json`
 - `m2w2_run_schedule.csv`
 - bias/R/GIRO拆分清单及SHA
 
@@ -573,7 +585,9 @@ P0输出必须回答：
 - `R`：只启用预注册R合同，优先`R1+R2`；若含更多项，命名为`R_bundle`
 - `B+R`：同时启用，检验交互
 
-只有`B+R`通过后，才进入L/V/Drivers。若B或R单独失败但交互显著，应报告相互依赖，不能宣称失败因素“无用”。
+四臂完成后，按“机制门→任务门→安全门→复杂度”选择最简单的合格底座；可能是S0、B、R或B+R，不预设BR必胜。若B或R单独失败但交互显著，应报告相互依赖，不能宣称失败因素“无用”。若没有新arm通过，则保留S0并返回P0假设，不继续堆叠L/V/Drivers。
+
+若含B的候选有效，在进入其他结构因素前必须固定同一R设置并运行`base/B_BG/B_AN/B_BG+B_AN`四臂阶段定位；否则只能归因于B bundle，不能声称偏差主要写入M00或主要作用于M11 innovation。
 
 ### 6.5 P2：R内部定位与软门控
 
@@ -587,22 +601,22 @@ P0输出必须回答：
 
 目标是以最少组件达到NIS、重复profile不变性和外部指标门禁；不为复杂度本身保留模块。
 
-### 6.6 P3：L、V_low和V_peak分开
+### 6.6 P3：V_peak、L和V_low分开
 
-以锁定的`B+R`为共同底座，分别运行：
+以P1选出的最简单合格底座`base_obs`为共同底座，默认按以下顺序运行：
 
-- `BR+L`
-- `BR+V_low`与`BR+V_low_sham`
-- `BR+V_peak`与`BR+V_peak_sham`
+- `base_obs+V_peak`与`base_obs+V_peak_sham`：先处理已有GIRO/峰QA独立证据的问题
+- 若P0支持磁拓扑错配，运行`base_obs+L`与`base_obs+L_geo_matched_sham`
+- 仅在获得独立低空target、或把目标明确限定为“降低泄漏/提高稳健性”时，运行`base_obs+V_low`与`base_obs+V_low_sham`
 
-每个因素只解释“在BR条件下的增量效果”。通过后再运行必要组合，如`BR+L+V_low`。不得一次同时改定位、先验、head和shape loss。
+每个因素只解释“在base_obs条件下的增量效果”。通过后再运行必要组合。不得一次同时改定位、先验、head和shape loss；也不得因V_low缺少独立target而让它阻塞可确认的V_peak实验。
 
 ### 6.7 P4：D_H与D_L
 
 分别在已冻结最佳底座上运行：
 
-- `base+D_H`、`base+D_H_zero/permuted`
-- `base+D_L`、`base+D_L_zero/permuted`
+- `base+D_H`、`base+D_H_zero`、`base+D_H_dateblock_permuted`
+- `base+D_L`、`base+D_L_zero`、`base+D_L_dateblock_permuted`
 
 仅当收益与预注册活动regime交互且置乱对照无收益，才能作物理驱动解释。
 
@@ -614,11 +628,10 @@ P0输出必须回答：
 
 ### 7.1 独立重复单位与区组
 
-- 算法处理的独立重复单位是完整训练run/seed，不是同一profile的高度点
-- 相同seed跨arm配对，并把seed作为区组
-- 探索性最低3 seeds：建议预注册`42,43,44`
-- 确认性优先5 seeds：在前三个基础上增加`45,46`
-- 每个seed内随机化arm运行顺序，防止系统负载或代码时间顺序与处理混杂
+- 算法处理的独立重复单位是完整训练run/seed，不是同一profile的高度点；seed只代表算法重复，不代表新的独立日期、站点或观测总体
+- 相同seed跨arm配对，并把seed作为区组；四臂B×R的最小平衡探索设计使用4个seed，建议预注册`42,43,44,45`，按4×4 Latin-square轮换arm运行顺序
+- 3 seeds仅允许作pilot或资源筛查，不能称完成平衡四臂归因；确认性至少5 seeds，并增加第二个预注册date-block split、从未查看的新站点/日期窗或二者之一
+- 每个训练seed拆成命名RNG子流并写入合同：`parameter_init`、`dataloader_order`、`token_sampling`、`source_dropout`、`gram_calibration`、`auxiliary_sampling`；同一子流跨arm保持配对，新增模块不得改变公共子流的随机序列
 - 所有arm使用相同split、batch、epoch预算、参数初始化规则、Gram合同和checkpoint选择合同
 - 固定split只支持“在该split下”的结论；最终可另加一个预注册date-block split作敏感性复现
 
@@ -626,23 +639,34 @@ P0输出必须回答：
 
 | Arm | B | R | 主要可识别效应 |
 | --- | --- | --- | --- |
-| S0 | 0 | 0 | 同seed基线 |
-| B | 1 | 0 | `B−S0` |
-| R | 0 | 1 | `R−S0` |
-| BR | 1 | 1 | `B×R=BR−B−R+S0` |
+| S0 | 0 | 0 | 单元格均值`mu00`，同seed基线 |
+| B | 1 | 0 | 单元格均值`mu10`；`mu10−mu00`是R=0时B的simple effect |
+| R | 0 | 1 | 单元格均值`mu01`；`mu01−mu00`是B=0时R的simple effect |
+| BR | 1 | 1 | 单元格均值`mu11`；用于另一组simple effects与交互 |
 
-这是首个必须完成的可归因矩阵。若只训练BR，结论只能是“BR bundle有效/无效”。
+对所有指标先统一方向为“正值更好”，再预注册以下estimand：
+
+```text
+B边际主效应 = 0.5 * [(mu10 - mu00) + (mu11 - mu01)]
+R边际主效应 = 0.5 * [(mu01 - mu00) + (mu11 - mu10)]
+B×R交互     = (mu11 - mu10) - (mu01 - mu00)
+             = mu11 - mu10 - mu01 + mu00
+```
+
+`B−S0`和`R−S0`只能称simple effects，不得写成完整因子主效应。交互式为差中差；若另用±1 effect coding，系数缩放必须在统计合同中固定，不能混用。若只训练BR，结论只能是“BR bundle有效/无效”。
 
 ### 7.3 主矩阵B：顺序增量
 
-锁定BR后分别比较：
+锁定P1选出的`base_obs`后分别比较：
 
-- `V_low|BR = BR+V_low − BR`
-- `V_peak|BR = BR+V_peak − BR`
-- `L|BR = BR+L − BR`
+- `V_peak|base_obs = base_obs+V_peak − base_obs`，并减去参数量/计算量匹配sham效应
+- `L|base_obs = base_obs+L − base_obs`，并与`L_geo_matched_sham`比较
+- `V_low|base_obs = base_obs+V_low − base_obs`，并减去参数量/计算量匹配sham效应
 - `D_H|base`和`D_L|base`
 
 这些是条件增量效应，不识别B×V、R×V或三阶交互。
+
+若B因素进入`base_obs`，还必须报告阶段定位矩阵：无B、`B_BG`、`B_AN`、`B_BG+B_AN`。`B_BG`主要以M00和Background留出bias为机制端点，`B_AN`主要以M11−M00、innovation和NIS为机制端点；只有最后一臂能代表完整B合同。
 
 ### 7.4 完整因子设计选项
 
@@ -655,6 +679,7 @@ P0输出必须回答：
 - 新head/输入增加容量时必须报告参数量，并提供参数量匹配sham
 - 所有完整训练保持Background 5 + Analysis 10 epoch；不得给新arm更多epoch后直接比较
 - 随机初始化；不使用v14或其他arm的Background seed，除非所有arm共享同一预注册seed checkpoint且该设计另行解释
+- 所有比较arm必须来自同一代码提交、loader和评价合同；代码或loader改变后，历史S0/v14不能直接充当并行对照，除非逐点、逐token和随机轨迹严格等价测试通过，否则必须在新提交上重跑S0
 - 各arm按相同development合同选checkpoint
 - 若将checkpoint选择从总体CCC改为worst-group安全门，应先作为独立`S`因素离线审计，或在所有新arm前统一冻结；不能只对某arm更换选择规则
 
@@ -676,10 +701,11 @@ P0输出必须回答：
 
 - ISR：station-time profile为重采样组；高度点不得独立bootstrap
 - GIRO：同一station-time记录配对
+- 主观测不确定度按station-time分组bootstrap；date-block bootstrap作为时间相关敏感性，两者分别报告，不能把同一日期内记录当成更多独立天气重复
 - 2000次、seed=42描述观测样本不确定度；它不能替代训练seed重复
 - 跨arm使用公共有限mask，同时报告每个arm原始finite率和被公共mask排除率
 - 两站分别报告；station等权平均只作描述性主汇总，不掩盖相反符号
-- 训练seed层报告配对差值、每seed方向、均值/中位数和跨seed区间
+- 训练seed层报告配对差值、每seed方向、均值/中位数和跨seed区间；不得把训练seed与station-time/date bootstrap样本池合并成一个虚假的大n
 
 ### 8.2 必报分层
 
@@ -696,7 +722,7 @@ P0输出必须回答：
 
 逐点log10/dex：bias、abs(bias)、RMSE、MAE、CCC、Pearson R。
 
-峰值：NmF2的bias/RMSE/CCC/R；仅有效内点峰的hmF2 bias/MAE/RMSE/CCC/R；边界率、弱峰率、多峰率单列。
+峰值：NmF2的bias/RMSE/CCC/R；在观测侧固定eligible集合上的hmF2 bias/MAE/RMSE/CCC/R或预注册删失评分；模型边界率、平峰率、多峰率、非有限率和有效覆盖率作为共同主端点。只有“所有模型均有效”的hmF2表只能作敏感性，不能替代全eligible结果。
 
 同化诊断：innovation、NIS、Desroziers残差、总precision、N_eff、最大profile占比、来源一致性、gain、no-token零增量。
 
@@ -704,12 +730,18 @@ P0输出必须回答：
 
 ### 8.4 门禁语义
 
-门禁分两层：
+门禁按阶段拆开，避免要求一个模块修复它没有被设计处理的端点：
 
-1. 问题目标门：两站夜间120–200 km的abs(bias)和RMSE，以及有效内点hmF2必须达到预注册改善
-2. 非劣安全门：两站200–500 km昼/夜CCC、RMSE、R及NmF2不得超过预注册退化界；任何worst-regime严重退化即失败
+1. `P0-A QA门`：只检查合同、几何、eligibility、cache重算和报告完整性，不评价模型胜负
+2. `B机制门`：cross-fit留出innovation的条件位置偏差下降；若作用于Background，M00在对应200–500 km条件bias下降
+3. `R机制门`：NIS/Desroziers诊断趋于校准、重复profile/高度加密不变性改善、最大profile占比和总precision受控；不得要求R承担系统均值校正
+4. `B/R任务门`：200–500 km目标regime的M00/M11 abs(bias)、RMSE或CCC达到预注册改善；所有非目标200–500 km层和NmF2通过安全门
+5. `V_peak门`：观测侧固定eligible上的hmF2或删失评分改善，模型边界/平峰/多峰率不恶化，NmF2与逐点200–500 km通过安全门
+6. `L门`：相对`L_geo_matched_sham`的收益集中于预注册磁regime错配样本；否则只能称通用重加权/稀疏化收益
+7. `V_low门`：只有独立120–200 km目标可支持精度结论；无独立target时只检查高空扰动泄漏、边界连续和稳健性，不允许用当前两站反向选择结构
+8. `D门`：相对zero与date-block permuted对照的收益必须与预注册活动regime交互
 
-CCC→RMSE→R只用于安全门通过后的候选排序，不再允许“CCC先赢就忽略RMSE/R显著变差”。
+每一训练阶段另有统一`非劣安全门`：两站200–500 km昼/夜CCC、RMSE、R、NmF2及模型有效率不得超过预注册退化界；任何worst-regime严重退化即失败。CCC→RMSE→R只用于机制门、任务门和安全门均通过后的候选排序，不再允许“CCC先赢就忽略RMSE/R显著变差”。
 
 推荐的临时工程非劣界仅用于P0讨论：CCC/R下降不超过`0.005`，逐点/NmF2 RMSE增加不超过`0.005 dex`，hmF2 MAE增加不超过`2 km`。最终数值必须在查看任何新arm结果前，结合多seed S0波动冻结到`m2w2_gate_contract.json`；冻结后不得修改。
 
@@ -720,6 +752,7 @@ CCC→RMSE→R只用于安全门通过后的候选排序，不再允许“CCC先
 - duplicate profile/高度加密不使总precision无界增长
 - no-token时Analysis增量严格为零
 - density、loss、梯度、NIS、不确定度和所有报告字段有限
+- 峰值评价eligibility仅由观测与输入合同决定；模型边界/平峰/多峰/非有限输出进入失败端点，不能用于删除该arm样本
 - 低空路径不得读取或构造卫星density target
 - 参数量、梯度作用范围、每项辅助损失与主损失比均记录
 - 目标目录必须不存在；失败目录保留，不自动重启或改合同恢复
@@ -727,6 +760,7 @@ CCC→RMSE→R只用于安全门通过后的候选排序，不再允许“CCC先
 ### 8.6 GIRO/ISR独立性
 
 - 当前Jicamarca/Poker Flat：锁定外部回归基准，不能再称独立盲测
+- 两站只能在每一阶段先用development/机制指标锁定一个候选后运行一次回归；不得逐arm、逐epoch反复查看两站再选择候选
 - 新ISR站点/日期：只有在方案和checkpoint冻结后首次查看，才能作确认性外部验证
 - GIRO若参与B/R/V_peak拟合：同站同日期不得再作独立评估；必须预先按站点×日期块划分校准与永久留出
 - 历史epoch12：因ISR选择，只作描述性参考
@@ -786,6 +820,8 @@ CCC→RMSE→R只用于安全门通过后的候选排序，不再允许“CCC先
 - v15训练/resume/strict loader canonical结果完全相同
 - 任一bias/R/L/V/D、输入SHA、split或arm字段篡改均拒绝
 - v14仍可只读加载，不能按v15恢复训练
+- 命名RNG子流跨arm保持公共初始化、batch、token/source采样轨迹；新增模块不得推进无关子流
+- loader或代码提交改变时，历史S0必须被拒绝为并行对照，除非严格等价证明已写入合同
 
 B：
 
@@ -823,6 +859,7 @@ R/profile：
 - Poker Flat几何高度合成算例
 - low_altitude_diagnostic非null
 - 公共mask与各自finite率一致
+- hmF2 eligibility只由观测状态决定；构造模型边界/平峰/多峰后样本数不减少且失败率增加
 - 分组bootstrap不把高度点当独立组
 - 图不跨缺测段连线
 - 所有绝对密度图单位为`10^11 m^-3`
@@ -879,7 +916,16 @@ isr_validation_outputs/run67-m2w2-{arm}-seed{seed}-vs-s0-giro
 
 每个目录至少保存：`run_manifest.json`、`resolved_training.json`、`training_summary.json`、best checkpoint及SHA、完整stdout/stderr、输入身份、门禁结果和逐点/逐profilecache合同。禁止覆盖v13/v14历史图和报告。
 
-### 9.6 分阶段检查清单
+### 9.6 Git分支、提交与直接回退合同
+
+- 冻结锚点不得移动：v14为`codex/run66-m2w-120-500-obs-200-500@e07af51`；P0-A代码为`codex/run67-m2w2@5d5c214`。新阶段必须从上一阶段已接受锚点创建独立`codex/run67-m2w2-{stage}`分支，不在历史阶段分支继续试验。
+- 当前P0-B分支固定为`codex/run67-m2w2-p0b`。后续建议依次使用`codex/run67-m2w2-p0c`、`codex/run67-m2w2-v15-s0`、`codex/run67-m2w2-p1-br`等阶段分支；只有前一阶段acceptance明确允许时才创建下一分支。
+- 提交保持单一职责并显式暂存路径，禁止`git add -A`：计划/状态、冻结合同、纯数学诊断、runner/测试、运行结论分别提交；生成的checkpoint、cache、图、报告、日志和原始数据不提交。
+- 所有正式preflight和运行必须来自tracked工作区干净的提交；runtime contract与acceptance必须记录branch、HEAD、上一阶段锚点祖先关系、源码SHA和空tracked status。未跟踪历史产物可保留，但不得进入输入发现逻辑。
+- 发现代码/合同错误时保留失败目录，在同一阶段分支新增修复提交并使用新revision输出目录；不得amend/rebase已经被产物引用的提交，不得让旧acceptance指向新代码。所有受影响arm必须在同一新SHA下重跑。
+- 回退以切换到阶段分支或acceptance记录的精确commit进行；不依赖删除产物或重写历史。阶段完成后在本文档记录commit、输入合同SHA、产物acceptance SHA及后继分支起点。
+
+### 9.7 分阶段检查清单
 
 基线：
 
@@ -887,14 +933,16 @@ isr_validation_outputs/run67-m2w2-{arm}-seed{seed}-vs-s0-giro
 - [x] epoch15 development-selected checkpoint及SHA冻结
 - [x] v14对v13两站ISR完成
 - [x] v14对v13 GIRO完成
-- [ ] v14对历史epoch12 GIRO完成并只作描述性归档
+- [ ] v14对历史epoch12 GIRO：旧任务在96,216/105,490处失败且无正式产物；若保留该描述性基准，须在P0-A同口径下从新目录完成
 
 P0：
 
-- [ ] 修复ISR低空JSON
-- [ ] 核验Poker Flat几何高度
-- [ ] 修复缺测连线
-- [ ] 实现边界/弱峰/多峰规则
+- [x] P0-A代码：Poker Flat几何高度、缺测分段、边界/平峰/多峰规则及共享ISR/GIRO峰QA（`86bfb7b`），ISR最终汇总/合同发布修复（`5d5c214`）
+- [x] 核验Poker Flat 41个文件均为90°仰角，几何差约0.215 km，排除为40 km级主因
+- [x] 修复qav2最终contract/report写出并在新空目录完成ISR `qav2-r1`；首次qav2目录永久NO-GO
+- [ ] 固定观测侧hmF2 eligibility与模型失败/删失评分；冻结阈值敏感性
+- [ ] 核验ISR低空JSON非null且与cache一致
+- [ ] 完成同口径GIRO P0-A产物
 - [ ] 完成FY-only/COSMIC-only/no-token误差链审计
 - [ ] 完成NIS、N_eff、profile precision与来源覆盖审计
 - [ ] 冻结M2-W2实验、输入、门禁和运行顺序合同
@@ -905,14 +953,15 @@ P1–P2：
 - [ ] 完成B cross-fit artifact与测试
 - [ ] 完成R1、R2及必要R3/G测试
 - [ ] 完成所有arm smoke
-- [ ] 完成3-seed `S0/B/R/BR`矩阵
-- [ ] 根据预注册对比锁定或否定BR底座
+- [ ] 完成4-seed平衡`S0/B/R/BR`矩阵
+- [ ] 根据预注册机制/任务/安全门选择最简单合格底座，不强制BR
+- [ ] 若B有效，完成`B_BG/B_AN/B_BG+B_AN`阶段定位
 
 P3–P5：
 
-- [ ] 完成L独立消融
-- [ ] 完成V_low及参数量sham
 - [ ] 完成V_peak及参数量sham
+- [ ] 完成L及token/precision匹配sham（仅P0支持时）
+- [ ] 完成V_low及参数量sham（仅有独立低空证据或稳健性目标时）
 - [ ] 完成D_H/D_L及零值/置乱对照
 - [ ] 组合所有通过因素
 - [ ] 在设计知情的两站回归基准上复核
@@ -955,6 +1004,10 @@ P3–P5：
 - 峰值图：各站`*_peak_vs_lt_fsia_inr.png`
 - 电子密度分布：各站`*_comparison.png`
 - GIRO报告：`isr_validation_outputs/run66-m2w-v14-epoch15-vs-v13-development-giro/giro_peak_report.json`
+- P0-A代码提交：QA实现`86bfb7b`，ISR最终汇总修复`5d5c214`；共享峰合同：`isr_evaluation/peak_qa.py`
+- P0-A失败ISR产物：`isr_validation_outputs/run67-p0a-v14-epoch15-vs-v13-epoch12-isr-qav2/isr_peak_cache.npz`；该目录缺正式contract/report JSON，永久NO-GO
+- P0-A修复ISR产物：`isr_validation_outputs/run67-p0a-v14-epoch15-vs-v13-epoch12-isr-qav2-r1/`；schema-v2 contract/report/cache已发布，但P0-A仍受GIRO及固定观测eligibility阻断
+- 历史epoch12 GIRO失败状态：`isr_validation_outputs/run66-m2w-v14-epoch15-eval-status.json`
 - 文献核验包：`sources/papers_20260814_ionosphere_bias_assimilation.md`
 
 ### 10.4 核验参考文献
