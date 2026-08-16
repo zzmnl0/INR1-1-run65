@@ -42,11 +42,14 @@ _STRATIFIED_SOURCES = {'analysis': 'M11_log10',
                        'background': 'M00_log10',
                        'iri': 'IRI_log10'}
 _STRATIFIED_BINS = ((120.0, 300.0), (300.0, 500.0))
+_FULL_ALTITUDE_RANGE = (120.0, 500.0)
 _STRATIFIED_PERIODS = ('day', 'night', 'all')
 _STRATIFIED_METRICS = ('n', 'rmse', 'bias', 'mae', 'pearson_r', 'ccc')
 _EXPECTED_STRATIFIED_CONTRACT = {
     'altitude_bins_km': [[120.0, 300.0], [300.0, 500.0]],
     'interval_semantics': 'left_closed_right_open_except_final_right_closed',
+    'full_altitude_range_km': [120.0, 500.0],
+    'full_altitude_interval_semantics': 'closed',
     'day_local_time_range_hours': [6.0, 18.0],
     'day_interval_semantics': 'left_closed_right_open',
     'periods': ['day', 'night', 'all'],
@@ -152,7 +155,7 @@ def _expected_stratified_keys():
     return {
         f'{source}_alt_{lower:g}-{upper:g}km_{period}'
         for source in _STRATIFIED_SOURCES
-        for lower, upper in _STRATIFIED_BINS
+        for lower, upper in (*_STRATIFIED_BINS, _FULL_ALTITUDE_RANGE)
         for period in _STRATIFIED_PERIODS
     }
 
@@ -254,12 +257,26 @@ def _verify_stratified_reports(isr_dir: Path, reports, csv_identities):
                                           for name in _STRATIFIED_METRICS},
                                  f'ISR {station}:{key}:CSV/JSON')
 
+            for source in _STRATIFIED_SOURCES:
+                for lower, upper in (*_STRATIFIED_BINS, _FULL_ALTITUDE_RANGE):
+                    prefix = f'{source}_alt_{lower:g}-{upper:g}km_'
+                    _require(
+                        stratified[prefix + 'day']['n']
+                        + stratified[prefix + 'night']['n']
+                        == stratified[prefix + 'all']['n'],
+                        f'ISR {station}:{prefix}: day/night count mismatch')
+
             station_mask = station_values == station
             for source, cache_key in _STRATIFIED_SOURCES.items():
+                # M00 reports use their own finite-pair mask; the shared cache
+                # intentionally follows the M11/IRI public mask.
+                if source == 'background':
+                    continue
                 prediction = np.asarray(cache[cache_key], dtype=np.float64)
-                for index, (lower, upper) in enumerate(_STRATIFIED_BINS):
+                for lower, upper in (*_STRATIFIED_BINS, _FULL_ALTITUDE_RANGE):
                     altitude_mask = ((altitude >= lower)
-                                     & (altitude <= upper if index == 1
+                                     & (altitude <= upper if lower >= 300.0
+                                        or (lower, upper) == _FULL_ALTITUDE_RANGE
                                         else altitude < upper))
                     selected = station_mask & altitude_mask
                     expected = _metric_values(
@@ -353,8 +370,8 @@ def _verify_isr(isr_dir: Path, expected_candidate, expected_baselines,
     reports = _strict_json(isr_dir / 'isr_validation_report.json')
     _validate_contract_common(contract, expected_candidate, expected_baselines,
                               expected_date_split, 'ISR')
-    _require(contract.get('stratified_metrics_contract_version') == 2,
-             'ISR: stratified_metrics_contract_version must be 2')
+    _require(contract.get('stratified_metrics_contract_version') == 3,
+             'ISR: stratified_metrics_contract_version must be 3')
     _require(contract.get('stratified_metrics') == _EXPECTED_STRATIFIED_CONTRACT,
              'ISR: stratified metrics contract mismatch')
     _require(isinstance(contract.get('output_artifacts'), dict),

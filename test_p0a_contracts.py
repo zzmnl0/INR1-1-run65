@@ -7,7 +7,9 @@ import numpy as np
 import pytest
 
 import isr_evaluation.main_isr_eval as isr_eval
-from verify_p0a_contracts import ContractError, _verify_giro, _verify_isr
+from verify_p0a_contracts import (
+    ContractError, _compare_metrics, _verify_giro, _verify_isr,
+)
 
 
 _CANDIDATE_SHA = 'a' * 64
@@ -195,9 +197,13 @@ def test_isr_finalizer_is_non_destructive_and_writes_completion_contract(tmp_pat
     output_dir, reports, contract = _write_isr(tmp_path)
     assert all('evaluation_cache' in report for report in reports)
     assert contract['baseline_checkpoints'][1]['label'] == 'historical-epoch12'
-    assert contract['stratified_metrics_contract_version'] == 2
+    assert contract['stratified_metrics_contract_version'] == 3
     assert contract['stratified_metrics']['altitude_bins_km'] == [
         [120.0, 300.0], [300.0, 500.0]]
+    assert contract['stratified_metrics']['full_altitude_range_km'] == [
+        120.0, 500.0]
+    assert contract['stratified_metrics'][
+        'full_altitude_interval_semantics'] == 'closed'
     assert not (output_dir / 'isr_evaluation_contract.json').is_symlink()
     assert (output_dir / 'isr_validation_report.json').is_file()
     assert (output_dir / 'isr_evaluation_contract.json').is_file()
@@ -252,6 +258,18 @@ def test_isr_verifier_rejects_old_strata_merged_low_altitude_and_csv_drift(
     with pytest.raises(ContractError, match='stratified metrics contract'):
         _verify_isr(output_dir, _CANDIDATE_SHA, _BASELINES, _SPLIT_SHA, None)
 
+    output_dir, _, _ = _write_isr(tmp_path / 'missing-full')
+    report_path = output_dir / 'isr_validation_report.json'
+    report = json.loads(report_path.read_text(encoding='utf-8'))
+    report[0]['stratified'].pop('analysis_alt_120-500km_day')
+    isr_eval._write_json_atomically(str(report_path), report)
+    contract_path = output_dir / 'isr_evaluation_contract.json'
+    contract = json.loads(contract_path.read_text(encoding='utf-8'))
+    _refresh_artifact_identity(output_dir, contract, 'isr_validation_report.json')
+    _rewrite_contract(output_dir, contract)
+    with pytest.raises(ContractError, match='incomplete stratified metric keys'):
+        _verify_isr(output_dir, _CANDIDATE_SHA, _BASELINES, _SPLIT_SHA, None)
+
     output_dir, _, _ = _write_isr(tmp_path / 'low')
     report_path = output_dir / 'isr_validation_report.json'
     report = json.loads(report_path.read_text(encoding='utf-8'))
@@ -278,6 +296,13 @@ def test_isr_verifier_rejects_old_strata_merged_low_altitude_and_csv_drift(
     _rewrite_contract(output_dir, contract)
     with pytest.raises(ContractError, match='CSV/JSON'):
         _verify_isr(output_dir, _CANDIDATE_SHA, _BASELINES, _SPLIT_SHA, None)
+
+
+def test_isr_verifier_rejects_nonfinite_small_stratum():
+    metrics = {'n': 4, 'rmse': np.nan, 'bias': np.nan, 'mae': np.nan,
+               'pearson_r': np.nan, 'ccc': np.nan}
+    with pytest.raises(ContractError, match='non-finite'):
+        _compare_metrics(metrics, metrics, 'small-stratum')
 
 
 def test_isr_verifier_rejects_unknown_peak_status(tmp_path):

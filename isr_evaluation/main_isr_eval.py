@@ -141,6 +141,15 @@ def _stratified_altitude_masks(altitude, alt_range):
         yield lower, upper, (altitude >= lower) & upper_mask
 
 
+def _reporting_altitude_masks(altitude, alt_range):
+    """Yield the two frozen strata followed by the closed full-domain aggregate."""
+    yield from _stratified_altitude_masks(altitude, alt_range)
+    domain_min, domain_max = map(float, alt_range)
+    altitude = np.asarray(altitude)
+    yield (domain_min, domain_max,
+           (altitude >= domain_min) & (altitude <= domain_max))
+
+
 def _grouped_error_metric_bootstrap(observation, prediction, unit_ids,
                                     replicates=2000, seed=42):
     """Profile-grouped CIs for one model's bias, RMSE, and MAE."""
@@ -246,7 +255,7 @@ def _compute_stratified_metrics(alt_all, lon_all, rh_all,
 
     for src_name, src_pred in sources:
         # 分高度层 × 分昼夜
-        for lo, hi, alt_mask in _stratified_altitude_masks(alt_all, alt_range):
+        for lo, hi, alt_mask in _reporting_altitude_masks(alt_all, alt_range):
             alt_name = f'{lo:g}-{hi:g}km'
             for dn_label, dn_mask in [('day', day_mask), ('night', ~day_mask), ('all', np.ones(len(alt_all), bool))]:
                 m = alt_mask & dn_mask
@@ -266,7 +275,7 @@ def _compute_stratified_bootstrap(altitude, longitude, rel_hour,
     local_time = _lt_from_relhour_lon(rel_hour, longitude)
     day = (local_time >= _DAY_LT_RANGE[0]) & (local_time < _DAY_LT_RANGE[1])
     masks = {}
-    for lower, upper, in_altitude in _stratified_altitude_masks(
+    for lower, upper, in_altitude in _reporting_altitude_masks(
             altitude, alt_range):
         label = f'alt_{lower:g}-{upper:g}km'
         masks.update({f'{label}_day': in_altitude & day,
@@ -412,7 +421,7 @@ def _build_isr_evaluation_contract(candidate_contract, baseline_contract,
                          np.empty(0), config.get('alt_range', (120.0, 500.0)))]
     contract = {
         'evaluation_schema_version': 2,
-        'stratified_metrics_contract_version': 2,
+        'stratified_metrics_contract_version': 3,
         'evaluation_code_sha256': _evaluation_code_sha256(),
         'candidate_checkpoint': candidate_contract,
         'baseline_checkpoints': baseline_contract,
@@ -449,6 +458,11 @@ def _build_isr_evaluation_contract(candidate_contract, baseline_contract,
             'altitude_bins_km': altitude_bins,
             'interval_semantics': (
                 'left_closed_right_open_except_final_right_closed'),
+            'full_altitude_range_km': [
+                float(config.get('alt_range', (120.0, 500.0))[0]),
+                float(config.get('alt_range', (120.0, 500.0))[1]),
+            ],
+            'full_altitude_interval_semantics': 'closed',
             'day_local_time_range_hours': list(_DAY_LT_RANGE),
             'day_interval_semantics': 'left_closed_right_open',
             'periods': ['day', 'night', 'all'],

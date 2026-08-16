@@ -183,6 +183,9 @@ def test_stratified_metrics_keep_three_model_stages():
         iri_all=np.full(n, 10.0),
     )
     assert 'analysis_alt_120-300km_all' in metrics
+    assert 'analysis_alt_120-500km_day' in metrics
+    assert 'analysis_alt_120-500km_night' in metrics
+    assert 'analysis_alt_120-500km_all' in metrics
     assert 'background_alt_120-300km_all' in metrics
     assert 'iri_alt_120-300km_all' in metrics
 
@@ -199,14 +202,17 @@ def test_stratified_metrics_and_bootstrap_share_two_height_bins():
         iri_all=np.zeros_like(alt),
     )
     assert metrics['analysis_alt_120-300km_all']['n'] == 4
+    assert np.isnan(metrics['analysis_alt_120-300km_all']['rmse'])
     assert metrics['analysis_alt_300-500km_all']['n'] == 2
+    assert metrics['analysis_alt_120-500km_all']['n'] == 6
+    assert metrics['analysis_alt_120-500km_all']['bias'] == 0.0
     assert not any('120-200km' in key or '200-300km' in key
                    for key in metrics)
 
     bootstrap = _compute_stratified_bootstrap(
         altitude=alt,
         longitude=np.zeros_like(alt),
-        rel_hour=np.array([6.0, 7.0, 8.0, 9.0, 10.0, 11.0]),
+        rel_hour=np.array([6.0, 7.0, 8.0, 9.0, 0.0, 1.0]),
         observation=np.linspace(10.0, 10.5, len(alt)),
         analysis=np.linspace(10.1, 10.6, len(alt)),
         raw_iri=np.linspace(9.9, 10.4, len(alt)),
@@ -215,7 +221,9 @@ def test_stratified_metrics_and_bootstrap_share_two_height_bins():
     )
     assert set(bootstrap) == {
         'alt_120-300km_day', 'alt_120-300km_all',
-        'alt_300-500km_day', 'alt_300-500km_all'}
+        'alt_300-500km_night', 'alt_300-500km_all',
+        'alt_120-500km_day', 'alt_120-500km_night',
+        'alt_120-500km_all'}
 
 
 def test_isr_requires_explicit_frozen_m2v_epoch():
