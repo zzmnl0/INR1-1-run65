@@ -36,7 +36,7 @@ from inr_modules.mdia.p0b_audit import (
 
 
 ROOT = Path(__file__).resolve().parent
-CONTRACT_PATH = ROOT / "m2w2_contracts" / "p0b_audit_contract_v1.json"
+CONTRACT_PATH = ROOT / "m2w2_contracts" / "p0b_audit_contract_v2.json"
 
 
 def test_tracked_git_status_preserves_machine_clean_and_dirty_states(tmp_path):
@@ -396,7 +396,7 @@ def test_contract_freezes_counts_identity_metadata_and_summary_lifecycle():
     assert classification["persistence_allowed"] is False
     assert classification["aggregation_allowed"] is False
     p0a = scope["P0A_ISR_contract_identity"]
-    assert len(p0a["sha256"]) == 64 and p0a["size_bytes"] == 71263
+    assert len(p0a["sha256"]) == 64 and p0a["size_bytes"] == 72835
     summary = contract["fixed_aggregation"]["summary_artifacts"]
     assert summary["manifest_self_listing_allowed"] is False
     assert summary["final_acceptance_written_exclusively_last"] is True

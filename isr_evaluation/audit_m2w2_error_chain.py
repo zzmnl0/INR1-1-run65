@@ -44,6 +44,7 @@ from inr_modules.mdia.p0b_audit import (
     P0B_AUDIT_SCHEMA_VERSION,
     P0B_BASE_ANCHOR_COMMIT,
     P0B_CACHE_COMPLETION_MARKER,
+    P0B_CONTRACT_FILENAME,
     P0B_CRITICAL_TRACKED_PATHS,
     P0B_IMPLEMENTATION_TAG,
     P0B_REQUIRED_BRANCH,
@@ -83,10 +84,10 @@ EXPECTED_PYTHON_EXECUTABLE = Path(
     r"C:\Users\12238\.conda\envs\pytorch_cpu\python.exe")
 CRITICAL_TRACKED_PATHS = P0B_CRITICAL_TRACKED_PATHS
 SOURCES = ("FY", "COSMIC")
-DEFAULT_P0B_CONTRACT = ROOT / "m2w2_contracts" / "p0b_audit_contract_v1.json"
+DEFAULT_P0B_CONTRACT = ROOT / "m2w2_contracts" / P0B_CONTRACT_FILENAME
 DEFAULT_P0A_DIRECTORY = (
     ROOT / "isr_validation_outputs"
-    / "run67-p0a-v14-epoch15-vs-v13-epoch12-isr-qav2-r1"
+    / "run67-p0a-v14-epoch15-vs-v13-epoch12-isr-qav2-r2"
 )
 PREFLIGHT_ACCEPTANCE_FILENAME = "preflight_acceptance.json"
 
@@ -266,7 +267,7 @@ def _coordinate_runtime_status(
     apex_available = importlib.util.find_spec("apexpy") is not None
     if qd_contract.get("status") != "unavailable" or apex_available:
         raise RuntimeError(
-            "P0-B v1 freezes QD as unavailable; ApexPy availability changed")
+            "P0-B v2 freezes QD as unavailable; ApexPy availability changed")
     return {
         "geographic": {
             "status": "computed",
@@ -813,7 +814,7 @@ def _validate_preflight_acceptance(
     if (marker.get("audit_schema_version") != P0B_AUDIT_SCHEMA_VERSION
             or marker.get("completion_marker") is not True
             or marker.get("status") != "preflight_pass"):
-        raise ValueError("preflight acceptance is not a completed P0-B v1 pass")
+        raise ValueError("preflight acceptance is not a completed P0-B v2 pass")
     for key, expected in (
             ("full_audit_complete", False),
             ("read_only_model_inference_executed", True),
@@ -3230,7 +3231,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--implementation-ref", default=EXPECTED_IMPLEMENTATION_TAG,
         help=argparse.SUPPRESS)
     parser.add_argument("--p0a-dir", default=str(DEFAULT_P0A_DIRECTORY),
-                        help="P0-A qav2-r1 directory (JSON contract only)")
+                        help="P0-A qav2-r2 directory (JSON contract only)")
     parser.add_argument("--p0a-contract", default=None,
                         help="Explicit P0-A contract JSON (defaults inside --p0a-dir)")
     parser.add_argument("--output-dir", required=True,

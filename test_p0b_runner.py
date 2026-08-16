@@ -20,7 +20,7 @@ from inr_modules.mdia.p0b_audit import load_p0b_contract
 
 
 ROOT = Path(__file__).resolve().parent
-CONTRACT_PATH = ROOT / "m2w2_contracts" / "p0b_audit_contract_v1.json"
+CONTRACT_PATH = ROOT / "m2w2_contracts" / "p0b_audit_contract_v2.json"
 
 
 def _digest(path: Path) -> str:

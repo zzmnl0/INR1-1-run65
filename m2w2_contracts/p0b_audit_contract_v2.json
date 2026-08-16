@@ -1,0 +1,966 @@
+{
+  "contract_id": "m2w2_p0b_audit_contract_v2",
+  "audit_schema_version": 2,
+  "status": "frozen",
+  "purpose": "Read-only M2-W2 P0-B attribution audit of the v14 candidate; this contract authorizes no training, calibration, checkpoint selection, or model mutation.",
+  "identity": {
+    "candidate_label": "v14-epoch15-development-selected",
+    "candidate_checkpoint_sha256": "655db1733498c86fcf200e284abb96e50fd546040b2fca4b83e05dd3eed32e8a",
+    "checkpoint_format_version": 14,
+    "model_domain_semantics": "hybrid_120_500_model_200_500_observation_v1",
+    "model_altitude_range_km": [
+      120.0,
+      500.0
+    ],
+    "observation_altitude_range_km": [
+      200.0,
+      500.0
+    ],
+    "date_split_sha256": "0576d83c72cbcfd5994e3afcb192429f965bf423a937f88a1db26eb09e21dbab",
+    "runtime_required_identities": [
+      "audit_code_sha256",
+      "git_head",
+      "python_environment",
+      "checkpoint_path",
+      "date_split_path",
+      "input_data_sha256",
+      "train_allowlist_identity",
+      "train_token_directory_identity",
+      "ISR_source_file_sha256",
+      "ISR_column_access_audit",
+      "coordinate_enrichment",
+      "profile_cap_status"
+    ]
+  },
+  "train_token_directory_identity_contract": {
+    "schema_version": 1,
+    "semantics": "exact_train_only_compact_token_arrays_v1",
+    "sources": ["FY", "COSMIC"],
+    "arrays_in_digest_order": [
+      "token_coords",
+      "token_values",
+      "token_profile_ids",
+      "token_ids"
+    ],
+    "array_dtypes": {
+      "token_coords": "<f4",
+      "token_values": "<f4",
+      "token_profile_ids": "<i8",
+      "token_ids": "<i8"
+    },
+    "digest_framing": "array name ASCII, NumPy dtype.str ASCII, little-endian int64 shape, then C-contiguous payload bytes",
+    "required_ledgers": [
+      "audit_contract.train_token_directory_identity",
+      "audit_contract.runtime_identities.train_token_directory_identity",
+      "manifest.train_token_directory_identity",
+      "completion_marker.train_token_directory_identity"
+    ],
+    "preflight_full_exact_equality_required": true,
+    "end_of_run_recompute_required": true
+  },
+  "version_control": {
+    "required_branch": "codex/run67-m2w2-p0b",
+    "base_anchor": {
+      "branch": "codex/run67-m2w2",
+      "git_commit": "5d5c214f4a4e461755332ec322eff1366b718dff",
+      "semantics": "immutable P0-A code anchor; the P0-B runtime HEAD must descend from it"
+    },
+    "required_implementation_tag": "m2w2-run67-p0b-audit-v2",
+    "required_implementation_tag_type": "annotated",
+    "require_head_equals_tag": true,
+    "critical_tracked_paths": [
+      "isr_evaluation/audit_m2w2_error_chain.py",
+      "isr_evaluation/summarize_m2w2_error_chain.py",
+      "m2w2_contracts/p0b_audit_contract_v2.json",
+      "inr_modules/mdia/p0b_audit.py",
+      "inr_modules/mdia/p0b_counterfactuals.py",
+      "inr_modules/mdia/checkpoint_io.py",
+      "inr_modules/mdia/fsia_model.py",
+      "inr_modules/mdia/sliding_dataset.py",
+      "inr_modules/data_managers/FY_dataloader.py",
+      "isr_evaluation/isr_loader.py",
+      "test_p0b_audit.py",
+      "test_p0b_counterfactuals.py",
+      "test_p0b_runner.py",
+      "test_p0b_summary.py",
+      "test_p0b_train_only_index.py",
+      "test_p0b_isr_column_filter.py",
+      "test_isr_loader_geometry.py"
+    ],
+    "required_clean_tracked_worktree": true,
+    "untracked_generated_artifacts_allowed": true,
+    "explicit_path_staging_only": true,
+    "git_add_all_forbidden": true,
+    "accepted_history_rewrite_forbidden": true,
+    "stage_commit_boundaries": [
+      "plan and status record",
+      "frozen P0-B audit contract and integrity helpers",
+      "P0-B counterfactual mathematics",
+      "strict train-only satellite and ISR loaders",
+      "P0-B read-only runner and runner tests",
+      "fixed P0-B summarizer and tests",
+      "P0-B attribution conclusions and plan update"
+    ],
+    "runtime_acceptance_requires": [
+      "branch",
+      "git_head",
+      "implementation_tag",
+      "implementation_tag_object_sha",
+      "head_equals_tag",
+      "critical_paths_tracked",
+      "base_anchor_is_ancestor",
+      "empty_tracked_status",
+      "source_file_sha256",
+      "train_allowlist_identity",
+      "train_token_directory_identity",
+      "ISR_column_access_audit",
+      "coordinate_enrichment",
+      "profile_cap_status"
+    ]
+  },
+  "p0a_dependency_exception": {
+    "authorized_by_user": true,
+    "authorization": "GIRO may continue in the background; P0-B may start without waiting for it.",
+    "p0a_overall_status_at_freeze": "qav2_r2_pass_fixed_observation_eligibility_pending",
+    "p0a_isr_status": "schema_v2_stratified_contract_v2_pass_hmf2_eligibility_open",
+    "p0a_isr_directory": "isr_validation_outputs/run67-p0a-v14-epoch15-vs-v13-epoch12-isr-qav2-r2",
+    "p0a_giro_status": "contract_pass_not_consumed_by_p0b",
+    "fixed_observation_eligibility_status": "pending",
+    "p0b_result_status_until_p0a_resolution": "provisional",
+    "p0c_locked": true,
+    "p0c_unlock_requires": [
+      "P0-A final acceptance including GIRO and fixed observation eligibility, unless the user issues a later explicit waiver",
+      "P0-B contract validation",
+      "all six P0-B attribution questions assigned an allowed terminal status"
+    ]
+  },
+  "data_scope": {
+    "satellite_tokens": {
+      "sources": [
+        "FY",
+        "COSMIC"
+      ],
+      "profile_partition": "train",
+      "profile_partition_semantics": "profile representative UTC day from the frozen date split",
+      "expected_train_profile_counts": {
+        "FY": 44625,
+        "COSMIC": 56099
+      },
+      "development_profiles_allowed": false,
+      "locked_test_profiles_allowed": false,
+      "full_satellite_development_inference_allowed": false
+    },
+    "satellite_profile_index_metadata": {
+      "included_partitions": [
+        "train",
+        "development"
+      ],
+      "allowed_fields": [
+        "profile counts",
+        "date coverage",
+        "source coverage",
+        "output-boundary integrity"
+      ],
+      "access_mode": "read-only classification and aggregate of existing profile-index metadata",
+      "expected_development_profile_counts": {
+        "FY": 11591,
+        "COSMIC": 13924
+      },
+      "development_density_values_allowed": false,
+      "development_model_inference_allowed": false,
+      "assimilation_token_effect": "none; all assimilation tokens remain train-only",
+      "locked_test_classification_metadata": {
+        "allowed_fields": [
+          "profile_id",
+          "pass_profile",
+          "representative_time",
+          "date_code",
+          "output_start",
+          "output_end",
+          "kept_points"
+        ],
+        "purpose": "transient partition classification, output-boundary integrity validation, and exclusion only",
+        "persistence_allowed": false,
+        "aggregation_allowed": false,
+        "density_values_allowed": false,
+        "model_inference_allowed": false
+      }
+    },
+    "ISR_queries": {
+      "stations": [
+        "Jicamarca",
+        "PokerFlat"
+      ],
+      "included_date_partitions": [
+        "train",
+        "development"
+      ],
+      "excluded_date_partitions": [
+        "locked_test"
+      ],
+      "expected_finite_query_counts": {
+        "train": 141223,
+        "development": 34438
+      },
+      "query_mask": "finite ISR density and finite model coordinates within 120--500 km",
+      "locked_test_exclusion_stage": "timestamp metadata may be read only to classify UTC columns; locked-test density columns are excluded before materialization, model query, token lookup, cache creation, or aggregation",
+      "restricted_mixed_file_identity": {
+        "schema_version": 1,
+        "declared_whole_file_sha256_source": "P0-A ISR input-file declaration",
+        "whole_file_sha256_recompute_from_hdf_bytes_allowed": false,
+        "whole_file_size_stat_allowed": true,
+        "materialized_allowed_content_identity_required": true,
+        "materialized_allowed_content_schema": "isr_allowed_materialized_content_v1",
+        "materialized_allowed_content_exact_fields": [
+          "schema",
+          "path",
+          "sha256",
+          "framed_array_count",
+          "allowed_time_column_count"
+        ],
+        "materialized_allowed_content_digest_framing": "SHA256 over the schema prefix and ordered length-framed arrays; each frame binds logical name, NumPy dtype.str, shape, C order, and C-contiguous payload bytes",
+        "materialized_allowed_content_scope": [
+          "allowed timestamp values",
+          "allowed 2-D dataset columns",
+          "actually used static geometry arrays"
+        ],
+        "locked_or_excluded_values_in_content_identity_allowed": false,
+        "station_and_global_path_sorted_ledgers_required": true
+      }
+    },
+    "P0A_ISR_contract_identity": {
+      "source_directory": "isr_validation_outputs/run67-p0a-v14-epoch15-vs-v13-epoch12-isr-qav2-r2",
+      "required_file": "isr_evaluation_contract.json",
+      "sha256": "a0ff7bd44888e2c1aa8df57f3339dc00c2d208c0aab6ecec6d55026f9134c399",
+      "size_bytes": 72835,
+      "access_mode": "qav2_JSON_contract_identity_only_no_NPZ_or_peak_cache_v1",
+      "allowed_fields": [
+        "evaluation_schema_version",
+        "candidate checkpoint identity",
+        "date-split identity",
+        "ISR input-file identities",
+        "token partition declaration"
+      ],
+      "numeric_output_join_allowed": false,
+      "npz_or_peak_cache_read_allowed": false
+    },
+    "external_outputs_forbidden": [
+      "locked-test outputs",
+      "M2-O outputs"
+    ]
+  },
+  "partitioning": {
+    "format": "npz",
+    "allow_pickle": false,
+    "compression": "numpy savez_compressed",
+    "query_batch_size": 256,
+    "partition_key": [
+      "station",
+      "date_utc",
+      "batch_id"
+    ],
+    "path_pattern": "batches/{station}/{date_utc}/batch_{batch_id:06d}_{table}.npz",
+    "tables_per_partition": [
+      "query",
+      "token",
+      "edge"
+    ],
+    "completion_semantics": "write all NPZ artifacts and summaries first; atomically write the contract-listed completion marker last",
+    "cache_completion_marker": "p0b_cache_acceptance.json",
+    "final_completion_marker": "p0b_audit_acceptance.json"
+  },
+  "output_lifecycle": {
+    "default_output_directory": "m2w2_artifacts/p0b_error_chain/run67-p0b-v14-readonly-audit-r2",
+    "start_precondition": "target directory must not exist",
+    "full_audit_precondition": "an explicit completed preflight_acceptance.json bound to the identical implementation tag object, HEAD, checkpoint, P0-A/P0-B/date-split identities, query/profile counts, coordinate/profile-cap state, source provenance, and Python environment",
+    "preflight_acceptance_filename": "preflight_acceptance.json",
+    "preflight_directory_reuse_as_full_output_forbidden": true,
+    "overwrite_allowed": false,
+    "failed_directory_policy": "preserve and permanently retire the failed directory",
+    "retry_policy": "only an explicitly authorized new revision directory may be used",
+    "preflight_probe": {
+      "stations": ["Jicamarca", "PokerFlat"],
+      "query_splits": ["train", "development"],
+      "altitude_bands_km": [[120.0, 200.0], [200.0, 300.0], [300.0, 500.0]],
+      "final_band_upper_inclusive": true,
+      "max_queries_per_cell": 32,
+      "cost_class": "strict_full_registry_and_train_token_index_infrastructure_gate_not_lightweight",
+      "requires_full_isr_query_registry_rebuild": true,
+      "requires_full_train_only_compact_token_directories": true,
+      "cost_risk_note": "the 12 inference probes are small, but their prerequisite ISR registry and FY/COSMIC train-only compact indexes have full-scope I/O and memory cost",
+      "numeric_predictions_persisted": false,
+      "npz_written": false,
+      "required_paths": ["M00", "M10", "M01", "M11", "no_token", "counterfactuals", "schema", "closure"],
+      "activation_requirements": {
+        "positive_localized_precision_edge_sources": ["FY", "COSMIC"],
+        "minimum_effective_joint_queries": 1,
+        "minimum_valid_dominant_profile_queries_per_source": 1,
+        "minimum_positive_localized_precision_edges_per_height_deletion_band": 1
+      }
+    }
+  },
+  "cache_schema": {
+    "cache_schema_version": 1,
+    "format": "npz",
+    "allow_pickle": false,
+    "tables": {
+      "query": {
+      "row_unit": "one finite station-time-height ISR query",
+      "primary_key": [
+        "query_id"
+      ],
+      "required_fields": [
+        "query_id",
+        "sample_key",
+        "station",
+        "date_utc",
+        "batch_id",
+        "query_profile_id",
+        "timestamp_unix",
+        "query_split",
+        "latitude_deg",
+        "longitude_deg",
+        "altitude_km",
+        "relative_hour",
+        "local_time_hour",
+        "aacgm_latitude_deg",
+        "aacgm_mlt_hour",
+        "cos_sza",
+        "kp",
+        "f107",
+        "isr_log10_ne",
+        "raw_iri_log10_ne",
+        "M00_log10_ne",
+        "M10_log10_ne",
+        "M01_log10_ne",
+        "M11_log10_ne",
+        "no_token_log10_ne",
+        "isolated_increment_FY_dex",
+        "isolated_increment_COSMIC_dex",
+        "joint_update_FY_dex",
+        "joint_update_COSMIC_dex",
+        "joint_increment_dex",
+        "raw_coverage_code",
+        "coverage_code",
+        "FY_token_count",
+        "FY_unique_profile_count",
+        "FY_unlocalized_precision_sum",
+        "FY_localized_precision_sum",
+        "FY_token_neff",
+        "FY_profile_neff",
+        "FY_max_profile_precision_share",
+        "predictive_nis_unlocalized_FY",
+        "predictive_nis_unlocalized_FY_dof",
+        "COSMIC_token_count",
+        "COSMIC_unique_profile_count",
+        "COSMIC_unlocalized_precision_sum",
+        "COSMIC_localized_precision_sum",
+        "COSMIC_token_neff",
+        "COSMIC_profile_neff",
+        "COSMIC_max_profile_precision_share",
+        "predictive_nis_unlocalized_COSMIC",
+        "predictive_nis_unlocalized_COSMIC_dof",
+        "predictive_nis_unlocalized_joint",
+        "predictive_nis_unlocalized_joint_dof",
+        "CF_drop_200_250_log10_ne",
+        "CF_drop_250_300_log10_ne",
+        "CF_drop_300_400_log10_ne",
+        "CF_drop_400_500_log10_ne",
+        "CF_duplicate_FY_dominant_profile_log10_ne",
+        "CF_duplicate_COSMIC_dominant_profile_log10_ne",
+        "CF_duplicate_both_dominant_profiles_log10_ne",
+        "FY_dominant_profile_id",
+        "COSMIC_dominant_profile_id",
+        "FY_dominant_profile_valid",
+        "COSMIC_dominant_profile_valid"
+      ],
+      "dtypes": {
+        "query_id": "int64",
+        "sample_key": "U64",
+        "station": "U16",
+        "date_utc": "U8",
+        "batch_id": "int64",
+        "query_profile_id": "int64",
+        "timestamp_unix": "int64",
+        "query_split": "U11",
+        "latitude_deg": "float32",
+        "longitude_deg": "float32",
+        "altitude_km": "float32",
+        "relative_hour": "float32",
+        "local_time_hour": "float32",
+        "aacgm_latitude_deg": "float32",
+        "aacgm_mlt_hour": "float32",
+        "cos_sza": "float32",
+        "kp": "float32",
+        "f107": "float32",
+        "isr_log10_ne": "float32",
+        "raw_iri_log10_ne": "float32",
+        "M00_log10_ne": "float32",
+        "M10_log10_ne": "float32",
+        "M01_log10_ne": "float32",
+        "M11_log10_ne": "float32",
+        "no_token_log10_ne": "float32",
+        "isolated_increment_FY_dex": "float32",
+        "isolated_increment_COSMIC_dex": "float32",
+        "joint_update_FY_dex": "float32",
+        "joint_update_COSMIC_dex": "float32",
+        "joint_increment_dex": "float32",
+        "raw_coverage_code": "U12",
+        "coverage_code": "U12",
+        "FY_token_count": "int64",
+        "FY_unique_profile_count": "int64",
+        "FY_unlocalized_precision_sum": "float32",
+        "FY_localized_precision_sum": "float32",
+        "FY_token_neff": "float32",
+        "FY_profile_neff": "float32",
+        "FY_max_profile_precision_share": "float32",
+        "predictive_nis_unlocalized_FY": "float32",
+        "predictive_nis_unlocalized_FY_dof": "int64",
+        "COSMIC_token_count": "int64",
+        "COSMIC_unique_profile_count": "int64",
+        "COSMIC_unlocalized_precision_sum": "float32",
+        "COSMIC_localized_precision_sum": "float32",
+        "COSMIC_token_neff": "float32",
+        "COSMIC_profile_neff": "float32",
+        "COSMIC_max_profile_precision_share": "float32",
+        "predictive_nis_unlocalized_COSMIC": "float32",
+        "predictive_nis_unlocalized_COSMIC_dof": "int64",
+        "predictive_nis_unlocalized_joint": "float32",
+        "predictive_nis_unlocalized_joint_dof": "int64",
+        "CF_drop_200_250_log10_ne": "float32",
+        "CF_drop_250_300_log10_ne": "float32",
+        "CF_drop_300_400_log10_ne": "float32",
+        "CF_drop_400_500_log10_ne": "float32",
+        "CF_duplicate_FY_dominant_profile_log10_ne": "float32",
+        "CF_duplicate_COSMIC_dominant_profile_log10_ne": "float32",
+        "CF_duplicate_both_dominant_profiles_log10_ne": "float32",
+        "FY_dominant_profile_id": "int64",
+        "COSMIC_dominant_profile_id": "int64",
+        "FY_dominant_profile_valid": "bool",
+        "COSMIC_dominant_profile_valid": "bool"
+      },
+      "string_storage": "fixed-width Unicode arrays; object arrays are forbidden"
+    },
+      "token": {
+      "row_unit": "one unique source-profile-token identity within a batch",
+      "primary_key": [
+        "token_row_id"
+      ],
+      "anti_duplicate_key": [
+        "source",
+        "profile_id",
+        "token_id"
+      ],
+      "required_fields": [
+        "token_row_id",
+        "station",
+        "date_utc",
+        "batch_id",
+        "source",
+        "profile_id",
+        "token_id",
+        "profile_split",
+        "latitude_deg",
+        "longitude_deg",
+        "altitude_km",
+        "relative_hour",
+        "observation_log10_ne",
+        "background_log10_ne"
+      ],
+      "dtypes": {
+        "token_row_id": "int64",
+        "station": "U16",
+        "date_utc": "U8",
+        "batch_id": "int64",
+        "source": "U6",
+        "profile_id": "int64",
+        "token_id": "int64",
+        "profile_split": "U5",
+        "latitude_deg": "float32",
+        "longitude_deg": "float32",
+        "altitude_km": "float32",
+        "relative_hour": "float32",
+        "observation_log10_ne": "float32",
+        "background_log10_ne": "float32"
+      }
+    },
+      "edge": {
+      "row_unit": "one unique query-token relation in the unmodified production payload",
+      "foreign_keys": {
+        "query_id": "query.query_id",
+        "token_row_id": "token.token_row_id"
+      },
+      "anti_duplicate_key": [
+        "query_id",
+        "token_row_id"
+      ],
+      "required_fields": [
+        "station",
+        "date_utc",
+        "batch_id",
+        "query_id",
+        "token_row_id",
+        "source",
+        "innovation_dex",
+        "r_variance_dex2",
+        "representativeness_weight",
+        "localization_weight",
+        "unlocalized_precision",
+        "localized_precision",
+        "prior_predictive_variance_dex2",
+        "r_standardized_innovation_sq",
+        "predictive_diagonal_nis",
+        "localized_innovation_energy",
+        "gain_joint",
+        "gain_isolated",
+        "contribution_joint_dex",
+        "contribution_isolated_dex",
+        "space_distance_km",
+        "time_distance_hours"
+      ],
+      "dtypes": {
+        "station": "U16",
+        "date_utc": "U8",
+        "batch_id": "int64",
+        "query_id": "int64",
+        "token_row_id": "int64",
+        "source": "U6",
+        "innovation_dex": "float32",
+        "r_variance_dex2": "float32",
+        "representativeness_weight": "float32",
+        "localization_weight": "float32",
+        "unlocalized_precision": "float32",
+        "localized_precision": "float32",
+        "prior_predictive_variance_dex2": "float32",
+        "r_standardized_innovation_sq": "float32",
+        "predictive_diagonal_nis": "float32",
+        "localized_innovation_energy": "float32",
+        "gain_joint": "float32",
+        "gain_isolated": "float32",
+        "contribution_joint_dex": "float32",
+        "contribution_isolated_dex": "float32",
+        "space_distance_km": "float32",
+        "time_distance_hours": "float32"
+      }
+      }
+    }
+  },
+  "mode_semantics": {
+    "M00": "P0-B Background with no Analysis observations, evaluated at each raw finite ISR train/development query",
+    "no_token": "an actual forward pass with both observation payloads absent; must be bitwise identical to M00",
+    "M10": "FY-only isolated solve using the same Background, query anomalies, FY innovation, and FY precision as the joint forward",
+    "M01": "COSMIC-only isolated solve using the same Background, query anomalies, COSMIC innovation, and COSMIC precision as the joint forward",
+    "M11": "joint FY+COSMIC solve using the frozen v14 equation and train-only P0-B audit tokens; it is an attribution diagnostic and must never be presented as the P0-A formal candidate value",
+    "isolated_increment_FY_dex": "M10-M00",
+    "isolated_increment_COSMIC_dex": "M01-M00",
+    "joint_update_FY_dex": "FY contribution solved with the M11 joint system; it is not M10-M00",
+    "joint_update_COSMIC_dex": "COSMIC contribution solved with the M11 joint system; it is not M01-M00",
+    "joint_increment_dex": "M11-M00 = joint_update_FY_dex + joint_update_COSMIC_dex",
+    "coverage_codes": [
+      "no_token",
+      "FY_only",
+      "COSMIC_only",
+      "joint"
+    ],
+    "raw_coverage_code": "source presence is determined by production-payload token_count > 0, before any precision test",
+    "coverage_code": "effective source presence is determined by localized_precision_sum > 0; this is the update-capable coverage used in attribution",
+    "zero_localized_precision_semantics": "raw_coverage_code may show a source while coverage_code does not; such queries are low/zero-gain candidates, not true no-observation payloads"
+  },
+  "precision_innovation_gain_semantics": {
+    "r_variance_dex2": "the frozen source observation variance before localization",
+    "unlocalized_precision": "valid * representativeness_weight / r_variance_dex2",
+    "localized_precision": "unlocalized_precision * localization_weight; this equals the v14 production precision",
+    "profile_cap_status": "not_applicable_in_v14",
+    "capped_precision_reporting": "forbidden; no profile cap exists in the audited checkpoint",
+    "r_standardized_innovation_sq": "innovation_dex^2 / (r_variance_dex2 / representativeness_weight), without localization",
+    "prior_predictive_variance_dex2": "sum of squared observation ensemble anomalies divided by N-1, without localization",
+    "predictive_diagonal_nis": "innovation_dex^2 / (prior_predictive_variance_dex2 + r_variance_dex2 / representativeness_weight), without localization",
+    "predictive_nis_unlocalized_formula": "d^T P d - (Y^T P d)^T ((N-1)I + Y^T P Y)^-1 (Y^T P d)",
+    "predictive_nis_unlocalized_precision": "P is the unlocalized diagonal-R precision representativeness_weight / r_variance_dex2 on valid tokens; localization_weight is excluded",
+    "predictive_nis_unlocalized_modes": {
+      "FY": "use FY tokens only",
+      "COSMIC": "use COSMIC tokens only",
+      "joint": "concatenate FY and COSMIC tokens before constructing the single joint system"
+    },
+    "predictive_nis_unlocalized_dof": "number of tokens in the named mode with unlocalized diagonal-R precision > 0; only predictive_nis_unlocalized/dof is a per-dof diagnostic",
+    "predictive_nis_naming_guard": "predictive_diagonal_nis and r_standardized_innovation_sq are per-edge diagnostics and are not the complete query-level predictive NIS; no localization-weighted quantity may be named NIS",
+    "localized_innovation_energy": "localization_weight * r_standardized_innovation_sq; this field must never be called NIS",
+    "gain_joint": "edge gain from the M11 joint-system Cholesky solve",
+    "gain_isolated": "edge gain recomputed from the corresponding M10 or M01 source-only system",
+    "closure": [
+      "sum(edge contribution_joint_dex by query and source) equals the matching joint_update source field",
+      "sum(edge contribution_isolated_dex by query and source) equals the matching isolated increment field"
+    ]
+  },
+  "precision_statistics": {
+    "token_neff": "(sum token localized_precision)^2 / sum(token localized_precision^2)",
+    "profile_precision": "sum token localized_precision within query x source x profile",
+    "profile_neff": "(sum profile_precision)^2 / sum(profile_precision^2)",
+    "max_profile_precision_share": "max(profile_precision) / sum(profile_precision)",
+    "dominant_profile_tie_break": "lowest integer profile_id",
+    "zero_precision_result": {
+      "neff": 0.0,
+      "max_profile_precision_share": 0.0,
+      "dominant_profile_id_internal": null,
+      "dominant_profile_id_npz": -1,
+      "dominant_profile_valid_npz": false,
+      "storage_semantics": "NPZ forbids object arrays; -1 is valid only when the paired boolean valid field is false"
+    }
+  },
+  "counterfactuals": {
+    "solver_semantics": "rebuild source covariance and RHS from original observation anomalies, innovation, and modified precision multipliers, then solve again; subtracting fixed original gain contributions is forbidden",
+    "height_deletion": {
+      "sources_modified": [
+        "FY",
+        "COSMIC"
+      ],
+      "bands": [
+        {
+          "name": "drop_200_250",
+          "lower_km": 200.0,
+          "upper_km": 250.0,
+          "lower_inclusive": true,
+          "upper_inclusive": false
+        },
+        {
+          "name": "drop_250_300",
+          "lower_km": 250.0,
+          "upper_km": 300.0,
+          "lower_inclusive": true,
+          "upper_inclusive": false
+        },
+        {
+          "name": "drop_300_400",
+          "lower_km": 300.0,
+          "upper_km": 400.0,
+          "lower_inclusive": true,
+          "upper_inclusive": false
+        },
+        {
+          "name": "drop_400_500",
+          "lower_km": 400.0,
+          "upper_km": 500.0,
+          "lower_inclusive": true,
+          "upper_inclusive": true
+        }
+      ]
+    },
+    "duplicate_profile": {
+      "selection_unit": "query x source",
+      "selected_profile": "profile with maximum summed localized_precision",
+      "tie_break": "lowest integer profile_id",
+      "operation": "multiply all original precision-bearing edges of the selected profile by 2, representing one exact duplicate",
+      "variants": [
+        "FY_dominant_profile_only",
+        "COSMIC_dominant_profile_only",
+        "both_sources_each_dominant_profile"
+      ],
+      "edge_table_rule": "the production edge table remains deduplicated; duplication exists only as a counterfactual multiplier and query output"
+    }
+  },
+  "fixed_aggregation": {
+    "summary_schema_version": 2,
+    "dimensions": [
+      "station",
+      "query_split",
+      "MLT_3h",
+      "solar_regime",
+      "query_altitude_band",
+      "Kp_activity",
+      "coverage_code"
+    ],
+    "derived_long_tables": {
+      "query_regime": "one row per query for IRI/M00/M10/M01/M11, counterfactual, ISR-error, and low-altitude diagnostics; it has no source dimension",
+      "query_source": "two derived rows per query labelled FY and COSMIC for source-specific token, profile, precision, N_eff, innovation, gain, isolated increment, and joint-source update diagnostics",
+      "query_joint": "one derived row per query labelled joint only for joint predictive NIS, M11-M00, and joint counterfactual diagnostics"
+    },
+    "MLT_edges_hour": [
+      0.0,
+      3.0,
+      6.0,
+      9.0,
+      12.0,
+      15.0,
+      18.0,
+      21.0,
+      24.0
+    ],
+    "query_altitude_edges_km": [
+      120.0,
+      200.0,
+      250.0,
+      300.0,
+      400.0,
+      500.0
+    ],
+    "Kp_edges": [
+      0.0,
+      2.0,
+      4.0,
+      9.0
+    ],
+    "profile_equal_weighting": {
+      "enabled": true,
+      "profile_id_field": "query_profile_id",
+      "within_profile_signed_reducer": "median",
+      "within_profile_nonnegative_reducer": "median",
+      "within_profile_count_semantics": "raw_query_count",
+      "absolute_transform_order": "absolute_value_per_query_before_within_profile_nonnegative_reduction",
+      "nonnegative_metric_families": [
+        "joint_increment_abs",
+        "joint_source_update_abs",
+        "height_deletion_abs_delta",
+        "duplicate_profile_abs_delta"
+      ]
+    },
+    "edge_diagnostics": {
+      "innovation_center": "median",
+      "innovation_scale": "1.4826_mad",
+      "tail_sigma": 3.0,
+      "zero_mad_tail_rule": "tail_if_abs_deviation_gt_zero",
+      "joint_source_sign_epsilon_dex": 0.005,
+      "min_vertical_pairs_per_profile": 3,
+      "min_profiles_for_vertical_correlation": 30,
+      "token_identity_key_fields": ["source", "profile_id", "token_id"],
+      "duplicate_token_payload_fields": [
+        "profile_split",
+        "latitude_deg",
+        "longitude_deg",
+        "altitude_km",
+        "relative_hour",
+        "observation_log10_ne",
+        "background_log10_ne",
+        "innovation_dex"
+      ],
+      "token_height_interval_rule": "positive_adjacent_unique_altitude_spacing_within_source_profile_then_profile_median",
+      "vertical_innovation_correlation_rule": "pearson_adjacent_unique_altitude_innovation_within_profile_then_profile_median",
+      "same_altitude_innovation_reducer": "median",
+      "innovation_population": "per_satellite_profile_median_then_cell_robust_statistics",
+      "profile_cap_status": "not_applicable_in_v14"
+    },
+    "solar_regime": {
+      "source_field": "cos_sza",
+      "day_rule": "cos_sza>0",
+      "twilight_rule": "cos(108deg)<=cos_sza<=0",
+      "night_rule": "cos_sza<cos(108deg)",
+      "cos_108deg": -0.30901699437494734
+    },
+    "required_counts": [
+      "query_points",
+      "station_time_profiles",
+      "unique_satellite_profiles"
+    ],
+    "summary_artifacts": {
+      "manifest_artifacts_in_order": [
+        "query_regime_summary.csv",
+        "query_regime_summary.json",
+        "query_source_summary.csv",
+        "query_source_summary.json",
+        "query_joint_summary.csv",
+        "query_joint_summary.json",
+        "p0b_six_questions.json"
+      ],
+      "manifest_filename": "p0b_summary_manifest.json",
+      "manifest_self_listing_allowed": false,
+      "final_acceptance_artifacts_in_order": [
+        "query_regime_summary.csv",
+        "query_regime_summary.json",
+        "query_source_summary.csv",
+        "query_source_summary.json",
+        "query_joint_summary.csv",
+        "query_joint_summary.json",
+        "p0b_six_questions.json",
+        "p0b_summary_manifest.json"
+      ],
+      "final_acceptance_filename": "p0b_audit_acceptance.json",
+      "final_acceptance_written_exclusively_last": true
+    },
+    "independence_rule": "edge or token count must never be reported as the independent sample count",
+    "Q6_until_fixed_observation_eligibility": "insufficient_evidence; no common-valid model mask may upgrade Q6 while the observation-only eligibility contract is pending"
+  },
+  "decision_rules": {
+    "independent_unit": "station-time profile with date block retained; query, token, edge, and height rows are nested technical observations",
+    "eligible_cell_min_station_time_profiles": 30,
+    "eligible_cell_min_unique_dates": 2,
+    "eligible_evidence_min_defined_station_time_profiles": 30,
+    "eligible_evidence_min_defined_unique_dates": 2,
+    "material_bias_or_increment_abs_dex": 0.02,
+    "low_gain_abs_joint_increment_dex": 0.005,
+    "Q1_bias_origin": {
+      "material_abs_dex_gte": 0.02,
+      "allowed_origin_labels": [
+        "raw_IRI_preexisting",
+        "background_M00_shift",
+        "FY_isolated_increment",
+        "COSMIC_isolated_increment",
+        "joint_interaction",
+        "none_above_threshold"
+      ],
+      "transitions": {
+        "raw_IRI_preexisting": "cell abs median(raw_iri_log10_ne - isr_log10_ne)",
+        "background_M00_shift": "cell abs median(M00_log10_ne - raw_iri_log10_ne)",
+        "FY_isolated_increment": "cell abs median(M10_log10_ne - M00_log10_ne)",
+        "COSMIC_isolated_increment": "cell abs median(M01_log10_ne - M00_log10_ne)",
+        "joint_interaction": "cell abs median((M11_log10_ne-M00_log10_ne) - (M10_log10_ne-M00_log10_ne) - (M01_log10_ne-M00_log10_ne))"
+      },
+      "terminal_logic": "supported for exactly one material origin label across eligible cells; mixed for multiple or cell-dependent material labels; not_supported when none is material; insufficient_evidence when no eligible cell"
+    },
+    "Q2_increment_consistency": {
+      "material_abs_increment_dex_gte": 0.005,
+      "direction_consistency_fraction_gte": 0.75,
+      "low_gain_fraction_gte": 0.5,
+      "source_cancellation_fraction_gte": 0.5,
+      "closure_atol": 5e-06,
+      "closure_rtol": 5e-06,
+      "direction_reference": "sign of M11-M00 versus sign of the localized-precision-weighted FY+COSMIC innovation, reduced with equal station-time-profile weight",
+      "closure_role": "hard QA guard only; closure is not attribution evidence",
+      "low_gain_and_source_cancellation_role": "explanatory diagnostics for small net increments; they do not decide direction-consistency status",
+      "defined_evidence_gate": "direction, raw/effective low-gain, and source-cancellation evidence are each eligible only with at least 30 defined station-time profiles across at least 2 unique dates",
+      "terminal_logic": "among material eligible cells, direction evidence below the defined profile/date gate is ineligible; supported when every eligible direction cell meets the frozen threshold; not_supported when every eligible direction cell fails; mixed when eligible cells disagree or material cells mix eligible and ineligible direction evidence; insufficient_evidence when there is no material eligible cell or no eligible direction evidence"
+    },
+    "profile_concentration": {
+      "max_profile_precision_share_gte": 0.5,
+      "profile_neff_over_token_neff_lte": 0.25
+    },
+    "duplicate_profile_sensitivity": {
+      "median_abs_delta_dex_gte": 0.02,
+      "p90_abs_delta_dex_gte": 0.05
+    },
+    "height_deletion_sensitivity": {
+      "median_abs_delta_dex_gte": 0.02,
+      "p90_abs_delta_dex_gte": 0.05
+    },
+    "Q3_profile_precision_concentration": {
+      "defined_evidence_gate": "concentration and duplicate-profile evidence are each eligible only with at least 30 defined station-time profiles across at least 2 unique dates; either failure makes the cell ineligible",
+      "terminal_logic": "supported when concentration and duplicate-profile sensitivity co-occur in at least one eligible cell and neither is contradicted in another eligible cell; mixed when only one flag occurs or co-occurrence is cell/source dependent; not_supported when neither flag occurs in any eligible cell; insufficient_evidence when no eligible cell"
+    },
+    "Q5_low_altitude_drift": {
+      "query_altitude_lower_km_inclusive": 120.0,
+      "query_altitude_upper_km_exclusive": 200.0,
+      "material_abs_M11_minus_M00_dex_gte": 0.02,
+      "height_deletion_sensitive_if_median_or_p90_threshold_met": true,
+      "background_path_material_abs_M00_bias_dex_gte": 0.02,
+      "routing": {
+        "analysis_supported_background_not_material": "V_low_AN",
+        "analysis_not_supported_background_material": "V_low_BG_or_IRI_anchor",
+        "analysis_supported_background_material": "mixed_background_and_analysis",
+        "analysis_not_supported_background_not_material": "deprioritize_V_low",
+        "insufficient_evidence": "insufficient_evidence"
+      },
+      "terminal_logic": "supported when material low-altitude M11-M00 drift and high-altitude-token deletion sensitivity co-occur in an eligible cell without contradiction; mixed when only one occurs or cells disagree; not_supported when neither occurs in any eligible cell; insufficient_evidence when no eligible low-altitude cell"
+    },
+    "Q4_maximum_terminal_status": "insufficient_evidence",
+    "Q6_required_terminal_status_until_observation_eligibility": "insufficient_evidence",
+    "threshold_mutation_after_cache_start_allowed": false
+  },
+  "coordinate_enrichment": {
+    "geographic": {
+      "status": "required",
+      "fields": ["latitude_deg", "longitude_deg", "local_time_hour"]
+    },
+    "aacgm": {
+      "status": "required",
+      "package": "aacgmv2",
+      "version": "2.7.0",
+      "method": "ALLOWTRACE",
+      "fields": ["aacgm_latitude_deg", "aacgm_mlt_hour"]
+    },
+    "qd": {
+      "status": "unavailable",
+      "package": "apexpy",
+      "reason": "not installed in the frozen pytorch_cpu P0-B environment",
+      "proxy_substitution_allowed": false
+    },
+    "fixed_aggregation_time_coordinate": "aacgm_mlt_hour",
+    "missing_coordinate_policy": "required AACGM values must be finite; QD is explicitly unavailable and geographic or AACGM latitude may not be relabeled as QD"
+  },
+  "six_questions": {
+    "allowed_terminal_statuses": [
+      "supported",
+      "not_supported",
+      "mixed",
+      "insufficient_evidence",
+      "not_applicable"
+    ],
+    "questions": [
+      {
+        "id": "Q1_bias_origin",
+        "text": "Does the bias first appear in M00, a specific source, or a specific condition?",
+        "initial_status": "pending",
+        "interpretation_boundary": "Locates the numerical stage at which median bias becomes material within the audited ISR cells.",
+        "supports": "Retrospective stage-level attribution among Raw IRI, M00, isolated FY/COSMIC increments, and joint interaction.",
+        "does_not_support": "Does not establish FY or COSMIC sensor bias, causal observation error, or out-of-sample correction benefit."
+      },
+      {
+        "id": "Q2_increment_consistency",
+        "text": "Is the M11 increment direction consistent with innovation, precision, and gain?",
+        "initial_status": "pending",
+        "interpretation_boundary": "Tests algebraic direction consistency and separately gated low-gain/cancellation mechanisms on defined station-time profiles.",
+        "supports": "Whether frozen v14 increments align with localized-precision-weighted innovations in eligible cells.",
+        "does_not_support": "Does not show that an update is closer to truth, causally beneficial, or optimally localized."
+      },
+      {
+        "id": "Q3_profile_precision_concentration",
+        "text": "Does within-profile token count dominate total precision or update magnitude?",
+        "initial_status": "pending",
+        "interpretation_boundary": "Tests whether profile-level precision concentration co-occurs with sensitivity to one exact duplicate under frozen v14.",
+        "supports": "Retrospective evidence that profile multiplicity can dominate effective precision or update magnitude.",
+        "does_not_support": "Does not identify the physical R covariance, prove raw duplicate records, or calibrate a profile cap."
+      },
+      {
+        "id": "Q4_source_latitude_separation",
+        "text": "Can source coverage be separated from latitude and magnetic-coordinate effects?",
+        "initial_status": "pending",
+        "interpretation_boundary": "Two fixed stations cannot separate source coverage from geographic or magnetic-latitude effects.",
+        "supports": "Only descriptive source and coordinate stratification.",
+        "does_not_support": "Does not estimate causal source, latitude, or topology effects."
+      },
+      {
+        "id": "Q5_low_altitude_drift",
+        "text": "Does the 120--200 km output drift with high-altitude token coverage, innovation, or counterfactual removal?",
+        "initial_status": "pending",
+        "interpretation_boundary": "Separates 120--200 km Analysis coupling to 200--500 km tokens from material M00/Raw IRI background error.",
+        "supports": "Routing evidence for V_low_AN, V_low_BG_or_IRI_anchor, mixed, or deprioritized follow-up.",
+        "does_not_support": "Does not validate a low-altitude correction, change the no-satellite-target status of 120--200 km, or identify the causal anchor."
+      },
+      {
+        "id": "Q6_peak_persistence",
+        "text": "Does the hmF2 problem persist after explicit boundary, weak-peak, and ambiguous-peak accounting?",
+        "initial_status": "pending",
+        "interpretation_boundary": "Peak persistence remains untestable until observation-only hmF2 eligibility is fixed.",
+        "supports": "Only records the unresolved eligibility dependency.",
+        "does_not_support": "Does not compare peak skill, unlock V_peak, or support a causal peak-shape claim."
+      }
+    ]
+  },
+  "acceptance": {
+    "core_numeric_fields_finite": true,
+    "no_token_bitwise_equals_M00": true,
+    "foreign_keys_valid": true,
+    "token_identity_unique_within_batch": true,
+    "query_token_edge_unique_within_batch": true,
+    "closure_atol": 5e-06,
+    "closure_rtol": 5e-06,
+    "deterministic_repeat_summary": true,
+    "artifact_sha256_and_size_required": true,
+    "json_allow_nan": false,
+    "completion_marker_written_last": true,
+    "defined_profile_and_date_gates_enforced": true,
+    "question_interpretation_boundaries_required": true,
+    "q5_dual_routing_required": true,
+    "failure_policy": "preserve the failed directory, report NO-GO, and do not restart or change the frozen contract automatically"
+  },
+  "prohibitions": [
+    "training or gradient updates",
+    "checkpoint selection",
+    "R or bias calibration from ISR",
+    "satellite full-development evaluation",
+    "locked-test density, model inference, predictions, reports, or cache reads; the only exception is the contract-enumerated transient date/profile-index classification metadata, which may not be persisted or aggregated",
+    "any M2-O output read",
+    "P0-A NPZ, peak-cache, or numeric-output join",
+    "silent coordinate fallback",
+    "overwriting P0-A or historical outputs",
+    "automatic restart, threshold change, or counterfactual redefinition",
+    "unlocking P0-C while the dependency exception remains unresolved"
+  ]
+}

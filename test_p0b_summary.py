@@ -15,7 +15,7 @@ from isr_evaluation import summarize_m2w2_error_chain as summary
 
 
 ROOT = Path(__file__).resolve().parent
-CONTRACT_PATH = ROOT / "m2w2_contracts" / "p0b_audit_contract_v1.json"
+CONTRACT_PATH = ROOT / "m2w2_contracts" / "p0b_audit_contract_v2.json"
 
 
 def _publication_context_for_inventory(inventory):
@@ -337,7 +337,7 @@ def _make_cache(tmp_path):
         for path in source_paths
     }
     runtime = {
-        "audit_schema_version": 1,
+        "audit_schema_version": p0b_audit.P0B_AUDIT_SCHEMA_VERSION,
         "status": "runtime_contract_bound",
         "frozen_p0b_contract": {
             "path": str(CONTRACT_PATH.resolve()),
@@ -383,7 +383,8 @@ def _make_cache(tmp_path):
     failure_path = cache_dir / "failure_ledger.json"
     _write_json(runtime_path, runtime)
     _write_json(failure_path, {
-        "audit_schema_version": 1, "status": "no_failures", "entries": []})
+        "audit_schema_version": p0b_audit.P0B_AUDIT_SCHEMA_VERSION,
+        "status": "no_failures", "entries": []})
 
     batch_artifacts = []
     dates = (
@@ -412,7 +413,7 @@ def _make_cache(tmp_path):
         "development": {source: 5 for source in p0b_audit.P0B_SOURCES},
     }
     manifest = {
-        "audit_schema_version": 1,
+        "audit_schema_version": p0b_audit.P0B_AUDIT_SCHEMA_VERSION,
         "status": "cache_complete_provisional_not_final_p0b_acceptance",
         "preflight_only": False,
         "checkpoint_sha256_before": contract["identity"][
@@ -1153,3 +1154,171 @@ def test_summarize_reaggregates_twice_before_any_publication(tmp_path, monkeypat
     assert calls["count"] == 2
     assert not any((cache_dir / name).exists() for name in (
         *summary.SUMMARY_FILES, summary.SUMMARY_MANIFEST, summary.FINAL_MARKER))
+
+
+def _minimal_question_rows(contract):
+    dimensions = {
+        "station": "Jicamarca",
+        "query_split": "train",
+        "MLT_3h": "[00,03)h",
+        "solar_regime": "night",
+        "query_altitude_band": "[120,200)km",
+        "Kp_activity": "[0,2)",
+        "coverage_code": "joint",
+    }
+    regime = {
+        **dimensions,
+        "station_time_profiles": 30,
+        "unique_days": 2,
+        "raw_iri_bias_median_dex": 0.0,
+        "raw_iri_rmse_dex": 0.0,
+        "M00_bias_median_dex": 0.0,
+        "M00_rmse_dex": 0.0,
+        "background_increment_median_dex": 0.0,
+        "isolated_increment_FY_median_dex": 0.0,
+        "isolated_increment_COSMIC_median_dex": 0.0,
+        "joint_interaction_median_dex": 0.0,
+    }
+    joint = {
+        **dimensions,
+        "station_time_profiles": 30,
+        "unique_days": 2,
+        "joint_increment_abs_median_dex": 0.03,
+        "direction_consistency_defined_profiles": 30,
+        "direction_consistency_defined_unique_dates": 2,
+        "direction_consistency_fraction": 1.0,
+        "raw_token_low_gain_defined_profiles": 30,
+        "raw_token_low_gain_defined_unique_dates": 2,
+        "raw_token_low_gain_profile_fraction": 1.0,
+        "effective_token_low_gain_defined_profiles": 30,
+        "effective_token_low_gain_defined_unique_dates": 2,
+        "effective_token_low_gain_profile_fraction": 1.0,
+        "source_cancellation_defined_profiles": 30,
+        "source_cancellation_defined_unique_dates": 2,
+        "source_cancellation_fraction": 1.0,
+        "drop_200_250_abs_median_dex": 0.03,
+        "drop_200_250_abs_p90_dex": 0.03,
+        "drop_250_300_abs_median_dex": 0.0,
+        "drop_250_300_abs_p90_dex": 0.0,
+        "drop_300_400_abs_median_dex": 0.0,
+        "drop_300_400_abs_p90_dex": 0.0,
+        "drop_400_500_abs_median_dex": 0.0,
+        "drop_400_500_abs_p90_dex": 0.0,
+    }
+    source = {
+        **dimensions,
+        "source": "FY",
+        "station_time_profiles": 30,
+        "unique_days": 2,
+        "queries_with_effective_tokens": 30,
+        "concentration_defined_profiles": 30,
+        "concentration_defined_unique_dates": 2,
+        "duplicate_profile_defined_profiles": 30,
+        "duplicate_profile_defined_unique_dates": 2,
+        "max_profile_precision_share_median": 0.6,
+        "profile_to_token_neff_ratio_median": 0.2,
+        "duplicate_profile_abs_median_dex": 0.03,
+        "duplicate_profile_abs_p90_dex": 0.06,
+    }
+    return regime, source, joint
+
+
+def _questions_for_rows(contract, regime, source, joint):
+    return summary._build_six_questions(
+        [regime], [source], [joint], summary.AttributionState(), contract,
+        summary._decision_thresholds(contract))
+
+
+@pytest.mark.parametrize("defined_profiles,defined_dates", [(1, 2), (30, 1)])
+def test_q2_requires_defined_profile_and_date_support(
+        defined_profiles, defined_dates):
+    contract, _ = p0b_audit.load_p0b_contract(CONTRACT_PATH)
+    regime, source, joint = _minimal_question_rows(contract)
+    joint["direction_consistency_defined_profiles"] = defined_profiles
+    joint["direction_consistency_defined_unique_dates"] = defined_dates
+    questions = _questions_for_rows(contract, regime, source, joint)
+    q2 = next(row for row in questions["questions"]
+              if row["id"] == "Q2_increment_consistency")
+    assert q2["status"] == "insufficient_evidence"
+    cell = q2["evidence"]["material_eligible_cells"][0]
+    assert cell["direction_evidence_status"] == "insufficient_evidence"
+    assert cell["direction_consistency_meets_threshold"] is None
+
+
+def test_q2_low_gain_and_cancellation_need_their_own_defined_support():
+    contract, _ = p0b_audit.load_p0b_contract(CONTRACT_PATH)
+    regime, source, joint = _minimal_question_rows(contract)
+    for prefix in ("raw_token_low_gain", "effective_token_low_gain"):
+        joint[f"{prefix}_defined_profiles"] = 1
+    joint["source_cancellation_defined_profiles"] = 1
+    questions = _questions_for_rows(contract, regime, source, joint)
+    q2 = next(row for row in questions["questions"]
+              if row["id"] == "Q2_increment_consistency")
+    cell = q2["evidence"]["material_eligible_cells"][0]
+    assert q2["status"] == "supported"
+    assert cell["raw_token_low_gain_mechanism_status"] == "insufficient_evidence"
+    assert cell["effective_token_low_gain_mechanism_status"] == "insufficient_evidence"
+    assert cell["source_cancellation_mechanism_status"] == "insufficient_evidence"
+
+
+@pytest.mark.parametrize("defined_profiles,defined_dates", [(1, 2), (30, 1)])
+def test_q3_requires_defined_profile_and_date_support(
+        defined_profiles, defined_dates):
+    contract, _ = p0b_audit.load_p0b_contract(CONTRACT_PATH)
+    regime, source, joint = _minimal_question_rows(contract)
+    source["concentration_defined_profiles"] = defined_profiles
+    source["concentration_defined_unique_dates"] = defined_dates
+    questions = _questions_for_rows(contract, regime, source, joint)
+    q3 = next(row for row in questions["questions"]
+              if row["id"] == "Q3_profile_precision_concentration")
+    assert q3["status"] == "insufficient_evidence"
+    assert q3["evidence"]["ineligible_evidence_cells"][0]["status"] == (
+        "insufficient_evidence")
+
+
+def test_defined_profile_support_does_not_count_repeated_heights():
+    acc = summary.GroupAccumulator()
+    for value in range(9):
+        acc.add_value("defined", float(value), ("Jicamarca", "20240901", 1))
+    acc.add_value("defined", 10.0, ("Jicamarca", "20240901", 2))
+    assert summary._defined_profile_support(acc, "defined") == (2, 1)
+
+
+@pytest.mark.parametrize(
+    "analysis_material,background_material,expected",
+    [
+        (True, False, "V_low_AN"),
+        (False, True, "V_low_BG_or_IRI_anchor"),
+        (True, True, "mixed_background_and_analysis"),
+        (False, False, "deprioritize_V_low"),
+    ],
+)
+def test_q5_routes_analysis_and_background_evidence_separately(
+        analysis_material, background_material, expected):
+    contract, _ = p0b_audit.load_p0b_contract(CONTRACT_PATH)
+    regime, source, joint = _minimal_question_rows(contract)
+    if not analysis_material:
+        joint["joint_increment_abs_median_dex"] = 0.0
+        joint["drop_200_250_abs_median_dex"] = 0.0
+        joint["drop_200_250_abs_p90_dex"] = 0.0
+    regime["M00_bias_median_dex"] = 0.03 if background_material else 0.0
+    questions = _questions_for_rows(contract, regime, source, joint)
+    q5 = next(row for row in questions["questions"]
+              if row["id"] == "Q5_low_altitude_drift")
+    assert q5["evidence"]["routing_status"] == expected
+
+
+def test_six_questions_publish_frozen_interpretation_boundaries(tmp_path):
+    cache_dir, contract, _, _ = _make_cache(tmp_path)
+    summary.summarize_cache(cache_dir)
+    questions = json.loads((cache_dir / "p0b_six_questions.json").read_text(
+        encoding="utf-8"))
+    assert all({
+        key: record[key]
+        for key in ("interpretation_boundary", "supports", "does_not_support")
+    } == p0b_audit.P0B_QUESTION_INTERPRETATION_BOUNDARIES[record["id"]]
+               for record in questions["questions"])
+    acceptance = json.loads((cache_dir / summary.FINAL_MARKER).read_text(
+        encoding="utf-8"))
+    assert acceptance["defined_profile_and_date_gates_enforced"] is True
+    assert acceptance["question_interpretation_boundaries_complete"] is True

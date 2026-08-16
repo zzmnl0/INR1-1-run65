@@ -21,9 +21,9 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 
 
-P0B_AUDIT_SCHEMA_VERSION = 1
-P0B_CONTRACT_ID = "m2w2_p0b_audit_contract_v1"
-P0B_CONTRACT_FILENAME = "p0b_audit_contract_v1.json"
+P0B_AUDIT_SCHEMA_VERSION = 2
+P0B_CONTRACT_ID = "m2w2_p0b_audit_contract_v2"
+P0B_CONTRACT_FILENAME = "p0b_audit_contract_v2.json"
 P0B_CACHE_COMPLETION_MARKER = "p0b_cache_acceptance.json"
 P0B_COMPLETION_MARKER = "p0b_audit_acceptance.json"
 P0B_SOURCES = ("FY", "COSMIC")
@@ -36,6 +36,70 @@ P0B_QUESTION_TERMINAL_STATUSES = (
     "insufficient_evidence",
     "not_applicable",
 )
+P0B_QUESTION_INTERPRETATION_BOUNDARIES = {
+    "Q1_bias_origin": {
+        "interpretation_boundary": (
+            "Locates the numerical stage at which median bias becomes material "
+            "within the audited ISR cells."),
+        "supports": (
+            "Retrospective stage-level attribution among Raw IRI, M00, isolated "
+            "FY/COSMIC increments, and joint interaction."),
+        "does_not_support": (
+            "Does not establish FY or COSMIC sensor bias, causal observation "
+            "error, or out-of-sample correction benefit."),
+    },
+    "Q2_increment_consistency": {
+        "interpretation_boundary": (
+            "Tests algebraic direction consistency and separately gated "
+            "low-gain/cancellation mechanisms on defined station-time profiles."),
+        "supports": (
+            "Whether frozen v14 increments align with localized-precision-weighted "
+            "innovations in eligible cells."),
+        "does_not_support": (
+            "Does not show that an update is closer to truth, causally beneficial, "
+            "or optimally localized."),
+    },
+    "Q3_profile_precision_concentration": {
+        "interpretation_boundary": (
+            "Tests whether profile-level precision concentration co-occurs with "
+            "sensitivity to one exact duplicate under frozen v14."),
+        "supports": (
+            "Retrospective evidence that profile multiplicity can dominate "
+            "effective precision or update magnitude."),
+        "does_not_support": (
+            "Does not identify the physical R covariance, prove raw duplicate "
+            "records, or calibrate a profile cap."),
+    },
+    "Q4_source_latitude_separation": {
+        "interpretation_boundary": (
+            "Two fixed stations cannot separate source coverage from geographic "
+            "or magnetic-latitude effects."),
+        "supports": "Only descriptive source and coordinate stratification.",
+        "does_not_support": (
+            "Does not estimate causal source, latitude, or topology effects."),
+    },
+    "Q5_low_altitude_drift": {
+        "interpretation_boundary": (
+            "Separates 120--200 km Analysis coupling to 200--500 km tokens from "
+            "material M00/Raw IRI background error."),
+        "supports": (
+            "Routing evidence for V_low_AN, V_low_BG_or_IRI_anchor, mixed, or "
+            "deprioritized follow-up."),
+        "does_not_support": (
+            "Does not validate a low-altitude correction, change the "
+            "no-satellite-target status of 120--200 km, or identify the causal "
+            "anchor."),
+    },
+    "Q6_peak_persistence": {
+        "interpretation_boundary": (
+            "Peak persistence remains untestable until observation-only hmF2 "
+            "eligibility is fixed."),
+        "supports": "Only records the unresolved eligibility dependency.",
+        "does_not_support": (
+            "Does not compare peak skill, unlock V_peak, or support a causal "
+            "peak-shape claim."),
+    },
+}
 P0B_HEIGHT_DELETE_BANDS = (
     ("drop_200_250", 200.0, 250.0, True, False),
     ("drop_250_300", 250.0, 300.0, True, False),
@@ -54,17 +118,17 @@ P0B_PREDICTIVE_NIS_DOF = (
     "> 0; only predictive_nis_unlocalized/dof is a per-dof diagnostic"
 )
 P0B_DEFAULT_OUTPUT_DIRECTORY = (
-    "m2w2_artifacts/p0b_error_chain/run67-p0b-v14-readonly-audit-r1"
+    "m2w2_artifacts/p0b_error_chain/run67-p0b-v14-readonly-audit-r2"
 )
 P0B_REQUIRED_BRANCH = "codex/run67-m2w2-p0b"
 P0B_BASE_ANCHOR_COMMIT = "5d5c214f4a4e461755332ec322eff1366b718dff"
-P0B_IMPLEMENTATION_TAG = "m2w2-run67-p0b-audit-v1"
+P0B_IMPLEMENTATION_TAG = "m2w2-run67-p0b-audit-v2"
 P0B_PYTHON_EXECUTABLE = Path(
     r"C:\Users\12238\.conda\envs\pytorch_cpu\python.exe")
 P0B_CRITICAL_TRACKED_PATHS = (
     "isr_evaluation/audit_m2w2_error_chain.py",
     "isr_evaluation/summarize_m2w2_error_chain.py",
-    "m2w2_contracts/p0b_audit_contract_v1.json",
+    "m2w2_contracts/p0b_audit_contract_v2.json",
     "inr_modules/mdia/p0b_audit.py",
     "inr_modules/mdia/p0b_counterfactuals.py",
     "inr_modules/mdia/checkpoint_io.py",
@@ -94,9 +158,9 @@ P0B_EXPECTED_TRAIN_PROFILE_COUNTS = {"FY": 44_625, "COSMIC": 56_099}
 P0B_EXPECTED_DEVELOPMENT_PROFILE_COUNTS = {"FY": 11_591, "COSMIC": 13_924}
 P0B_EXPECTED_FINITE_QUERY_COUNTS = {"train": 141_223, "development": 34_438}
 P0B_P0A_CONTRACT_SHA256 = (
-    "d8e26bd1f35bbe7c1911659d58a57e09e64e2432bc8adf661bd18a3d69fceb7d"
+    "a0ff7bd44888e2c1aa8df57f3339dc00c2d208c0aab6ecec6d55026f9134c399"
 )
-P0B_P0A_CONTRACT_SIZE_BYTES = 71_263
+P0B_P0A_CONTRACT_SIZE_BYTES = 72_835
 P0B_TRAIN_TOKEN_DIRECTORY_SEMANTICS = (
     "exact_train_only_compact_token_arrays_v1")
 P0B_TRAIN_TOKEN_ARRAYS = (
@@ -271,6 +335,8 @@ P0B_DECISION_RULES = {
     ),
     "eligible_cell_min_station_time_profiles": 30,
     "eligible_cell_min_unique_dates": 2,
+    "eligible_evidence_min_defined_station_time_profiles": 30,
+    "eligible_evidence_min_defined_unique_dates": 2,
     "material_bias_or_increment_abs_dex": 0.02,
     "low_gain_abs_joint_increment_dex": 0.005,
     "Q1_bias_origin": {
@@ -325,13 +391,19 @@ P0B_DECISION_RULES = {
             "explanatory diagnostics for small net increments; they do not "
             "decide direction-consistency status"
         ),
+        "defined_evidence_gate": (
+            "direction, raw/effective low-gain, and source-cancellation evidence "
+            "are each eligible only with at least 30 defined station-time "
+            "profiles across at least 2 unique dates"
+        ),
         "terminal_logic": (
-            "among material eligible cells, supported when every cell has "
-            "defined direction evidence and direction_consistency_fraction "
-            "meets the frozen threshold; not_supported when every defined cell "
-            "fails and none is undefined; mixed when cells disagree or only "
-            "some are undefined; insufficient_evidence when there is no "
-            "material eligible cell or no defined direction evidence"
+            "among material eligible cells, direction evidence below the defined "
+            "profile/date gate is ineligible; supported when every eligible "
+            "direction cell meets the frozen threshold; not_supported when every "
+            "eligible direction cell fails; mixed when eligible cells disagree "
+            "or material cells mix eligible and ineligible direction evidence; "
+            "insufficient_evidence when there is no material eligible cell or no "
+            "eligible direction evidence"
         ),
     },
     "profile_concentration": {
@@ -343,6 +415,11 @@ P0B_DECISION_RULES = {
         "p90_abs_delta_dex_gte": 0.05,
     },
     "Q3_profile_precision_concentration": {
+        "defined_evidence_gate": (
+            "concentration and duplicate-profile evidence are each eligible only "
+            "with at least 30 defined station-time profiles across at least 2 "
+            "unique dates; either failure makes the cell ineligible"
+        ),
         "terminal_logic": (
             "supported when concentration and duplicate-profile sensitivity "
             "co-occur in at least one eligible cell and neither is contradicted "
@@ -357,6 +434,17 @@ P0B_DECISION_RULES = {
         "query_altitude_upper_km_exclusive": 200.0,
         "material_abs_M11_minus_M00_dex_gte": 0.02,
         "height_deletion_sensitive_if_median_or_p90_threshold_met": True,
+        "background_path_material_abs_M00_bias_dex_gte": 0.02,
+        "routing": {
+            "analysis_supported_background_not_material": "V_low_AN",
+            "analysis_not_supported_background_material": (
+                "V_low_BG_or_IRI_anchor"),
+            "analysis_supported_background_material": (
+                "mixed_background_and_analysis"),
+            "analysis_not_supported_background_not_material": (
+                "deprioritize_V_low"),
+            "insufficient_evidence": "insufficient_evidence",
+        },
         "terminal_logic": (
             "supported when material low-altitude M11-M00 drift and "
             "high-altitude-token deletion sensitivity co-occur in an eligible "
@@ -963,7 +1051,7 @@ def validate_p0b_contract(contract: Mapping[str, Any]) -> Mapping[str, Any]:
     p0a_identity = scope.get("P0A_ISR_contract_identity", {})
     if p0a_identity.get("source_directory") != (
             "isr_validation_outputs/"
-            "run67-p0a-v14-epoch15-vs-v13-epoch12-isr-qav2-r1"):
+            "run67-p0a-v14-epoch15-vs-v13-epoch12-isr-qav2-r2"):
         raise ValueError("P0-A ISR JSON identity source drifted")
     if p0a_identity.get("access_mode") != (
             "qav2_JSON_contract_identity_only_no_NPZ_or_peak_cache_v1"):
@@ -985,11 +1073,13 @@ def validate_p0b_contract(contract: Mapping[str, Any]) -> Mapping[str, Any]:
     if dependency.get("p0c_locked") is not True:
         raise ValueError("P0-C must remain locked")
     if dependency.get("p0a_overall_status_at_freeze") != (
-            "partial_giro_pending_and_fixed_observation_eligibility_pending"):
+            "qav2_r2_pass_fixed_observation_eligibility_pending"):
         raise ValueError("P0-A dependency exception drifted")
     if dependency.get("p0a_isr_status") != (
-            "infrastructure_contract_pass_hmf2_eligibility_open"):
+            "schema_v2_stratified_contract_v2_pass_hmf2_eligibility_open"):
         raise ValueError("P0-A ISR status drifted")
+    if dependency.get("p0a_giro_status") != "contract_pass_not_consumed_by_p0b":
+        raise ValueError("P0-A GIRO status drifted")
     if dependency.get("fixed_observation_eligibility_status") != "pending":
         raise ValueError("fixed observation eligibility status drifted")
     if dependency.get("p0b_result_status_until_p0a_resolution") != "provisional":
@@ -1062,6 +1152,9 @@ def validate_p0b_contract(contract: Mapping[str, Any]) -> Mapping[str, Any]:
     }:
         raise ValueError("P0-B strict preflight-probe contract drifted")
 
+    cache_schema = contract.get("cache_schema", {})
+    if cache_schema.get("cache_schema_version") != 1:
+        raise ValueError("P0-B raw cache schema version drifted")
     table_contracts = contract_table_schemas(contract)
     for name, required in (
             ("query", QUERY_ID_FIELDS + QUERY_CLOSURE_FIELDS
@@ -1116,6 +1209,8 @@ def validate_p0b_contract(contract: Mapping[str, Any]) -> Mapping[str, Any]:
         raise ValueError("P0-B fixed aggregation must use AACGM MLT")
 
     fixed = contract.get("fixed_aggregation", {})
+    if fixed.get("summary_schema_version") != 2:
+        raise ValueError("P0-B summary schema version drifted")
     if tuple(fixed.get("dimensions", ())) != (
             "station", "query_split", "MLT_3h", "solar_regime",
             "query_altitude_band", "Kp_activity", "coverage_code"):
@@ -1218,6 +1313,15 @@ def validate_p0b_contract(contract: Mapping[str, Any]) -> Mapping[str, Any]:
         raise ValueError("P0-B must contain six uniquely identified questions")
     if any(row.get("initial_status") != "pending" for row in records):
         raise ValueError("P0-B questions must be pending at contract freeze")
+    if {
+            row.get("id"): {
+                key: row.get(key)
+                for key in (
+                    "interpretation_boundary", "supports", "does_not_support")
+            }
+            for row in records
+    } != P0B_QUESTION_INTERPRETATION_BOUNDARIES:
+        raise ValueError("P0-B six-question interpretation boundaries drifted")
     if contract.get("decision_rules") != P0B_DECISION_RULES:
         raise ValueError("P0-B fixed decision rules drifted")
     summary_artifacts = contract.get("fixed_aggregation", {}).get(
@@ -1238,6 +1342,13 @@ def validate_p0b_contract(contract: Mapping[str, Any]) -> Mapping[str, Any]:
         raise ValueError("P0-B final acceptance filename drifted")
     if summary_artifacts.get("final_acceptance_written_exclusively_last") is not True:
         raise ValueError("P0-B final acceptance must be written exclusively last")
+    acceptance = contract.get("acceptance", {})
+    for key in (
+            "defined_profile_and_date_gates_enforced",
+            "question_interpretation_boundaries_required",
+            "q5_dual_routing_required"):
+        if acceptance.get(key) is not True:
+            raise ValueError(f"P0-B acceptance flag drifted: {key}")
     return contract
 
 
@@ -1855,6 +1966,7 @@ __all__ = [
     "P0B_P0A_CONTRACT_SIZE_BYTES",
     "P0B_PYTHON_EXECUTABLE",
     "P0B_REQUIRED_BRANCH",
+    "P0B_QUESTION_INTERPRETATION_BOUNDARIES",
     "P0B_QUESTION_TERMINAL_STATUSES",
     "P0B_SOURCES",
     "P0B_SUMMARY_ARTIFACTS",

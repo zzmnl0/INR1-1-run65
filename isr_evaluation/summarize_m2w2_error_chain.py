@@ -24,7 +24,7 @@ import numpy as np
 from inr_modules.mdia import p0b_audit
 
 
-SUMMARY_SCHEMA_VERSION = 1
+SUMMARY_SCHEMA_VERSION = 2
 CACHE_MARKER = p0b_audit.P0B_CACHE_COMPLETION_MARKER
 FINAL_MARKER = p0b_audit.P0B_COMPLETION_MARKER
 SUMMARY_FILES = p0b_audit.P0B_SUMMARY_ARTIFACTS
@@ -59,6 +59,7 @@ _REGIME_FIELDS = _DIMENSIONS + _COUNTS + (
     "raw_iri_bias_median_dex",
     "raw_iri_rmse_dex",
     "M00_bias_mean_dex",
+    "M00_bias_median_dex",
     "M00_rmse_dex",
     "M10_bias_mean_dex",
     "M10_rmse_dex",
@@ -144,6 +145,10 @@ _SOURCE_FIELDS = _SOURCE_DIMENSIONS + _COUNTS + (
     "joint_source_update_abs_p90_dex",
     "duplicate_profile_abs_median_dex",
     "duplicate_profile_abs_p90_dex",
+    "concentration_defined_profiles",
+    "concentration_defined_unique_dates",
+    "duplicate_profile_defined_profiles",
+    "duplicate_profile_defined_unique_dates",
 )
 
 _SOURCE_METRIC_REDUCTION_ORDER = {
@@ -197,11 +202,14 @@ _JOINT_FIELDS = _DIMENSIONS + _COUNTS + (
     "effective_token_queries",
     "effective_token_low_gain_queries",
     "effective_token_low_gain_fraction",
-    "raw_token_low_gain_station_time_profiles",
+    "raw_token_low_gain_defined_profiles",
+    "raw_token_low_gain_defined_unique_dates",
     "raw_token_low_gain_profile_fraction",
-    "effective_token_low_gain_station_time_profiles",
+    "effective_token_low_gain_defined_profiles",
+    "effective_token_low_gain_defined_unique_dates",
     "effective_token_low_gain_profile_fraction",
     "direction_consistency_defined_profiles",
+    "direction_consistency_defined_unique_dates",
     "direction_consistency_status",
     "direction_consistency_fraction",
     "joint_source_innovation_sign_defined_profiles",
@@ -211,6 +219,7 @@ _JOINT_FIELDS = _DIMENSIONS + _COUNTS + (
     "joint_source_update_sign_status",
     "joint_source_update_same_sign_fraction",
     "source_cancellation_defined_profiles",
+    "source_cancellation_defined_unique_dates",
     "source_cancellation_status",
     "source_cancellation_fraction",
     "drop_200_250_abs_median_dex",
@@ -294,6 +303,8 @@ class AttributionState:
 class DecisionThresholds:
     minimum_profiles: int
     minimum_days: int
+    minimum_defined_profiles: int
+    minimum_defined_days: int
     material_bias: float
     material_increment: float
     concentration_share: float
@@ -347,6 +358,10 @@ def _decision_thresholds(contract: Mapping[str, Any]) -> DecisionThresholds:
     return DecisionThresholds(
         minimum_profiles=int(rules["eligible_cell_min_station_time_profiles"]),
         minimum_days=int(rules["eligible_cell_min_unique_dates"]),
+        minimum_defined_profiles=int(
+            rules["eligible_evidence_min_defined_station_time_profiles"]),
+        minimum_defined_days=int(
+            rules["eligible_evidence_min_defined_unique_dates"]),
         material_bias=float(rules["Q1_bias_origin"]["material_abs_dex_gte"]),
         material_increment=float(
             rules["Q2_increment_consistency"]["material_abs_increment_dex_gte"]),
@@ -537,6 +552,10 @@ def _resolve_frozen_contract(
 
 def _validate_summary_contract(contract: Mapping[str, Any]) -> None:
     fixed = contract.get("fixed_aggregation", {})
+    if fixed.get("summary_schema_version") != SUMMARY_SCHEMA_VERSION:
+        raise ValueError("frozen summary schema version drifted")
+    if contract.get("cache_schema", {}).get("cache_schema_version") != 1:
+        raise ValueError("frozen raw cache schema version drifted")
     if tuple(fixed.get("dimensions", ())) != _DIMENSIONS:
         raise ValueError("frozen fixed-aggregation dimensions drifted")
     required_counts = tuple(fixed.get("required_counts", ()))
@@ -572,6 +591,9 @@ def _validate_summary_contract(contract: Mapping[str, Any]) -> None:
 
     rules = contract["decision_rules"]
     thresholds = _decision_thresholds(contract)
+    if (thresholds.minimum_defined_profiles != 30
+            or thresholds.minimum_defined_days != 2):
+        raise ValueError("frozen defined profile/date evidence gates drifted")
     for name, value in (
             ("direction_consistency_fraction_gte",
              thresholds.direction_consistency_fraction),
@@ -591,6 +613,21 @@ def _validate_summary_contract(contract: Mapping[str, Any]) -> None:
                 "Q6_required_terminal_status_until_observation_eligibility")
             != "insufficient_evidence"):
         raise ValueError("frozen Q4/Q6 status caps drifted")
+    question_boundaries = {
+        row.get("id"): {
+            key: row.get(key)
+            for key in ("interpretation_boundary", "supports", "does_not_support")
+        }
+        for row in contract.get("six_questions", {}).get("questions", ())
+    }
+    if question_boundaries != p0b_audit.P0B_QUESTION_INTERPRETATION_BOUNDARIES:
+        raise ValueError("frozen question interpretation boundaries drifted")
+    acceptance = contract.get("acceptance", {})
+    if any(acceptance.get(key) is not True for key in (
+            "defined_profile_and_date_gates_enforced",
+            "question_interpretation_boundaries_required",
+            "q5_dual_routing_required")):
+        raise ValueError("frozen attribution hardening acceptance flags drifted")
 
 
 def _validate_runtime_identities(
@@ -602,7 +639,7 @@ def _validate_runtime_identities(
     if (runtime.get("audit_schema_version")
             != p0b_audit.P0B_AUDIT_SCHEMA_VERSION
             or runtime.get("status") != "runtime_contract_bound"):
-        raise ValueError("runtime audit_contract is not a bound P0-B v1 contract")
+        raise ValueError("runtime audit_contract is not a bound P0-B v2 contract")
     git = runtime.get("git")
     identities = runtime.get("runtime_identities")
     if not isinstance(git, dict) or not isinstance(identities, dict):
@@ -1231,6 +1268,17 @@ def _profile_metric_map(
     }
 
 
+def _defined_profile_support(
+        accumulator: GroupAccumulator, *names: str) -> tuple[int, int]:
+    """Count unique station-date-profile identities defined for every metric."""
+    if not names:
+        raise ValueError("defined support requires at least one metric")
+    keys = set(_profile_metric_map(accumulator, names[0]))
+    for name in names[1:]:
+        keys.intersection_update(_profile_metric_map(accumulator, name))
+    return len(keys), len({profile_key[1] for profile_key in keys})
+
+
 def _metric(accumulator: GroupAccumulator, name: str) -> np.ndarray:
     return np.asarray(
         list(_profile_metric_map(accumulator, name).values()), dtype=np.float64)
@@ -1319,8 +1367,8 @@ def _regime_row(key: tuple[str, ...], acc: GroupAccumulator) -> dict[str, Any]:
         values = _metric(acc, metric_name)
         row[f"{mode}_bias_mean_dex"] = _mean(values)
         row[f"{mode}_rmse_dex"] = _rmse(values)
-        if mode == "raw_iri":
-            row["raw_iri_bias_median_dex"] = _median(values)
+        if mode in ("raw_iri", "M00"):
+            row[f"{mode}_bias_median_dex"] = _median(values)
     for output_name, metric_name in (
             ("background_increment_mean_dex", "background_increment"),
             ("joint_update_FY_mean_dex", "joint_update_FY"),
@@ -1478,6 +1526,10 @@ def _source_row(
     joint = _metric(acc, "joint_source_update")
     joint_abs = _metric(acc, "joint_source_update_abs")
     duplicate = _metric(acc, "duplicate_profile_abs")
+    concentration_profiles, concentration_dates = _defined_profile_support(
+        acc, "profile_to_token_neff_ratio", "effective_max_profile_precision_share")
+    duplicate_profiles, duplicate_dates = _defined_profile_support(
+        acc, "duplicate_profile_abs")
     concentrated = acc.counts.get("concentrated", 0)
     raw_dof_sum = int(np.rint(np.sum(raw_dof)))
     profile_dof_sum = float(np.sum(dof))
@@ -1524,6 +1576,10 @@ def _source_row(
         "joint_source_update_abs_p90_dex": _p90(joint_abs),
         "duplicate_profile_abs_median_dex": _median(duplicate),
         "duplicate_profile_abs_p90_dex": _p90(duplicate),
+        "concentration_defined_profiles": concentration_profiles,
+        "concentration_defined_unique_dates": concentration_dates,
+        "duplicate_profile_defined_profiles": duplicate_profiles,
+        "duplicate_profile_defined_unique_dates": duplicate_dates,
     })
     row.update(_token_profile_diagnostics(
         acc.token_identities, token_registry, diagnostic_rules))
@@ -1563,7 +1619,9 @@ def _joint_row(key: tuple[str, ...], acc: GroupAccumulator) -> dict[str, Any]:
             ("raw_token_low_gain", "raw_token_low_gain_indicator"),
             ("effective_token_low_gain", "effective_token_low_gain_indicator")):
         values = _metric(acc, metric)
-        row[f"{prefix}_station_time_profiles"] = len(values)
+        profiles, dates = _defined_profile_support(acc, metric)
+        row[f"{prefix}_defined_profiles"] = profiles
+        row[f"{prefix}_defined_unique_dates"] = dates
         row[f"{prefix}_profile_fraction"] = _mean(values) if len(values) else None
     for prefix, metric, output in (
             ("direction_consistency", "direction_consistent",
@@ -1575,10 +1633,13 @@ def _joint_row(key: tuple[str, ...], acc: GroupAccumulator) -> dict[str, Any]:
             ("source_cancellation", "source_cancellation",
              "source_cancellation_fraction")):
         values = _metric(acc, metric)
-        count = len(values)
-        row[f"{prefix}_defined_profiles"] = count
-        row[f"{prefix}_status"] = "computed" if count else "insufficient_data"
-        row[output] = _mean(values) if count else None
+        profiles, dates = _defined_profile_support(acc, metric)
+        row[f"{prefix}_defined_profiles"] = profiles
+        if prefix in ("direction_consistency", "source_cancellation"):
+            row[f"{prefix}_defined_unique_dates"] = dates
+        row[f"{prefix}_status"] = (
+            "computed" if profiles else "insufficient_data")
+        row[output] = _mean(values) if profiles else None
     for short_name in (
             "drop_200_250", "drop_250_300", "drop_300_400", "drop_400_500",
             "duplicate_FY", "duplicate_COSMIC", "duplicate_both"):
@@ -2017,6 +2078,10 @@ def build_fixed_summaries(
     questions = _build_six_questions(
         regime_rows, source_rows, joint_rows, state, inventory.contract,
         thresholds)
+    q5_routing_status = next(
+        record["evidence"]["routing_status"]
+        for record in questions["questions"]
+        if record["id"] == "Q5_low_altitude_drift")
     integrity = {
         "summary_schema_version": SUMMARY_SCHEMA_VERSION,
         "validated_batches": totals["batches"],
@@ -2034,6 +2099,10 @@ def build_fixed_summaries(
         "all_batch_schema_dtype_cross_table_checks_passed": True,
         "batch_identity_rechecked_before_and_after_each_shard_read": True,
         "batch_identity_checks_per_aggregation": 2 * 3 * totals["batches"],
+        "defined_profile_and_date_gates_enforced": True,
+        "question_interpretation_boundaries_complete": True,
+        "q5_dual_routing_computed": True,
+        "q5_routing_status": q5_routing_status,
         "runtime_identity_validation": dict(inventory.identity_validation),
     }
     source_payload = _table_payload(
@@ -2103,9 +2172,19 @@ def _build_six_questions(
     else:
         q1_status = "mixed"
 
+    def evidence_status(
+            value: float | None, threshold: float, profiles: int,
+            dates: int) -> tuple[str, bool | None]:
+        if (profiles < thresholds.minimum_defined_profiles
+                or dates < thresholds.minimum_defined_days
+                or value is None):
+            return "insufficient_evidence", None
+        passed = float(value) >= threshold
+        return ("supported" if passed else "not_supported"), passed
+
     q2_material_cells: list[dict[str, Any]] = []
     q2_direction_flags: list[bool] = []
-    q2_undefined_direction_cells = 0
+    q2_ineligible_direction_cells = 0
     for row in joint_rows:
         if (int(row["station_time_profiles"]) < thresholds.minimum_profiles
                 or int(row["unique_days"]) < thresholds.minimum_days
@@ -2113,65 +2192,103 @@ def _build_six_questions(
                 < thresholds.material_increment):
             continue
         direction_fraction = row["direction_consistency_fraction"]
-        direction_defined = direction_fraction is not None
-        if direction_defined:
-            direction_pass = (
-                float(direction_fraction)
-                >= thresholds.direction_consistency_fraction)
+        direction_profiles = int(row["direction_consistency_defined_profiles"])
+        direction_dates = int(row["direction_consistency_defined_unique_dates"])
+        direction_status, direction_pass = evidence_status(
+            direction_fraction, thresholds.direction_consistency_fraction,
+            direction_profiles, direction_dates)
+        if direction_pass is not None:
             q2_direction_flags.append(direction_pass)
-            direction_status = "pass" if direction_pass else "fail"
         else:
-            direction_pass = None
-            direction_status = "insufficient_data"
-            q2_undefined_direction_cells += 1
+            q2_ineligible_direction_cells += 1
         effective_low_gain = row["effective_token_low_gain_profile_fraction"]
         raw_low_gain = row["raw_token_low_gain_profile_fraction"]
-        low_gain_fraction = (
-            effective_low_gain if effective_low_gain is not None else raw_low_gain)
+        raw_low_gain_status, raw_low_gain_pass = evidence_status(
+            raw_low_gain, thresholds.low_gain_fraction,
+            int(row["raw_token_low_gain_defined_profiles"]),
+            int(row["raw_token_low_gain_defined_unique_dates"]))
+        effective_low_gain_status, effective_low_gain_pass = evidence_status(
+            effective_low_gain, thresholds.low_gain_fraction,
+            int(row["effective_token_low_gain_defined_profiles"]),
+            int(row["effective_token_low_gain_defined_unique_dates"]))
         cancellation_fraction = row["source_cancellation_fraction"]
+        cancellation_status, cancellation_pass = evidence_status(
+            cancellation_fraction, thresholds.source_cancellation_fraction,
+            int(row["source_cancellation_defined_profiles"]),
+            int(row["source_cancellation_defined_unique_dates"]))
         q2_material_cells.append({
             "cell": {name: row[name] for name in _DIMENSIONS},
             "station_time_profiles": int(row["station_time_profiles"]),
             "unique_days": int(row["unique_days"]),
             "joint_increment_abs_median_dex": float(
                 row["joint_increment_abs_median_dex"]),
-            "direction_consistency_defined_profiles": int(
-                row["direction_consistency_defined_profiles"]),
+            "direction_consistency_defined_profiles": direction_profiles,
+            "direction_consistency_defined_unique_dates": direction_dates,
             "direction_consistency_fraction": direction_fraction,
-            "direction_consistency_status": direction_status,
+            "direction_evidence_status": direction_status,
             "direction_consistency_meets_threshold": direction_pass,
-            "low_gain_profile_fraction": low_gain_fraction,
-            "low_gain_mechanism_supported": (
-                None if low_gain_fraction is None else
-                float(low_gain_fraction) >= thresholds.low_gain_fraction),
+            "raw_token_low_gain_defined_profiles": int(
+                row["raw_token_low_gain_defined_profiles"]),
+            "raw_token_low_gain_defined_unique_dates": int(
+                row["raw_token_low_gain_defined_unique_dates"]),
+            "raw_token_low_gain_fraction": raw_low_gain,
+            "raw_token_low_gain_mechanism_status": raw_low_gain_status,
+            "raw_token_low_gain_mechanism_supported": raw_low_gain_pass,
+            "effective_token_low_gain_defined_profiles": int(
+                row["effective_token_low_gain_defined_profiles"]),
+            "effective_token_low_gain_defined_unique_dates": int(
+                row["effective_token_low_gain_defined_unique_dates"]),
+            "effective_token_low_gain_fraction": effective_low_gain,
+            "effective_token_low_gain_mechanism_status": effective_low_gain_status,
+            "effective_token_low_gain_mechanism_supported": effective_low_gain_pass,
             "source_cancellation_defined_profiles": int(
                 row["source_cancellation_defined_profiles"]),
+            "source_cancellation_defined_unique_dates": int(
+                row["source_cancellation_defined_unique_dates"]),
             "source_cancellation_fraction": cancellation_fraction,
-            "source_cancellation_mechanism_supported": (
-                None if cancellation_fraction is None else
-                float(cancellation_fraction)
-                >= thresholds.source_cancellation_fraction),
+            "source_cancellation_mechanism_status": cancellation_status,
+            "source_cancellation_mechanism_supported": cancellation_pass,
             "source_edge_and_joint_source_sum_closure_pass": True,
         })
     if not q2_material_cells:
         q2_status = "insufficient_evidence"
     elif not q2_direction_flags:
         q2_status = "insufficient_evidence"
-    elif (q2_undefined_direction_cells == 0
-          and all(q2_direction_flags)):
+    elif q2_ineligible_direction_cells:
+        q2_status = "mixed"
+    elif all(q2_direction_flags):
         q2_status = "supported"
-    elif (q2_undefined_direction_cells == 0
-          and not any(q2_direction_flags)):
+    elif not any(q2_direction_flags):
         q2_status = "not_supported"
     else:
         q2_status = "mixed"
 
     q3_cells: list[dict[str, Any]] = []
     q3_cell_statuses: list[str] = []
+    q3_ineligible_evidence_cells: list[dict[str, Any]] = []
     for row in source_rows:
         if (int(row["station_time_profiles"]) < thresholds.minimum_profiles
                 or int(row["unique_days"]) < thresholds.minimum_days
                 or int(row["queries_with_effective_tokens"]) == 0):
+            continue
+        concentration_profiles = int(row["concentration_defined_profiles"])
+        concentration_dates = int(row["concentration_defined_unique_dates"])
+        duplicate_profiles = int(row["duplicate_profile_defined_profiles"])
+        duplicate_dates = int(row["duplicate_profile_defined_unique_dates"])
+        if (concentration_profiles < thresholds.minimum_defined_profiles
+                or concentration_dates < thresholds.minimum_defined_days
+                or duplicate_profiles < thresholds.minimum_defined_profiles
+                or duplicate_dates < thresholds.minimum_defined_days):
+            q3_ineligible_evidence_cells.append({
+                "cell": {name: row[name] for name in _SOURCE_DIMENSIONS},
+                "station_time_profiles": int(row["station_time_profiles"]),
+                "unique_days": int(row["unique_days"]),
+                "concentration_defined_profiles": concentration_profiles,
+                "concentration_defined_unique_dates": concentration_dates,
+                "duplicate_profile_defined_profiles": duplicate_profiles,
+                "duplicate_profile_defined_unique_dates": duplicate_dates,
+                "status": "insufficient_evidence",
+            })
             continue
         concentration = (
             float(row["max_profile_precision_share_median"])
@@ -2192,6 +2309,10 @@ def _build_six_questions(
             "cell": {name: row[name] for name in _SOURCE_DIMENSIONS},
             "station_time_profiles": int(row["station_time_profiles"]),
             "unique_days": int(row["unique_days"]),
+            "concentration_defined_profiles": concentration_profiles,
+            "concentration_defined_unique_dates": concentration_dates,
+            "duplicate_profile_defined_profiles": duplicate_profiles,
+            "duplicate_profile_defined_unique_dates": duplicate_dates,
             "max_profile_precision_share_median": float(
                 row["max_profile_precision_share_median"]),
             "profile_to_token_neff_ratio_median": float(
@@ -2213,12 +2334,28 @@ def _build_six_questions(
 
     low_altitude_evidence: list[dict[str, Any]] = []
     eligible_low_altitude_statuses: list[str] = []
+    eligible_analysis_material: list[bool] = []
+    eligible_background_material: list[bool] = []
+    regime_by_cell: dict[tuple[Any, ...], Mapping[str, Any]] = {}
+    for regime_row in regime_rows:
+        regime_key = tuple(regime_row[name] for name in _DIMENSIONS)
+        if regime_key in regime_by_cell:
+            raise ValueError("duplicate regime row for Q5 cell")
+        regime_by_cell[regime_key] = regime_row
+    q5_rule = contract["decision_rules"]["Q5_low_altitude_drift"]
+    background_threshold = float(
+        q5_rule["background_path_material_abs_M00_bias_dex_gte"])
+    q5_routes = q5_rule["routing"]
     low_altitude_label = (
         f"[{thresholds.low_altitude_lower:g},"
         f"{thresholds.low_altitude_upper:g})km")
     for row in joint_rows:
         if row["query_altitude_band"] != low_altitude_label:
             continue
+        cell_key = tuple(row[name] for name in _DIMENSIONS)
+        regime_row = regime_by_cell.get(cell_key)
+        if regime_row is None:
+            raise ValueError("Q5 joint row has no matching regime row")
         enough = (
             int(row["station_time_profiles"]) >= thresholds.minimum_profiles
             and int(row["unique_days"]) >= thresholds.minimum_days)
@@ -2245,6 +2382,20 @@ def _build_six_questions(
             "supported" if material_drift and deletion_sensitive
             else "mixed" if material_drift or deletion_sensitive
             else "not_supported")
+        analysis_material = enough and material_drift and deletion_sensitive
+        background_material = (
+            enough and abs(float(regime_row["M00_bias_median_dex"]))
+            >= background_threshold)
+        if not enough:
+            route = q5_routes["insufficient_evidence"]
+        elif analysis_material and background_material:
+            route = q5_routes["analysis_supported_background_material"]
+        elif analysis_material:
+            route = q5_routes["analysis_supported_background_not_material"]
+        elif background_material:
+            route = q5_routes["analysis_not_supported_background_material"]
+        else:
+            route = q5_routes["analysis_not_supported_background_not_material"]
         low_altitude_evidence.append({
             "cell": {name: row[name] for name in _DIMENSIONS},
             "station_time_profiles": int(row["station_time_profiles"]),
@@ -2252,19 +2403,43 @@ def _build_six_questions(
             "eligible": enough,
             "joint_increment_abs_median_dex": float(
                 row["joint_increment_abs_median_dex"]),
+            "raw_iri_bias_median_dex": float(
+                regime_row["raw_iri_bias_median_dex"]),
+            "raw_iri_rmse_dex": float(regime_row["raw_iri_rmse_dex"]),
+            "M00_bias_median_dex": float(regime_row["M00_bias_median_dex"]),
+            "M00_rmse_dex": float(regime_row["M00_rmse_dex"]),
+            "M00_minus_IRI_median_dex": float(
+                regime_row["background_increment_median_dex"]),
             "material_low_altitude_drift": material_drift,
             "height_deletion_sensitive": deletion_sensitive,
+            "analysis_path_status": (
+                cell_status if enough else "insufficient_evidence"),
+            "background_path_material": background_material,
+            "routing_status": route,
             "cell_status": cell_status if enough else "ineligible",
             "height_deletion_counterfactuals": metrics,
         })
         if enough:
             eligible_low_altitude_statuses.append(cell_status)
+            eligible_analysis_material.append(analysis_material)
+            eligible_background_material.append(background_material)
     if not eligible_low_altitude_statuses:
         q5_status = "insufficient_evidence"
     elif len(set(eligible_low_altitude_statuses)) == 1:
         q5_status = eligible_low_altitude_statuses[0]
     else:
         q5_status = "mixed"
+    if not eligible_low_altitude_statuses:
+        q5_routing_status = q5_routes["insufficient_evidence"]
+    elif any(eligible_analysis_material) and any(eligible_background_material):
+        q5_routing_status = q5_routes["analysis_supported_background_material"]
+    elif any(eligible_analysis_material):
+        q5_routing_status = q5_routes["analysis_supported_background_not_material"]
+    elif any(eligible_background_material):
+        q5_routing_status = q5_routes["analysis_not_supported_background_material"]
+    else:
+        q5_routing_status = q5_routes[
+            "analysis_not_supported_background_not_material"]
 
     raw_low_fraction = _fraction(
         state.raw_token_low_gain_queries, state.raw_token_queries)
@@ -2311,20 +2486,25 @@ def _build_six_questions(
                 "low_gain_fraction_gte": thresholds.low_gain_fraction,
                 "source_cancellation_fraction_gte": (
                     thresholds.source_cancellation_fraction),
-                "undefined_direction_material_cells": (
-                    q2_undefined_direction_cells),
+                "ineligible_direction_material_cells": (
+                    q2_ineligible_direction_cells),
             },
         },
         {
             "id": "Q3_profile_precision_concentration",
             "status": q3_status,
             "decision_rule": (
-                "Eligible cells require >=30 station-time profiles and >=2 days. "
+                "Eligible cells require >=30 station-time profiles and >=2 days; "
+                "concentration and duplicate evidence each additionally require "
+                ">=30 defined profiles across >=2 dates. "
                 "Concentration is max_profile_precision_share>=0.5 or "
                 "profile_neff/token_neff<=0.25. Duplication is material when "
                 "median |delta|>=0.02 dex or P90>=0.05 dex. Both imply supported; "
                 "one implies mixed; neither implies not_supported."),
-            "evidence": {"eligible_cells": q3_cells},
+            "evidence": {
+                "eligible_cells": q3_cells,
+                "ineligible_evidence_cells": q3_ineligible_evidence_cells,
+            },
         },
         {
             "id": "Q4_source_latitude_separation",
@@ -2346,7 +2526,10 @@ def _build_six_questions(
                 "median |M11-M00|>=0.02 dex and high-altitude height deletion is "
                 "sensitive when median |delta|>=0.02 dex or P90>=0.05 dex; both "
                 "must co-occur for supported."),
-            "evidence": {"eligible_and_ineligible_cells": low_altitude_evidence},
+            "evidence": {
+                "eligible_and_ineligible_cells": low_altitude_evidence,
+                "routing_status": q5_routing_status,
+            },
         },
         {
             "id": "Q6_peak_persistence",
@@ -2363,11 +2546,20 @@ def _build_six_questions(
             },
         },
     ]
+    for record in records:
+        record.update(p0b_audit.P0B_QUESTION_INTERPRETATION_BOUNDARIES[
+            record["id"]])
     if len(records) != 6 or {record["id"] for record in records} != {
             item["id"] for item in contract["six_questions"]["questions"]}:
         raise ValueError("six-question IDs differ from the frozen contract")
     if any(record["status"] not in allowed for record in records):
         raise ValueError("six-question status is outside the frozen allowed set")
+    if any({
+            key: record.get(key)
+            for key in ("interpretation_boundary", "supports", "does_not_support")
+    } != p0b_audit.P0B_QUESTION_INTERPRETATION_BOUNDARIES[record["id"]]
+           for record in records):
+        raise ValueError("six-question interpretation boundary differs from contract")
     if next(row for row in records if row["id"] == "Q4_source_latitude_separation")[
             "status"] != "insufficient_evidence":
         raise ValueError("Q4 must remain insufficient_evidence")
@@ -2391,6 +2583,9 @@ def _build_six_questions(
             "height_deletion_p90_abs_dex": thresholds.deletion_p90,
             "minimum_station_time_profiles": thresholds.minimum_profiles,
             "minimum_unique_days": thresholds.minimum_days,
+            "minimum_defined_station_time_profiles": (
+                thresholds.minimum_defined_profiles),
+            "minimum_defined_unique_dates": thresholds.minimum_defined_days,
             "direction_consistency_fraction": (
                 thresholds.direction_consistency_fraction),
             "low_gain_fraction": thresholds.low_gain_fraction,
@@ -2560,6 +2755,10 @@ def publish_summaries(
     statuses = {
         record["id"]: record["status"] for record in questions["questions"]
     }
+    q5_routing_status = next(
+        record["evidence"]["routing_status"]
+        for record in questions["questions"]
+        if record["id"] == "Q5_low_altitude_drift")
     cache_identity = p0b_audit.artifact_identity(
         root / CACHE_MARKER, root=root)
     summary_manifest_payload = {
@@ -2578,6 +2777,9 @@ def publish_summaries(
         "six_question_statuses": statuses,
         "six_questions_assigned": len(statuses) == 6,
         "scientific_attribution_complete": False,
+        "defined_profile_and_date_gates_enforced": True,
+        "question_interpretation_boundaries_complete": True,
+        "q5_routing_status": q5_routing_status,
         "profile_cap_status": _edge_diagnostic_rules(
             inventory.contract).profile_cap_status,
         "coordinate_enrichment": inventory.identity_validation[
@@ -2598,9 +2800,12 @@ def publish_summaries(
         "attribution_complete": False,
         "scientific_attribution_complete": False,
         "six_questions_assigned": len(statuses) == 6,
-        "provisional_until_p0a_acceptance": True,
+        "provisional_until_fixed_observation_eligibility": True,
         "p0c_unlocked": False,
         "summary_schema_version": SUMMARY_SCHEMA_VERSION,
+        "defined_profile_and_date_gates_enforced": True,
+        "question_interpretation_boundaries_complete": True,
+        "q5_routing_status": q5_routing_status,
         "cache_acceptance": cache_identity,
         "frozen_contract": {
             "path": str(inventory.contract_path),
