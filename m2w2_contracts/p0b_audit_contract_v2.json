@@ -65,7 +65,7 @@
       "git_commit": "5d5c214f4a4e461755332ec322eff1366b718dff",
       "semantics": "immutable P0-A code anchor; the P0-B runtime HEAD must descend from it"
     },
-    "required_implementation_tag": "m2w2-run67-p0b-audit-v2",
+    "required_implementation_tag": "m2w2-run67-p0b-audit-v3",
     "required_implementation_tag_type": "annotated",
     "require_head_equals_tag": true,
     "critical_tracked_paths": [
@@ -270,7 +270,7 @@
     "final_completion_marker": "p0b_audit_acceptance.json"
   },
   "output_lifecycle": {
-    "default_output_directory": "m2w2_artifacts/p0b_error_chain/run67-p0b-v14-readonly-audit-r2",
+    "default_output_directory": "m2w2_artifacts/p0b_error_chain/run67-p0b-v14-readonly-audit-r3",
     "start_precondition": "target directory must not exist",
     "full_audit_precondition": "an explicit completed preflight_acceptance.json bound to the identical implementation tag object, HEAD, checkpoint, P0-A/P0-B/date-split identities, query/profile counts, coordinate/profile-cap state, source provenance, and Python environment",
     "preflight_acceptance_filename": "preflight_acceptance.json",

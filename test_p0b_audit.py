@@ -27,6 +27,7 @@ from inr_modules.mdia.p0b_audit import (
     tracked_git_status,
     validate_audit_tables,
     validate_cross_table_diagnostics,
+    validate_edge_contribution_closures,
     validate_foreign_keys,
     validate_p0b_contract,
     validate_query_closures,
@@ -494,6 +495,17 @@ def test_table_foreign_keys_closures_and_strict_no_token_identity():
         changed["no_token_log10_ne"][0], np.float32(np.inf))
     with pytest.raises(ValueError, match="bitwise"):
         validate_query_closures(changed)
+
+
+def test_edge_closure_accepts_an_empty_source_selection():
+    query, token, edge = _valid_tables()
+    token = {key: value[:1].copy() for key, value in token.items()}
+    edge = {key: value[:1].copy() for key, value in edge.items()}
+    for field in ("joint_update_COSMIC_dex", "isolated_increment_COSMIC_dex"):
+        query[field][:] = 0.0
+    result = validate_edge_contribution_closures(query, token, edge)
+    assert result["COSMIC_joint_sum"] == pytest.approx(0.0)
+    assert result["COSMIC_isolated_sum"] == pytest.approx(0.0)
 
 
 @pytest.mark.parametrize(("field", "bad_value", "message"), [

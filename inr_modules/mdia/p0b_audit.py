@@ -118,11 +118,11 @@ P0B_PREDICTIVE_NIS_DOF = (
     "> 0; only predictive_nis_unlocalized/dof is a per-dof diagnostic"
 )
 P0B_DEFAULT_OUTPUT_DIRECTORY = (
-    "m2w2_artifacts/p0b_error_chain/run67-p0b-v14-readonly-audit-r2"
+    "m2w2_artifacts/p0b_error_chain/run67-p0b-v14-readonly-audit-r3"
 )
 P0B_REQUIRED_BRANCH = "codex/run67-m2w2-p0b"
 P0B_BASE_ANCHOR_COMMIT = "5d5c214f4a4e461755332ec322eff1366b718dff"
-P0B_IMPLEMENTATION_TAG = "m2w2-run67-p0b-audit-v2"
+P0B_IMPLEMENTATION_TAG = "m2w2-run67-p0b-audit-v3"
 P0B_PYTHON_EXECUTABLE = Path(
     r"C:\Users\12238\.conda\envs\pytorch_cpu\python.exe")
 P0B_CRITICAL_TRACKED_PATHS = (
@@ -1763,7 +1763,8 @@ def validate_edge_contribution_closures(
     query_ids = _column(query, "query_id").astype(np.int64, copy=False)
     query_row = {int(value): index for index, value in enumerate(query_ids)}
     edge_query = _column(edge, "query_id").astype(np.int64, copy=False)
-    row_index = np.asarray([query_row[int(value)] for value in edge_query])
+    row_index = np.asarray(
+        [query_row[int(value)] for value in edge_query], dtype=np.int64)
     sources = _column(edge, "source").astype(str)
     for source in P0B_SOURCES:
         selected = sources == source
