@@ -186,6 +186,9 @@ def test_stratified_metrics_keep_three_model_stages():
     assert 'analysis_alt_120-500km_day' in metrics
     assert 'analysis_alt_120-500km_night' in metrics
     assert 'analysis_alt_120-500km_all' in metrics
+    assert 'analysis_all_alt_day' in metrics
+    assert 'analysis_all_alt_night' in metrics
+    assert 'analysis_all_alt_all' in metrics
     assert 'background_alt_120-300km_all' in metrics
     assert 'iri_alt_120-300km_all' in metrics
 
@@ -206,6 +209,7 @@ def test_stratified_metrics_and_bootstrap_share_two_height_bins():
     assert metrics['analysis_alt_300-500km_all']['n'] == 2
     assert metrics['analysis_alt_120-500km_all']['n'] == 6
     assert metrics['analysis_alt_120-500km_all']['bias'] == 0.0
+    assert metrics['analysis_all_alt_all'] == metrics['analysis_alt_120-500km_all']
     assert not any('120-200km' in key or '200-300km' in key
                    for key in metrics)
 
@@ -223,7 +227,9 @@ def test_stratified_metrics_and_bootstrap_share_two_height_bins():
         'alt_120-300km_day', 'alt_120-300km_all',
         'alt_300-500km_night', 'alt_300-500km_all',
         'alt_120-500km_day', 'alt_120-500km_night',
-        'alt_120-500km_all'}
+        'alt_120-500km_all',
+        'all_alt_day', 'all_alt_night', 'all_alt_all'}
+    assert bootstrap['all_alt_all'] == bootstrap['alt_120-500km_all']
 
 
 def test_isr_requires_explicit_frozen_m2v_epoch():

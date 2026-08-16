@@ -44,12 +44,17 @@ _STRATIFIED_SOURCES = {'analysis': 'M11_log10',
 _STRATIFIED_BINS = ((120.0, 300.0), (300.0, 500.0))
 _FULL_ALTITUDE_RANGE = (120.0, 500.0)
 _STRATIFIED_PERIODS = ('day', 'night', 'all')
+_FULL_ALTITUDE_ALIASES = tuple(f'all_alt_{period}'
+                               for period in _STRATIFIED_PERIODS)
 _STRATIFIED_METRICS = ('n', 'rmse', 'bias', 'mae', 'pearson_r', 'ccc')
 _EXPECTED_STRATIFIED_CONTRACT = {
     'altitude_bins_km': [[120.0, 300.0], [300.0, 500.0]],
     'interval_semantics': 'left_closed_right_open_except_final_right_closed',
     'full_altitude_range_km': [120.0, 500.0],
     'full_altitude_interval_semantics': 'closed',
+    'full_altitude_aliases': list(_FULL_ALTITUDE_ALIASES),
+    'full_altitude_alias_semantics': (
+        'exact_aliases_of_closed_full_altitude_range'),
     'day_local_time_range_hours': [6.0, 18.0],
     'day_interval_semantics': 'left_closed_right_open',
     'periods': ['day', 'night', 'all'],
@@ -157,6 +162,10 @@ def _expected_stratified_keys():
         for source in _STRATIFIED_SOURCES
         for lower, upper in (*_STRATIFIED_BINS, _FULL_ALTITUDE_RANGE)
         for period in _STRATIFIED_PERIODS
+    } | {
+        f'{source}_{alias}'
+        for source in _STRATIFIED_SOURCES
+        for alias in _FULL_ALTITUDE_ALIASES
     }
 
 
@@ -265,6 +274,20 @@ def _verify_stratified_reports(isr_dir: Path, reports, csv_identities):
                         + stratified[prefix + 'night']['n']
                         == stratified[prefix + 'all']['n'],
                         f'ISR {station}:{prefix}: day/night count mismatch')
+                canonical_prefix = (
+                    f'{source}_alt_{_FULL_ALTITUDE_RANGE[0]:g}-'
+                    f'{_FULL_ALTITUDE_RANGE[1]:g}km_')
+                alias_prefix = f'{source}_all_alt_'
+                _require(
+                    stratified[alias_prefix + 'day']['n']
+                    + stratified[alias_prefix + 'night']['n']
+                    == stratified[alias_prefix + 'all']['n'],
+                    f'ISR {station}:{alias_prefix}: day/night count mismatch')
+                for period in _STRATIFIED_PERIODS:
+                    _compare_metrics(
+                        stratified[canonical_prefix + period],
+                        stratified[alias_prefix + period],
+                        f'ISR {station}:{source}: full-alt alias mismatch')
 
             station_mask = station_values == station
             for source, cache_key in _STRATIFIED_SOURCES.items():
@@ -370,8 +393,8 @@ def _verify_isr(isr_dir: Path, expected_candidate, expected_baselines,
     reports = _strict_json(isr_dir / 'isr_validation_report.json')
     _validate_contract_common(contract, expected_candidate, expected_baselines,
                               expected_date_split, 'ISR')
-    _require(contract.get('stratified_metrics_contract_version') == 3,
-             'ISR: stratified_metrics_contract_version must be 3')
+    _require(contract.get('stratified_metrics_contract_version') == 4,
+             'ISR: stratified_metrics_contract_version must be 4')
     _require(contract.get('stratified_metrics') == _EXPECTED_STRATIFIED_CONTRACT,
              'ISR: stratified metrics contract mismatch')
     _require(isinstance(contract.get('output_artifacts'), dict),

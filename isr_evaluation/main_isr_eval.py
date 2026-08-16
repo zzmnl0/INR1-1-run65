@@ -264,6 +264,8 @@ def _compute_stratified_metrics(alt_all, lon_all, rh_all,
                     src_pred[m].astype(np.float64),
                     obs_all[m].astype(np.float64),
                 )
+                if (lo, hi) == tuple(map(float, alt_range)):
+                    result[f'{src_name}_all_alt_{dn_label}'] = result[key]
 
     return result
 
@@ -287,6 +289,11 @@ def _compute_stratified_bootstrap(altitude, longitude, rel_hour,
             result[name] = paired_group_bootstrap(
                 observation[selected], analysis[selected], raw_iri[selected],
                 unit_ids[selected], replicates=2000, seed=42)
+    full_label = f'alt_{float(alt_range[0]):g}-{float(alt_range[1]):g}km'
+    for period in ('day', 'night', 'all'):
+        canonical = f'{full_label}_{period}'
+        if canonical in result:
+            result[f'all_alt_{period}'] = result[canonical]
     return result
 
 
@@ -421,7 +428,7 @@ def _build_isr_evaluation_contract(candidate_contract, baseline_contract,
                          np.empty(0), config.get('alt_range', (120.0, 500.0)))]
     contract = {
         'evaluation_schema_version': 2,
-        'stratified_metrics_contract_version': 3,
+        'stratified_metrics_contract_version': 4,
         'evaluation_code_sha256': _evaluation_code_sha256(),
         'candidate_checkpoint': candidate_contract,
         'baseline_checkpoints': baseline_contract,
@@ -463,6 +470,10 @@ def _build_isr_evaluation_contract(candidate_contract, baseline_contract,
                 float(config.get('alt_range', (120.0, 500.0))[1]),
             ],
             'full_altitude_interval_semantics': 'closed',
+            'full_altitude_aliases': [
+                'all_alt_day', 'all_alt_night', 'all_alt_all'],
+            'full_altitude_alias_semantics': (
+                'exact_aliases_of_closed_full_altitude_range'),
             'day_local_time_range_hours': list(_DAY_LT_RANGE),
             'day_interval_semantics': 'left_closed_right_open',
             'periods': ['day', 'night', 'all'],

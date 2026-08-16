@@ -197,13 +197,15 @@ def test_isr_finalizer_is_non_destructive_and_writes_completion_contract(tmp_pat
     output_dir, reports, contract = _write_isr(tmp_path)
     assert all('evaluation_cache' in report for report in reports)
     assert contract['baseline_checkpoints'][1]['label'] == 'historical-epoch12'
-    assert contract['stratified_metrics_contract_version'] == 3
+    assert contract['stratified_metrics_contract_version'] == 4
     assert contract['stratified_metrics']['altitude_bins_km'] == [
         [120.0, 300.0], [300.0, 500.0]]
     assert contract['stratified_metrics']['full_altitude_range_km'] == [
         120.0, 500.0]
     assert contract['stratified_metrics'][
         'full_altitude_interval_semantics'] == 'closed'
+    assert contract['stratified_metrics']['full_altitude_aliases'] == [
+        'all_alt_day', 'all_alt_night', 'all_alt_all']
     assert not (output_dir / 'isr_evaluation_contract.json').is_symlink()
     assert (output_dir / 'isr_validation_report.json').is_file()
     assert (output_dir / 'isr_evaluation_contract.json').is_file()
@@ -262,6 +264,18 @@ def test_isr_verifier_rejects_old_strata_merged_low_altitude_and_csv_drift(
     report_path = output_dir / 'isr_validation_report.json'
     report = json.loads(report_path.read_text(encoding='utf-8'))
     report[0]['stratified'].pop('analysis_alt_120-500km_day')
+    isr_eval._write_json_atomically(str(report_path), report)
+    contract_path = output_dir / 'isr_evaluation_contract.json'
+    contract = json.loads(contract_path.read_text(encoding='utf-8'))
+    _refresh_artifact_identity(output_dir, contract, 'isr_validation_report.json')
+    _rewrite_contract(output_dir, contract)
+    with pytest.raises(ContractError, match='incomplete stratified metric keys'):
+        _verify_isr(output_dir, _CANDIDATE_SHA, _BASELINES, _SPLIT_SHA, None)
+
+    output_dir, _, _ = _write_isr(tmp_path / 'missing-all-alt-alias')
+    report_path = output_dir / 'isr_validation_report.json'
+    report = json.loads(report_path.read_text(encoding='utf-8'))
+    report[0]['stratified'].pop('analysis_all_alt_day')
     isr_eval._write_json_atomically(str(report_path), report)
     contract_path = output_dir / 'isr_evaluation_contract.json'
     contract = json.loads(contract_path.read_text(encoding='utf-8'))
