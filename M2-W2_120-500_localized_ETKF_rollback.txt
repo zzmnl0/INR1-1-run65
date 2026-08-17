@@ -1,0 +1,49 @@
+M2-W2 120--500 km模型与局地化ETKF发布/回退说明
+
+发布边界
+========
+
+120--500 km hybrid模型的模型域为[120, 500] km；观测域和峰搜索域为
+[200, 500] km。新运行必须显式使用：
+
+    --model-domain 120-500-obs-200-500
+
+省略该参数可能落入旧的M2-V默认配置，不能把默认值当作本发布版本。
+
+模型历史锚点
+============
+
+* 120--500 km hybrid实现及校准链：e713ea4..e07af51
+* 发布tag：m2w2-run67-120-500-model-v1（指向e07af51）
+* 200--500 km strict回退点：e1337f1
+* 回退tag：m2w2-run67-200-500-model-v1（指向e1337f1）
+
+两个tag均为不可移动的annotated tag。回退时切换到strict tag或直接切换到
+e1337f1；不要在当前P0-A/P0-B评估提交上做反向拷贝，也不要覆盖旧tag。
+
+局地化ETKF基线
+==============
+
+独立传统静态ETKF源码位于traditional_static_etkf/：
+
+* core.py：固定120--500 km网格、静态集合、观测算子、Gaspari--Cohn空间/时间
+  局地化和ETKF更新；无M2-W学习特征。
+* cli.py：manifest读取、配置约束和prepare/smoke入口。
+* runner.py：RAW IRI背景的ISR整月运行、严格canonical join和报告刷新。
+* test_core.py、test_runner.py：网格边界、局地化、空观测回退、确定性和join回归。
+
+基线固定配置包括8个集合成员、120--500 km模型网格、200--500 km观测域、
+1800 km空间支持、1.5 h时间支持及FY/COSMIC独立R。它只用于可审计的传统
+基线对照，不改变M2-W训练或生产checkpoint。
+
+回退/恢复检查
+==============
+
+    git switch --detach m2w2-run67-200-500-model-v1
+    git show --stat m2w2-run67-120-500-model-v1
+
+恢复hybrid模型时切回m2w2-run67-120-500-model-v1，并显式传入上述
+--model-domain参数。checkpoint_io.py会拒绝strict format 13与hybrid format
+14的域/格式混用；因此回退必须连同匹配的checkpoint和manifest一起进行。
+
+本文件和traditional_static_etkf源码不包含模型、cache、图、日志或数据产物。
