@@ -1,7 +1,9 @@
 """Runnable regression checks for the v7/v8 density-observation ETKF."""
 
+import numpy as np
 import torch
 
+from isr_evaluation.background_m00_eval import _metric_and_bootstrap_rows
 from inr_modules.data_managers.irinc_neural_proxy import IRINeuralProxy
 from inr_modules.mdia.fsia_model import (
     FSIA_INR_Model,
@@ -15,6 +17,10 @@ from inr_modules.mdia.physics_losses_mdia import (
 )
 from inr_modules.mdia.sliding_dataset import attach_observation_background
 from inr_modules.mdia.train_fsia import (
+    _background_bias_selection_audit,
+    _background_stratified_metrics,
+    _development_selection_key,
+    background_stratified_bias_loss,
     covariance_moment_loss,
     empirical_covariance_loss,
     exact_mode_direction_losses,
@@ -824,6 +830,173 @@ def test_empirical_covariance_loss_uses_frozen_stable_cells():
     assert torch.allclose(loss.detach(), duplicated_loss)
 
 
+def test_background_stratum_bias_profile_balance_and_boundaries():
+    coords = torch.tensor([
+        [0.0, 0.0, 199.0, 12.0],  # outside the 200--500 km loss domain
+        [0.0, 0.0, 200.0, 12.0],  # lower edge, day
+        [0.0, 0.0, 299.0, 12.0],  # lower cell, day
+        [0.0, 0.0, 300.0, 12.0],  # upper cell, day
+        [0.0, 0.0, 500.0, 12.0],  # upper edge, day
+        [0.0, 0.0, 500.0, 0.0],   # upper edge, night
+    ])
+    target = torch.zeros(6, 1)
+    prediction = torch.tensor([[99.0], [1.0], [1.0], [2.0], [3.0], [4.0]])
+    profile_ids = torch.tensor([0, 0, 1, 1, 2, 3])
+    loss, details = background_stratified_bias_loss(
+        prediction, target, coords, profile_ids, return_details=True)
+    assert torch.allclose(loss, torch.tensor((1.0 + 6.25 + 16.0) / 3.0))
+    assert details['200-300_day']['profile_count'] == 2
+    assert details['300-500_day']['profile_count'] == 2
+    assert details['300-500_night']['profile_count'] == 1
+    assert details['valid_profile_count'] == 4
+
+    duplicated = background_stratified_bias_loss(
+        prediction[1:].repeat_interleave(3, dim=0),
+        target[1:].repeat_interleave(3, dim=0),
+        coords[1:].repeat_interleave(3, dim=0),
+        profile_ids[1:].repeat_interleave(3, dim=0))
+    assert torch.allclose(loss, duplicated)
+
+    fy = background_stratified_bias_loss(
+        torch.ones_like(target), target, coords, profile_ids)
+    cosmic = background_stratified_bias_loss(
+        -torch.ones_like(target), target, coords, profile_ids)
+    assert fy > 0 and cosmic > 0
+    assert 0.5 * (fy + cosmic) > 0
+
+
+def test_background_stratified_metrics_profile_and_magnetic_bins():
+    coords = np.asarray([
+        [0.0, 0.0, 200.0, 12.0], [60.0, 0.0, 300.0, 12.0],
+        [-60.0, 0.0, 400.0, 0.0], [0.0, 0.0, 500.0, 0.0],
+    ])
+    values = np.zeros(4)
+    target = np.zeros(4)
+    result = _background_stratified_metrics(
+        values, values, target, coords, values, values, np.ones(4),
+        (200.0, 500.0), np.asarray([0, 0, 1, 2]))
+    assert result['cells']['200-300_day']['M00']['profile_count'] == 1
+    assert result['cells']['300-500_day']['M00']['profile_count'] == 1
+    assert len(result['magnetic_latitude_cells']) == 12
+    assert result['magnetic_latitude_definition'].startswith('dipole_abs_sin')
+
+
+def _background_selection_metrics(cell_bias=0.10, magnetic_bias=0.10,
+                                  n_profiles=30, ccc=0.70, rmse=0.36,
+                                  pearson_r=0.74):
+    cells = ('200-300_night', '200-300_day',
+             '300-500_night', '300-500_day')
+    magnetic = tuple(
+        f'{cell}_{label}'
+        for cell in cells
+        for label in ('abs_sinI_lt_0.25', 'abs_sinI_0.25_0.5',
+                      'abs_sinI_ge_0.5'))
+    result = {
+        'score': 0.27, 'ccc': ccc, 'rmse': rmse, 'pearson_r': pearson_r,
+        'background_source_conflict': {'any': False, 'cells': {}},
+    }
+    for source in ('fy', 'cosmic'):
+        result[f'{source}_background_stratified'] = {
+            'cells': {
+                cell: {'M00': {'bias': cell_bias,
+                               'profile_count': n_profiles}}
+                for cell in cells
+            },
+            'magnetic_latitude_cells': {
+                cell: {'M00': {'bias': magnetic_bias,
+                               'profile_count': n_profiles}}
+                for cell in magnetic
+            },
+        }
+    return result
+
+
+def test_background_bias_checkpoint_selection_contract():
+    baseline = _background_selection_metrics()
+    boundary = _background_selection_metrics(
+        cell_bias=0.09, magnetic_bias=0.09, ccc=0.69, rmse=0.37)
+    audit = _background_bias_selection_audit(boundary, baseline)
+    assert audit['eligible']
+    assert audit['mean_abs_bias_improvement_8'] >= 0.005
+    assert audit['mean_abs_bias_improvement_24'] >= 0.005
+
+    low_sample = _background_selection_metrics(
+        cell_bias=0.09, magnetic_bias=0.09)
+    low_sample['fy_background_stratified']['magnetic_latitude_cells'][
+        '200-300_day_abs_sinI_lt_0.25']['M00'].update(
+            bias=99.0, profile_count=29)
+    low_sample_audit = _background_bias_selection_audit(low_sample, baseline)
+    assert low_sample_audit['eligible']
+    assert low_sample_audit['magnetic_cells_compared'] == 23
+
+    conflict = _background_selection_metrics(0.08, 0.08)
+    conflict['cosmic_background_stratified']['cells'][
+        '200-300_day']['M00']['bias'] = -0.03
+    conflict['fy_background_stratified']['cells'][
+        '200-300_day']['M00']['bias'] = 0.03
+    conflict_audit = _background_bias_selection_audit(conflict, baseline)
+    assert not conflict_audit['eligible']
+    assert 'source_conflict' in conflict_audit['rejection_reasons']
+
+    nonfinite = _background_selection_metrics(0.08, 0.08)
+    nonfinite['rmse'] = float('nan')
+    nonfinite_audit = _background_bias_selection_audit(nonfinite, baseline)
+    assert not nonfinite_audit['eligible']
+    assert 'candidate_schema_or_finite' in nonfinite_audit['rejection_reasons']
+
+    missing_baseline = _background_selection_metrics()
+    del missing_baseline['ccc']
+    try:
+        _background_bias_selection_audit(boundary, missing_baseline)
+    except ValueError as exc:
+        assert 'baseline' in str(exc)
+    else:
+        raise AssertionError('invalid baseline schema must fail')
+
+
+def test_background_bias_selection_prioritizes_bias_and_keeps_analysis_rule():
+    baseline = _background_selection_metrics()
+    epoch3 = _background_selection_metrics(
+        cell_bias=0.08, magnetic_bias=0.08, ccc=0.69, rmse=0.361)
+    epoch4 = _background_selection_metrics(
+        cell_bias=0.094, magnetic_bias=0.094, ccc=0.71, rmse=0.359)
+    config = {
+        'background_checkpoint_selection': 'bias_constrained_v1',
+        'checkpoint_selection_semantics':
+            'mean_ccc_then_rmse_then_pearson_v1',
+    }
+    assert tuple(_development_selection_key(
+        epoch3, config, stage='background', baseline_metrics=baseline)) > tuple(
+            _development_selection_key(
+                epoch4, config, stage='background', baseline_metrics=baseline))
+    assert _development_selection_key(
+        epoch4, config, stage='analysis') == [0.71, -0.359, 0.74]
+
+
+def test_background_m00_isr_strata_are_station_specific():
+    altitude = np.asarray([150.0, 250.0, 350.0, 450.0])
+    local_time = np.asarray([12.0, 12.0, 0.0, 0.0])
+    observation = np.asarray([10.0, 11.0, 12.0, 13.0])
+    predictions = {
+        'M00_A1S': observation + 0.01,
+        'M00_A0': observation + 0.02,
+        'Raw_IRI': observation + 0.03,
+        'Static_ETKF': observation + 0.04,
+    }
+    metric_rows, bootstrap_rows = _metric_and_bootstrap_rows(
+        'Jicamarca', altitude, local_time, observation, predictions,
+        np.asarray(['Jicamarca|1', 'Jicamarca|2',
+                    'Jicamarca|3', 'Jicamarca|4']))
+    all_alt = [
+        row for row in metric_rows
+        if row['stratum'] == 'all_alt_all' and row['model'] == 'M00_A1S']
+    assert len(all_alt) == 1 and all_alt[0]['n'] == 4
+    assert all(row['station'] == 'Jicamarca' for row in metric_rows)
+    assert not any(row['station'] == 'all' for row in metric_rows)
+    assert {row['baseline'] for row in bootstrap_rows} == {
+        'M00_A0', 'Raw_IRI', 'Static_ETKF'}
+
+
 if __name__ == '__main__':
     test_analytic_kalman_and_sign()
     test_joint_source_and_square_root_invariants()
@@ -834,4 +1007,9 @@ if __name__ == '__main__':
     test_observation_background_deduplication()
     test_covariance_moment_direction_mask_and_profile_balance()
     test_empirical_covariance_loss_uses_frozen_stable_cells()
+    test_background_stratum_bias_profile_balance_and_boundaries()
+    test_background_stratified_metrics_profile_and_magnetic_bins()
+    test_background_bias_checkpoint_selection_contract()
+    test_background_bias_selection_prioritizes_bias_and_keeps_analysis_rule()
+    test_background_m00_isr_strata_are_station_specific()
     print('run66 v7/v8 ETKF regression checks passed')

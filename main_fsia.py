@@ -204,6 +204,9 @@ def main(eval_only=False, resume_ckpt=None, run_name=_DEFAULT_RUN_NAME,
          analysis_exact_mode_loss=None, representativeness_kernel=None,
          background_only=False,
          include_isr_overlay=False, background_trust_gate=None,
+         background_stratum_bias_gradient_target=None,
+         background_checkpoint_selection=None,
+         background_selection_baseline=None,
          model_domain=None, smoke_run=False):
     # ==================== 加载配置 ====================
     config = get_config_mdia()
@@ -296,6 +299,38 @@ def main(eval_only=False, resume_ckpt=None, run_name=_DEFAULT_RUN_NAME,
         if gram_gradient_target is None else gram_gradient_target)
     if not 0.0 < gram_gradient_target <= 1.0:
         raise ValueError('gram_gradient_target must be in (0, 1]')
+    background_stratum_bias_gradient_target = float(
+        prior_config.get(
+            'background_stratum_bias_gradient_target',
+            config.get('background_stratum_bias_gradient_target', 0.0))
+        if background_stratum_bias_gradient_target is None
+        else background_stratum_bias_gradient_target)
+    if not 0.0 <= background_stratum_bias_gradient_target <= 1.0:
+        raise ValueError(
+            'background_stratum_bias_gradient_target must be in [0, 1]')
+    background_stratum_bias_calibration_batches = int(
+        prior_config.get(
+            'background_stratum_bias_calibration_batches',
+            config.get('background_stratum_bias_calibration_batches', 20)))
+    if background_stratum_bias_calibration_batches < 1:
+        raise ValueError(
+            'background_stratum_bias_calibration_batches must be positive')
+    background_checkpoint_selection = (
+        prior_config.get(
+            'background_checkpoint_selection',
+            config.get('background_checkpoint_selection', 'legacy'))
+        if background_checkpoint_selection is None
+        else str(background_checkpoint_selection).replace('-', '_'))
+    if background_checkpoint_selection not in ('legacy', 'bias_constrained_v1'):
+        raise ValueError('unsupported Background checkpoint selection')
+    if background_selection_baseline is None:
+        background_selection_baseline = prior_config.get(
+            'background_selection_baseline',
+            config.get('background_selection_baseline'))
+    if (background_checkpoint_selection == 'bias_constrained_v1'
+            and not background_selection_baseline):
+        raise ValueError(
+            'Background checkpoint selection requires --background-selection-baseline')
     direction_loss = bool(
         prior_config.get('use_direction_loss', False)
         if direction_loss is None else direction_loss)
@@ -436,6 +471,12 @@ def main(eval_only=False, resume_ckpt=None, run_name=_DEFAULT_RUN_NAME,
         representativeness_kernel_path=representativeness_kernel,
         representativeness_floor=representativeness_floor,
         include_isr_overlay=bool(include_isr_overlay),
+        background_stratum_bias_gradient_target=(
+            background_stratum_bias_gradient_target),
+        background_stratum_bias_calibration_batches=(
+            background_stratum_bias_calibration_batches),
+        background_checkpoint_selection=background_checkpoint_selection,
+        background_selection_baseline=background_selection_baseline,
         model_domain_semantics=model_domain_semantics,
         alt_range=alt_range,
         observation_alt_range=observation_alt_range,
@@ -495,13 +536,21 @@ def main(eval_only=False, resume_ckpt=None, run_name=_DEFAULT_RUN_NAME,
         if summary_path.is_file():
             with summary_path.open(encoding='utf-8') as stream:
                 training_summary = json.load(stream)
-            if training_summary.get('completed_stage') != 'analysis':
+            expected_stage = 'background' if background_only else 'analysis'
+            recorded_stage = training_summary.get('completed_stage')
+            compatible_background_replay = (
+                background_only and recorded_stage == 'analysis'
+                and (run_dir / 'best_background_model.pth').is_file())
+            if (recorded_stage != expected_stage
+                    and not compatible_background_replay):
                 raise ValueError(
-                    'eval-only requires a completed Analysis checkpoint; '
-                    'Background-only artifacts are not valid Analysis models')
+                    f'eval-only requires a completed {expected_stage} checkpoint')
+        checkpoint_name = (
+            'best_background_model.pth' if background_only
+            else 'best_fsia_model.pth')
         update_config_mdia(
             eval_only=True,
-            resume_ckpt=os.path.join(config['save_dir'], 'best_fsia_model.pth'))
+            resume_ckpt=os.path.join(config['save_dir'], checkpoint_name))
     elif resume_ckpt is not None:
         last_state = run_dir / 'last_training_state.pth'
         resume_path = (
@@ -531,6 +580,8 @@ def main(eval_only=False, resume_ckpt=None, run_name=_DEFAULT_RUN_NAME,
         required_paths.extend(['fy_qc_report_path', 'cosmic_qc_report_path'])
     if representativeness_kernel:
         required_paths.append('representativeness_kernel_path')
+    if background_checkpoint_selection == 'bias_constrained_v1':
+        required_paths.append('background_selection_baseline')
     missing = [k for k in required_paths
                if not config.get(k) or not os.path.exists(config[k])]
     if missing:
@@ -763,6 +814,18 @@ if __name__ == '__main__':
         default=None,
         help='enable the fixed low-altitude nighttime Background trust gate')
     parser.add_argument(
+        '--background-stratum-bias-gradient-target', type=float, default=None,
+        help=('Background source-by-stratum mean-Bias gradient ratio target; '
+              '0 disables the optional loss'))
+    parser.add_argument(
+        '--background-checkpoint-selection',
+        choices=('legacy', 'bias-constrained-v1'),
+        default=None,
+        help='Background checkpoint selector')
+    parser.add_argument(
+        '--background-selection-baseline', default=None,
+        help='A0 background_development_replay.json used by bias-constrained-v1')
+    parser.add_argument(
         '--model-domain', choices=tuple(_CLI_DOMAIN_SPECS), default=None,
         help=('M2-W domain preset: strict 200-500 km, or 120-500 km model '
               'with 200-500 km satellite observations'))
@@ -875,6 +938,12 @@ if __name__ == '__main__':
                 background_only=args.background_only,
                 include_isr_overlay=args.include_isr_overlay,
                 background_trust_gate=args.background_trust_gate,
+                background_stratum_bias_gradient_target=(
+                    args.background_stratum_bias_gradient_target),
+                background_checkpoint_selection=(
+                    args.background_checkpoint_selection),
+                background_selection_baseline=(
+                    args.background_selection_baseline),
                 model_domain=args.model_domain,
                 smoke_run=args.smoke,
             )

@@ -24,6 +24,7 @@ try:
         FSIA_INR_Model,
         solve_density_modes,
     )
+    from .mdia_model import _compute_dip_features
     from .physics_losses_mdia import profile_huber_loss, second_difference_loss
     from .sliding_dataset import (
         SlidingWindowBatchProcessor,
@@ -38,6 +39,7 @@ try:
 except ImportError:
     from config_mdia import get_config_mdia
     from fsia_model import FSIA_INR_Model, solve_density_modes
+    from mdia_model import _compute_dip_features
     from physics_losses_mdia import profile_huber_loss, second_difference_loss
     from sliding_dataset import (
         SlidingWindowBatchProcessor,
@@ -357,6 +359,18 @@ def _record_resolved_training_config(config, covariance_strata):
             config.get('gram_calibration_batches', 20)),
         'resolved_gram_weight': config.get('resolved_gram_weight'),
         'gram_gradient_calibration': config.get('gram_gradient_calibration'),
+        'background_stratum_bias_gradient_target': float(config.get(
+            'background_stratum_bias_gradient_target', 0.0)),
+        'background_stratum_bias_calibration_batches': int(config.get(
+            'background_stratum_bias_calibration_batches', 20)),
+        'resolved_background_stratum_bias_weight': config.get(
+            'resolved_background_stratum_bias_weight'),
+        'background_stratum_bias_gradient_calibration': config.get(
+            'background_stratum_bias_gradient_calibration'),
+        'background_checkpoint_selection': config.get(
+            'background_checkpoint_selection', 'legacy'),
+        'background_selection_baseline': config.get(
+            'background_selection_baseline'),
         'representativeness_kernel': config.get(
             'resolved_representativeness_kernel'),
         'covariance_strata': covariance_strata,
@@ -935,6 +949,87 @@ def _profile_weighted_mean(values, valid, profile_ids, weights):
     return torch.stack(results).mean()
 
 
+def background_stratified_bias_loss(
+        prediction, target, coords, profile_ids,
+        alt_range=(200.0, 500.0), return_details=False):
+    """Profile-balanced source-by-stratum mean-bias penalty.
+
+    The four cells are 200--300/300--500 km by local day/night.  A profile
+    contributes one mean error to each cell it occupies; cells with no valid
+    profiles are skipped.  Keeping this loss source-local prevents opposite
+    FY/COSMIC biases from cancelling before the caller combines the sources.
+    """
+    prediction = prediction.reshape(-1)
+    target = target.reshape(-1)
+    coords = coords.reshape(-1, coords.shape[-1])
+    profile_ids = profile_ids.reshape(-1)
+    if not (len(prediction) == len(target) == len(coords) == len(profile_ids)):
+        raise ValueError('Background Bias inputs must have equal lengths')
+    lower, upper = map(float, alt_range)
+    if not lower < upper:
+        raise ValueError('Background Bias altitude range must be increasing')
+    altitude = coords[:, 2]
+    local_time = torch.remainder(coords[:, 3] + coords[:, 1] / 15.0, 24.0)
+    night = (local_time < 6.0) | (local_time >= 18.0)
+    valid = (
+        torch.isfinite(prediction) & torch.isfinite(target)
+        & torch.isfinite(coords).all(dim=1)
+        & torch.isfinite(profile_ids.to(dtype=coords.dtype))
+        & (altitude >= lower) & (altitude <= upper))
+    errors = prediction - target
+    # The public labels intentionally remain stable for manifest/diagnostic use.
+    cells = (
+        ('200-300_day', (altitude >= max(lower, 200.0))
+         & (altitude < min(upper, 300.0)) & ~night),
+        ('200-300_night', (altitude >= max(lower, 200.0))
+         & (altitude < min(upper, 300.0)) & night),
+        ('300-500_day', (altitude >= max(lower, 300.0))
+         & (altitude <= min(upper, 500.0)) & ~night),
+        ('300-500_night', (altitude >= max(lower, 300.0))
+         & (altitude <= min(upper, 500.0)) & night),
+    )
+    losses = []
+    details = {}
+    for label, cell_mask in cells:
+        selected = valid & cell_mask
+        if not selected.any():
+            details[label] = {
+                'profile_count': 0, 'point_count': 0,
+                'mean_bias': None, 'squared_bias': None,
+            }
+            continue
+        profile_means = []
+        for profile_id in torch.unique(profile_ids[selected], sorted=False):
+            profile_mask = selected & (profile_ids == profile_id)
+            if profile_mask.any():
+                profile_means.append(errors[profile_mask].mean())
+        if not profile_means:
+            details[label] = {
+                'profile_count': 0, 'point_count': 0,
+                'mean_bias': None, 'squared_bias': None,
+            }
+            continue
+        mean_bias = torch.stack(profile_means).mean()
+        squared_bias = mean_bias.square()
+        losses.append(squared_bias)
+        details[label] = {
+            'profile_count': len(profile_means),
+            'point_count': int(selected.sum().detach().cpu()),
+            'mean_bias': float(mean_bias.detach().cpu()),
+            'squared_bias': float(squared_bias.detach().cpu()),
+        }
+    if losses:
+        result = torch.stack(losses).mean()
+    else:
+        result = prediction.sum() * 0.0
+    if return_details:
+        details['active_cell_count'] = len(losses)
+        details['valid_profile_count'] = int(
+            torch.unique(profile_ids[valid], sorted=False).numel())
+        return result, details
+    return result
+
+
 def exact_mode_direction_losses(extras, target, profile_ids, target_source):
     """Penalize only M10/M01/M11 increments opposite to target residuals."""
     if target_source not in ('FY', 'COSMIC'):
@@ -1224,6 +1319,152 @@ def _resolve_direction_weight(
     return resolved
 
 
+def _resolve_background_stratum_bias_weight(
+        model, train_loader, cosmic_train_loader, batch_processor, device,
+        config, sw_manager, iri_peak_manager, allowed_profile_ids=None):
+    """Calibrate the Background mean-Bias term against its data loss."""
+    batches = int(config.get('background_stratum_bias_calibration_batches', 20))
+    target_ratio = float(config.get(
+        'background_stratum_bias_gradient_target', 0.0))
+    if batches < 1 or not 0.0 <= target_ratio <= 1.0:
+        raise ValueError(
+            'Background Bias calibration requires batches >= 1 and target in [0, 1]')
+    if target_ratio == 0.0:
+        config['w_background_stratum_bias'] = 0.0
+        config['resolved_background_stratum_bias_weight'] = 0.0
+        config['background_stratum_bias_gradient_calibration'] = {
+            'enabled': False, 'requested_batches': batches,
+            'target_ratio': 0.0,
+        }
+        return 0.0
+
+    module_modes = [(module, module.training) for module in model.modules()]
+    requires_grad = [
+        (parameter, bool(parameter.requires_grad))
+        for parameter in model.parameters()]
+    state_dict = {
+        name: value.detach().clone()
+        for name, value in model.state_dict().items()}
+    gradients = [
+        (parameter, None if parameter.grad is None
+         else parameter.grad.detach().clone())
+        for parameter in model.parameters()]
+    transient = {
+        name: _clone_calibration_value(getattr(model.kalman_layer, name))
+        for name in ('last_member_weights', 'last_inflation_scale')
+        if hasattr(model.kalman_layer, name)}
+    numpy_state = np.random.get_state()
+    torch_state = torch.get_rng_state()
+    cuda_state = (
+        torch.cuda.get_rng_state_all() if device.type == 'cuda' else None)
+    ratios = []
+    cell_counts = []
+    processed = 0
+    try:
+        _set_training_stage(model, 'background')
+        _set_stage_mode(model, 'background')
+        parameters = _current_stage_trainable_parameters(model)
+        if not parameters:
+            raise RuntimeError('Background Bias calibration has no trainable parameters')
+        fy_iter = iter(train_loader)
+        cosmic_iter = iter(cosmic_train_loader)
+        for batch_index in range(batches):
+            try:
+                fy_batch = next(fy_iter)
+            except StopIteration:
+                fy_iter = iter(train_loader)
+                fy_batch = next(fy_iter)
+            try:
+                cosmic_batch = next(cosmic_iter)
+            except StopIteration:
+                cosmic_iter = iter(cosmic_train_loader)
+                cosmic_batch = next(cosmic_iter)
+            coords, target, profile_ids = _unpack_source_batch(fy_batch, device)
+            cosmic_coords, cosmic_target, cosmic_ids = _unpack_source_batch(
+                cosmic_batch, device)
+            sw_seq = sw_manager.get_drivers_sequence(coords[:, 3])
+            cosmic_sw = sw_manager.get_drivers_sequence(cosmic_coords[:, 3])
+            iri_peak = (iri_peak_manager.get_iri_peak(coords)
+                        if iri_peak_manager is not None else None)
+            cosmic_peak = (iri_peak_manager.get_iri_peak(cosmic_coords)
+                           if iri_peak_manager is not None else None)
+            with torch.amp.autocast(
+                    'cuda', enabled=bool(config.get('use_amp', False))
+                    and device.type == 'cuda'):
+                _, _, _, _, fy_extras = _source_forward(
+                    model, batch_processor, coords, sw_seq, iri_peak,
+                    'background', 'FY', profile_ids, False, config,
+                    iri_peak_manager, allowed_profile_ids)
+                _, _, _, _, cosmic_extras = _source_forward(
+                    model, batch_processor, cosmic_coords, cosmic_sw,
+                    cosmic_peak, 'background', 'COSMIC', cosmic_ids, False,
+                    config, iri_peak_manager, allowed_profile_ids)
+                fy_observation = profile_huber_loss(
+                    fy_extras['ne_bkg'], target, profile_ids,
+                    delta=config.get('huber_delta', 0.2))
+                cosmic_observation = profile_huber_loss(
+                    cosmic_extras['ne_bkg'], cosmic_target,
+                    cosmic_ids, delta=config.get('huber_delta', 0.2))
+                observation = 0.5 * (fy_observation + cosmic_observation)
+                fy_bias, fy_details = background_stratified_bias_loss(
+                    fy_extras['ne_bkg'], target, coords, profile_ids,
+                    return_details=True)
+                cosmic_bias, cosmic_details = background_stratified_bias_loss(
+                    cosmic_extras['ne_bkg'], cosmic_target,
+                    cosmic_coords, cosmic_ids, return_details=True)
+                bias = 0.5 * (fy_bias + cosmic_bias)
+            observation_grad, bias_grad, ratio, _ = _gradient_norms(
+                observation, bias, parameters)
+            values = tuple(float(value.detach().cpu()) for value in (
+                observation_grad, bias_grad, ratio))
+            processed += 1
+            cell_counts.append({
+                'batch': batch_index + 1,
+                'FY': fy_details['active_cell_count'],
+                'COSMIC': cosmic_details['active_cell_count'],
+            })
+            if all(np.isfinite(value) and value > 0.0 for value in values):
+                ratios.append(values[2])
+    finally:
+        model.load_state_dict(state_dict, strict=True)
+        for parameter, gradient in gradients:
+            parameter.grad = (
+                None if gradient is None else gradient.clone())
+        for parameter, enabled in requires_grad:
+            parameter.requires_grad_(enabled)
+        for module, training in module_modes:
+            module.train(training)
+        for name, value in transient.items():
+            setattr(model.kalman_layer, name, _clone_calibration_value(value))
+        np.random.set_state(numpy_state)
+        torch.set_rng_state(torch_state)
+        if cuda_state is not None:
+            torch.cuda.set_rng_state_all(cuda_state)
+    if not ratios:
+        raise RuntimeError(
+            'Background Bias calibration produced no finite positive gradients')
+    median_ratio = float(np.median(ratios))
+    resolved = float(np.clip(target_ratio / median_ratio, 1e-4, 1.0))
+    config['w_background_stratum_bias'] = resolved
+    config['resolved_background_stratum_bias_weight'] = resolved
+    config['background_stratum_bias_gradient_calibration'] = {
+        'enabled': True,
+        'requested_batches': batches,
+        'processed_batches': processed,
+        'valid_batches': len(ratios),
+        'raw_ratios': [float(value) for value in ratios],
+        'median_ratio': median_ratio,
+        'target_ratio': target_ratio,
+        'resolved_weight': resolved,
+        'achieved_median_ratio': resolved * median_ratio,
+        'active_cells': cell_counts,
+    }
+    print(
+        f'[Background分层Bias] 梯度比中位数={median_ratio:.6f}, '
+        f'resolved lambda={resolved:.6f}')
+    return resolved
+
+
 def _resolve_v14_gram_weight_from_ratios(raw_ratios, target_ratio):
     """Resolve the v14 coefficient without silently changing the target."""
     try:
@@ -1442,12 +1683,15 @@ def train_one_epoch(model, train_loader, batch_processor, optimizer, device,
         'fy_low_altitude_active_fraction',
         'cosmic_low_altitude_active_fraction',
         'weighted_covariance', 'weighted_direction', 'weighted_gram',
+        'background_stratum_bias', 'weighted_background_stratum_bias',
+        'background_stratum_bias_active_cells',
         'weighted_vertical', 'weighted_time',
         'gradient_ratio', 'gradient_ratio_covariance',
         'gradient_ratio_direction', 'gradient_ratio_iri',
         'gradient_ratio_increment', 'gradient_ratio_low_altitude',
         'gradient_ratio_vertical',
         'gradient_ratio_time', 'gradient_ratio_gram',
+        'gradient_ratio_background_stratum_bias',
         'gradient_ratio_fy_m10', 'gradient_ratio_fy_m01',
         'gradient_ratio_fy_m11', 'gradient_ratio_cosmic_m10',
         'gradient_ratio_cosmic_m01', 'gradient_ratio_cosmic_m11',
@@ -1624,6 +1868,26 @@ def train_one_epoch(model, train_loader, batch_processor, optimizer, device,
             weighted_direction = (
                 float(config.get('resolved_direction_weight', 0.0))
                 * direction_loss)
+            background_stratum_bias_loss = observation_loss.new_zeros(())
+            background_bias_details = {
+                'FY': {'active_cell_count': 0},
+                'COSMIC': {'active_cell_count': 0},
+            }
+            if stage == 'background':
+                fy_bias, background_bias_details['FY'] = (
+                    background_stratified_bias_loss(
+                        fy_extras['ne_bkg'], target, coords, profile_ids,
+                        return_details=True))
+                cosmic_bias, background_bias_details['COSMIC'] = (
+                    background_stratified_bias_loss(
+                        cosmic_extras['ne_bkg'], cosmic_target,
+                        cosmic_coords, cosmic_ids, return_details=True))
+                background_stratum_bias_loss = 0.5 * (fy_bias + cosmic_bias)
+            weighted_background_stratum_bias = (
+                float(config.get(
+                    'resolved_background_stratum_bias_weight',
+                    config.get('w_background_stratum_bias', 0.0)))
+                * background_stratum_bias_loss)
             data_loss = (
                 observation_loss + weighted_covariance + weighted_direction
                 + weighted_gram)
@@ -1672,7 +1936,7 @@ def train_one_epoch(model, train_loader, batch_processor, optimizer, device,
                     config.get('w_time_background', 0.01) * time_loss)
                 auxiliary_loss = (
                     weighted_iri + weighted_low_altitude + weighted_vertical
-                    + weighted_time
+                    + weighted_time + weighted_background_stratum_bias
                 )
             else:
                 fy_increment = F.smooth_l1_loss(
@@ -1702,6 +1966,7 @@ def train_one_epoch(model, train_loader, batch_processor, optimizer, device,
                 'covariance': weighted_covariance,
                 'direction': weighted_direction,
                 'gram': weighted_gram,
+                'background_stratum_bias': weighted_background_stratum_bias,
                 'iri': weighted_iri,
                 'increment': weighted_increment,
                 'low_altitude': weighted_low_altitude,
@@ -1773,6 +2038,14 @@ def train_one_epoch(model, train_loader, batch_processor, optimizer, device,
                 'covariance_weighted': weighted_covariance.item(),
                 'gram_raw': gram_loss.item(),
                 'gram_weighted': weighted_gram.item(),
+                'background_stratum_bias_raw': (
+                    background_stratum_bias_loss.item()),
+                'background_stratum_bias_weighted': (
+                    weighted_background_stratum_bias.item()),
+                'background_stratum_bias_active_cells': {
+                    source: int(details.get('active_cell_count', 0))
+                    for source, details in background_bias_details.items()
+                },
                 **{
                     f'fy_gram_{mode.lower()}_raw':
                     fy_gram_losses[mode].item()
@@ -1953,6 +2226,13 @@ def train_one_epoch(model, train_loader, batch_processor, optimizer, device,
         stats['weighted_covariance'] += weighted_covariance.item()
         stats['weighted_direction'] += weighted_direction.item()
         stats['weighted_gram'] += weighted_gram.item()
+        stats['background_stratum_bias'] += (
+            background_stratum_bias_loss.item())
+        stats['weighted_background_stratum_bias'] += (
+            weighted_background_stratum_bias.item())
+        stats['background_stratum_bias_active_cells'] += 0.5 * sum(
+            details.get('active_cell_count', 0)
+            for details in background_bias_details.values())
         stats['weighted_vertical'] += weighted_vertical.item()
         stats['weighted_time'] += weighted_time.item()
         stats['gradient_ratio'] += ratio.item()
@@ -2038,8 +2318,9 @@ def _profile_metrics(predictions, targets, profile_ids):
 
 def _background_stratified_metrics(prediction, raw_prediction, target, coords,
                                    residual_raw, residual, trust_gate,
-                                   alt_range=(120.0, 500.0)):
-    """Pointwise Background diagnostics by altitude and local day/night."""
+                                   alt_range=(120.0, 500.0),
+                                   profile_ids=None):
+    """Profile-balanced Background diagnostics by cell and magnetic latitude."""
     prediction = np.asarray(prediction, dtype=np.float64).reshape(-1)
     raw_prediction = np.asarray(raw_prediction, dtype=np.float64).reshape(-1)
     target = np.asarray(target, dtype=np.float64).reshape(-1)
@@ -2047,19 +2328,40 @@ def _background_stratified_metrics(prediction, raw_prediction, target, coords,
     residual_raw = np.asarray(residual_raw, dtype=np.float64).reshape(-1)
     residual = np.asarray(residual, dtype=np.float64).reshape(-1)
     trust_gate = np.asarray(trust_gate, dtype=np.float64).reshape(-1)
+    if profile_ids is not None:
+        profile_ids = np.asarray(profile_ids).reshape(-1)
+        if len(profile_ids) != len(prediction):
+            raise ValueError('Background diagnostic profile IDs have wrong length')
     local_time = np.remainder(coords[:, 3] + coords[:, 1] / 15.0, 24.0)
     night = (local_time < 6.0) | (local_time >= 18.0)
     finite = (np.isfinite(prediction) & np.isfinite(raw_prediction)
               & np.isfinite(target) & np.isfinite(residual_raw)
-              & np.isfinite(residual) & np.isfinite(trust_gate))
+              & np.isfinite(residual) & np.isfinite(trust_gate)
+              & np.isfinite(coords).all(axis=1))
+    if profile_ids is not None:
+        finite &= np.isfinite(profile_ids)
 
     def point_metrics(values, selected):
         selected = selected & finite
         if not selected.any():
-            return {'n': 0, 'rmse': None, 'bias': None, 'mae': None}
+            return {
+                'n': 0, 'point_count': 0, 'profile_count': 0,
+                'rmse': None, 'bias': None, 'mae': None,
+            }
         error = values[selected] - target[selected]
+        point_count = int(selected.sum())
+        if profile_ids is not None:
+            selected_ids = profile_ids[selected]
+            profile_error = np.asarray([
+                np.mean(error[selected_ids == profile_id])
+                for profile_id in np.unique(selected_ids)
+            ], dtype=np.float64)
+            error = profile_error
+        profile_count = int(error.size) if profile_ids is not None else point_count
         return {
-            'n': int(selected.sum()),
+            'n': profile_count,
+            'point_count': point_count,
+            'profile_count': profile_count,
             'rmse': float(np.sqrt(np.mean(error * error))),
             'bias': float(np.mean(error)),
             'mae': float(np.mean(np.abs(error))),
@@ -2097,10 +2399,35 @@ def _background_stratified_metrics(prediction, raw_prediction, target, coords,
                 'trust_gate_mean': float(np.mean(trust_gate[selected & finite]))
                 if (selected & finite).any() else None,
             }
+    magnetic_cells = {}
+    latitude = torch.as_tensor(coords[:, 0], dtype=torch.float64)
+    longitude = torch.as_tensor(coords[:, 1], dtype=torch.float64)
+    sin_i, _ = _compute_dip_features(latitude, longitude)
+    abs_sin_i = np.abs(sin_i.detach().cpu().numpy())
+    for index, (lower, upper) in enumerate(zip(edges[:-1], edges[1:])):
+        label = f'{lower:g}-{upper:g}'
+        altitude = (coords[:, 2] >= lower) & (
+            coords[:, 2] <= upper if index == len(edges) - 2
+            else coords[:, 2] < upper)
+        for period, period_mask in (('night', night), ('day', ~night)):
+            for magnetic_label, magnetic_mask in (
+                    ('abs_sinI_lt_0.25', abs_sin_i < 0.25),
+                    ('abs_sinI_0.25_0.5',
+                     (abs_sin_i >= 0.25) & (abs_sin_i < 0.5)),
+                    ('abs_sinI_ge_0.5', abs_sin_i >= 0.5)):
+                selected = altitude & period_mask & magnetic_mask
+                magnetic_cells[
+                    f'{label}_{period}_{magnetic_label}'] = {
+                        'raw_iri': point_metrics(raw_prediction, selected),
+                        'M00': point_metrics(prediction, selected),
+                    }
     transition = ((coords[:, 2] >= 200.0) & (coords[:, 2] < 300.0)
                   & night & finite)
     return {
         'cells': cells,
+        'magnetic_latitude_cells': magnetic_cells,
+        'magnetic_latitude_definition': (
+            'dipole_abs_sin_inclination_bins_<0.25_[0.25,0.5)_>=0.5'),
         'trust_gate': {
             'mean': float(np.mean(trust_gate[finite])) if finite.any() else None,
             'p05': float(np.quantile(trust_gate[finite], 0.05)) if finite.any() else None,
@@ -2160,6 +2487,9 @@ def _evaluate_source(model, loader, batch_processor, device, stage, source,
         raw = _profile_metrics(raw_predictions, targets, profile_ids_all)
         residual = np.concatenate(predictions).reshape(-1)
         raw_values = np.concatenate(raw_predictions).reshape(-1)
+        all_targets = np.concatenate(targets).reshape(-1)
+        all_coords = np.concatenate(coords_all)
+        all_profile_ids = np.concatenate(profile_ids_all).reshape(-1)
         result.update({
             'raw_iri_profile_rmse': raw['profile_rmse'],
             'raw_iri_rmse': raw['rmse'],
@@ -2173,10 +2503,10 @@ def _evaluate_source(model, loader, batch_processor, device, stage, source,
                 np.sqrt(np.mean((residual - raw_values) ** 2))),
         })
         result['background_stratified'] = _background_stratified_metrics(
-            residual, raw_values, np.concatenate(targets).reshape(-1),
-            np.concatenate(coords_all), np.concatenate(raw_residuals),
-            np.concatenate(residuals), np.concatenate(trust_gates),
-            _observation_alt_range(config))
+            residual, raw_values, all_targets, all_coords,
+            np.concatenate(raw_residuals), np.concatenate(residuals),
+            np.concatenate(trust_gates), _observation_alt_range(config),
+            all_profile_ids)
     return result
 
 
@@ -2234,6 +2564,17 @@ def validate(model, val_loader, batch_processor, device, config,
         'pearson_r': 0.5 * (fy['pearson_r'] + cosmic['pearson_r']),
     }
     if stage == 'background':
+        fy_cells = fy['background_stratified']['cells']
+        cosmic_cells = cosmic['background_stratified']['cells']
+        conflicts = {}
+        for cell in sorted(set(fy_cells) & set(cosmic_cells)):
+            fy_bias = fy_cells[cell]['M00'].get('bias')
+            cosmic_bias = cosmic_cells[cell]['M00'].get('bias')
+            conflicts[cell] = bool(
+                fy_bias is not None and cosmic_bias is not None
+                and np.isfinite(fy_bias) and np.isfinite(cosmic_bias)
+                and abs(fy_bias) >= 0.02 and abs(cosmic_bias) >= 0.02
+                and fy_bias * cosmic_bias < 0.0)
         metrics.update({
             'fy_raw_iri_profile_rmse': fy['raw_iri_profile_rmse'],
             'cosmic_raw_iri_profile_rmse': cosmic['raw_iri_profile_rmse'],
@@ -2256,12 +2597,237 @@ def validate(model, val_loader, batch_processor, device, config,
                 'background_residual_rms'],
             'fy_background_stratified': fy['background_stratified'],
             'cosmic_background_stratified': cosmic['background_stratified'],
+            'background_source_conflict': {
+                'cells': conflicts,
+                'any': bool(any(conflicts.values())),
+                'criterion': (
+                    'opposite FY/COSMIC M00 Bias with both absolute Bias >= 0.02 dex'),
+            },
         })
     return score, metrics
 
 
-def _development_selection_key(metrics, config):
+_BACKGROUND_SELECTION_CELLS = (
+    '200-300_night', '200-300_day',
+    '300-500_night', '300-500_day',
+)
+_BACKGROUND_SELECTION_MAGNETIC_LABELS = (
+    'abs_sinI_lt_0.25', 'abs_sinI_0.25_0.5', 'abs_sinI_ge_0.5',
+)
+
+
+def _background_selection_values(metrics, label):
+    """Validate and extract the fixed bias-constrained-v1 metric schema."""
+    if not isinstance(metrics, dict):
+        raise ValueError(f'{label} metrics must be an object')
+    scalars = {}
+    for key in ('score', 'ccc', 'rmse', 'pearson_r'):
+        try:
+            value = float(metrics[key])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f'{label} metrics lacks finite {key}') from exc
+        if not np.isfinite(value):
+            raise ValueError(f'{label} metrics lacks finite {key}')
+        scalars[key] = value
+
+    cells, magnetic = {}, {}
+    for source in ('fy', 'cosmic'):
+        source_key = f'{source}_background_stratified'
+        try:
+            source_metrics = metrics[source_key]
+            source_cells = source_metrics['cells']
+            source_magnetic = source_metrics['magnetic_latitude_cells']
+        except (KeyError, TypeError) as exc:
+            raise ValueError(f'{label} metrics lacks {source_key} schema') from exc
+        for cell in _BACKGROUND_SELECTION_CELLS:
+            try:
+                item = source_cells[cell]['M00']
+                bias = float(item['bias'])
+                count = int(item['profile_count'])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError(
+                    f'{label} metrics lacks {source.upper()} {cell} M00 Bias') from exc
+            if not np.isfinite(bias) or count < 0:
+                raise ValueError(
+                    f'{label} metrics has invalid {source.upper()} {cell} M00 Bias')
+            cells[(source, cell)] = {'bias': bias, 'profile_count': count}
+        for cell in _BACKGROUND_SELECTION_CELLS:
+            for magnetic_label in _BACKGROUND_SELECTION_MAGNETIC_LABELS:
+                key = f'{cell}_{magnetic_label}'
+                try:
+                    item = source_magnetic[key]['M00']
+                    bias = float(item['bias'])
+                    count = int(item['profile_count'])
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise ValueError(
+                        f'{label} metrics lacks {source.upper()} {key} M00 Bias') from exc
+                if not np.isfinite(bias) or count < 0:
+                    raise ValueError(
+                        f'{label} metrics has invalid {source.upper()} {key} M00 Bias')
+                magnetic[(source, key)] = {
+                    'bias': bias, 'profile_count': count}
+    return {'scalars': scalars, 'cells': cells, 'magnetic': magnetic}
+
+
+def _background_bias_selection_audit(metrics, baseline_metrics):
+    """Apply the fixed A1-S eligibility gates and return a JSON-safe audit."""
+    baseline = _background_selection_values(baseline_metrics, 'baseline')
+    try:
+        candidate = _background_selection_values(metrics, 'candidate')
+    except ValueError as exc:
+        return {
+            'semantics': 'bias_constrained_v1',
+            'eligible': False,
+            'rejection_reasons': ['candidate_schema_or_finite'],
+            'error': str(exc),
+            'selection_key': None,
+        }
+
+    epsilon = 1e-12
+    thresholds = {
+        'rmse_degradation_max': 0.01,
+        'ccc_degradation_max': 0.01,
+        'cell_abs_bias_degradation_max': 0.02,
+        'magnetic_min_profiles': 30,
+        'mean_abs_bias_improvement_8_min': 0.005,
+        'mean_abs_bias_improvement_24_min': 0.005,
+        'source_conflict_abs_bias_min': 0.02,
+    }
+    rmse_delta = (
+        candidate['scalars']['rmse'] - baseline['scalars']['rmse'])
+    ccc_delta = candidate['scalars']['ccc'] - baseline['scalars']['ccc']
+    cell_worsening = {}
+    for key, item in candidate['cells'].items():
+        degradation = abs(item['bias']) - abs(baseline['cells'][key]['bias'])
+        if degradation > thresholds['cell_abs_bias_degradation_max'] + epsilon:
+            cell_worsening[f'{key[0].upper()}:{key[1]}'] = float(degradation)
+
+    conflicts = {}
+    for cell in _BACKGROUND_SELECTION_CELLS:
+        fy_bias = candidate['cells'][('fy', cell)]['bias']
+        cosmic_bias = candidate['cells'][('cosmic', cell)]['bias']
+        conflicts[cell] = bool(
+            abs(fy_bias) >= thresholds['source_conflict_abs_bias_min'] - epsilon
+            and abs(cosmic_bias) >=
+            thresholds['source_conflict_abs_bias_min'] - epsilon
+            and fy_bias * cosmic_bias < 0.0)
+
+    baseline_mean_8 = float(np.mean([
+        abs(item['bias']) for item in baseline['cells'].values()]))
+    candidate_mean_8 = float(np.mean([
+        abs(item['bias']) for item in candidate['cells'].values()]))
+    compared_magnetic = [
+        key for key in candidate['magnetic']
+        if candidate['magnetic'][key]['profile_count'] >=
+        thresholds['magnetic_min_profiles']
+        and baseline['magnetic'][key]['profile_count'] >=
+        thresholds['magnetic_min_profiles']
+    ]
+    magnetic_worsening = {}
+    for key in compared_magnetic:
+        degradation = (
+            abs(candidate['magnetic'][key]['bias'])
+            - abs(baseline['magnetic'][key]['bias']))
+        if degradation > thresholds['cell_abs_bias_degradation_max'] + epsilon:
+            magnetic_worsening[f'{key[0].upper()}:{key[1]}'] = float(degradation)
+    if compared_magnetic:
+        baseline_mean_24 = float(np.mean([
+            abs(baseline['magnetic'][key]['bias'])
+            for key in compared_magnetic]))
+        candidate_mean_24 = float(np.mean([
+            abs(candidate['magnetic'][key]['bias'])
+            for key in compared_magnetic]))
+        magnetic_improvement = baseline_mean_24 - candidate_mean_24
+    else:
+        baseline_mean_24 = candidate_mean_24 = magnetic_improvement = None
+    cell_improvement = baseline_mean_8 - candidate_mean_8
+
+    reasons = []
+    if rmse_delta > thresholds['rmse_degradation_max'] + epsilon:
+        reasons.append('rmse_degradation')
+    if ccc_delta < -thresholds['ccc_degradation_max'] - epsilon:
+        reasons.append('ccc_degradation')
+    if cell_worsening:
+        reasons.append('cell_abs_bias_worsening')
+    if magnetic_worsening:
+        reasons.append('magnetic_abs_bias_worsening')
+    if any(conflicts.values()):
+        reasons.append('source_conflict')
+    if cell_improvement < (
+            thresholds['mean_abs_bias_improvement_8_min'] - epsilon):
+        reasons.append('insufficient_mean_abs_bias_improvement_8')
+    if magnetic_improvement is None:
+        reasons.append('no_magnetic_cells_with_30_profiles')
+    elif magnetic_improvement < (
+            thresholds['mean_abs_bias_improvement_24_min'] - epsilon):
+        reasons.append('insufficient_mean_abs_bias_improvement_24')
+
+    eligible = not reasons
+    key = ([
+        -candidate_mean_8, -candidate_mean_24,
+        candidate['scalars']['ccc'], -candidate['scalars']['rmse'],
+        candidate['scalars']['pearson_r'],
+    ] if eligible else None)
+    return {
+        'semantics': 'bias_constrained_v1',
+        'eligible': eligible,
+        'rejection_reasons': reasons,
+        'thresholds': thresholds,
+        'rmse_delta_vs_a0': float(rmse_delta),
+        'ccc_delta_vs_a0': float(ccc_delta),
+        'mean_abs_bias_8': candidate_mean_8,
+        'baseline_mean_abs_bias_8': baseline_mean_8,
+        'mean_abs_bias_improvement_8': float(cell_improvement),
+        'mean_abs_bias_24': candidate_mean_24,
+        'baseline_mean_abs_bias_24': baseline_mean_24,
+        'mean_abs_bias_improvement_24': (
+            None if magnetic_improvement is None
+            else float(magnetic_improvement)),
+        'magnetic_cells_compared': len(compared_magnetic),
+        'cell_abs_bias_worsening': cell_worsening,
+        'magnetic_abs_bias_worsening': magnetic_worsening,
+        'source_conflict_cells': conflicts,
+        'selection_key': key,
+    }
+
+
+
+def _load_background_selection_baseline(config):
+    semantics = config.get('background_checkpoint_selection', 'legacy')
+    if semantics == 'legacy':
+        return None
+    if semantics != 'bias_constrained_v1':
+        raise ValueError(
+            f'unsupported Background checkpoint selection: {semantics}')
+    path = config.get('background_selection_baseline')
+    if not path or not os.path.isfile(path):
+        raise FileNotFoundError(
+            f'Background selection baseline replay is missing: {path}')
+    with open(path, encoding='utf-8') as stream:
+        replay = json.load(stream)
+    if not isinstance(replay, dict) or not isinstance(replay.get('metrics'), dict):
+        raise ValueError('Background selection baseline replay lacks metrics object')
+    try:
+        replay_score = float(replay['score'])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(
+            'Background selection baseline replay lacks finite score') from exc
+    if not np.isfinite(replay_score):
+        raise ValueError('Background selection baseline replay lacks finite score')
+    _background_selection_values(replay['metrics'], 'baseline')
+    return replay['metrics']
+
+
+def _development_selection_key(metrics, config, stage=None,
+                               baseline_metrics=None):
     """Return a JSON-safe lexicographic key; larger is always better."""
+    selection_semantics = config.get(
+        'background_checkpoint_selection', 'legacy')
+    if stage == 'background' and selection_semantics == 'bias_constrained_v1':
+        if baseline_metrics is None:
+            raise ValueError('bias_constrained_v1 requires A0 baseline metrics')
+        return _background_bias_selection_audit(
+            metrics, baseline_metrics)['selection_key']
     semantics = config.get(
         'checkpoint_selection_semantics', 'mean_profile_rmse_v1')
     if semantics == 'mean_profile_rmse_v1':
@@ -2811,6 +3377,7 @@ def train_fsia(config=None):
     background_epochs = int(config.get('background_epochs', 5))
     analysis_epochs = int(config.get('analysis_epochs', 5))
     background_only = bool(config.get('background_only', False))
+    background_selection_baseline = _load_background_selection_baseline(config)
     total_epochs = (background_epochs if background_only
                     else background_epochs + analysis_epochs)
     if background_epochs <= 0 or (not background_only and analysis_epochs <= 0):
@@ -3116,6 +3683,14 @@ def train_fsia(config=None):
             if loaded.get('gram_gradient_calibration') is not None:
                 config['gram_gradient_calibration'] = loaded[
                     'gram_gradient_calibration']
+            if loaded.get('resolved_background_stratum_bias_weight') is not None:
+                config['resolved_background_stratum_bias_weight'] = float(
+                    loaded['resolved_background_stratum_bias_weight'])
+                config['w_background_stratum_bias'] = float(
+                    loaded['resolved_background_stratum_bias_weight'])
+            if loaded.get('background_stratum_bias_gradient_calibration') is not None:
+                config['background_stratum_bias_gradient_calibration'] = loaded[
+                    'background_stratum_bias_gradient_calibration']
             config['background_update_steps'] = list(
                 loaded.get('background_update_steps', []))
             resume_state = loaded
@@ -3129,6 +3704,23 @@ def train_fsia(config=None):
                     [state.cpu() for state in loaded['cuda_rng_state_all']])
 
     if config.get('eval_only'):
+        if background_only:
+            score, metrics = validate(
+                model, val_loader, batch_processor, device, config,
+                sw_manager, iri_peak_manager, cosmic_val_loader, 'background',
+                query_profile_partitions['development'])
+            replay = {
+                'score': float(score),
+                'metrics': metrics,
+                'checkpoint': config.get('resume_ckpt'),
+                'background_stratum_bias_gradient_target': float(config.get(
+                    'background_stratum_bias_gradient_target', 0.0)),
+            }
+            replay_path = os.path.join(
+                config['save_dir'], 'background_development_replay.json')
+            with open(replay_path, 'w', encoding='utf-8') as stream:
+                json.dump(replay, stream, ensure_ascii=False, indent=2)
+            print(f'  已写入 Background development 重放: {replay_path}')
         return (
             model, [], [], train_loader, val_loader,
             sw_manager, batch_processor, iri_peak_manager,
@@ -3173,6 +3765,12 @@ def train_fsia(config=None):
         _reset_random_seeds(config.get('analysis_seed', 42), device)
 
     _set_training_stage(model, current_stage)
+    if (current_stage == 'background'
+            and 'resolved_background_stratum_bias_weight' not in config):
+        _resolve_background_stratum_bias_weight(
+            model, train_loader, cosmic_train_loader, batch_processor, device,
+            config, sw_manager, iri_peak_manager,
+            query_profile_partitions['train'])
     if (current_stage == 'analysis'
             and (config.get('use_covariance_moment_loss', False)
                  or config.get('use_empirical_covariance_loss', False))
@@ -3213,6 +3811,14 @@ def train_fsia(config=None):
     for epoch in range(start_epoch, total_epochs):
         stage = 'background' if epoch < background_epochs else 'analysis'
         if stage != current_stage:
+            if (current_stage == 'background'
+                    and config.get(
+                        'background_checkpoint_selection', 'legacy') in
+                    ('bias_constrained_v1',)
+                    and best_epochs['background'] is None):
+                raise RuntimeError(
+                    'Background checkpoint selector found no eligible epoch; '
+                    'Analysis cannot start')
             model.load_state_dict(
                 torch.load(best_background, map_location=device, weights_only=True),
                 strict=True)
@@ -3335,15 +3941,24 @@ def train_fsia(config=None):
             **train_metrics,
             **val_metrics,
         }
-        history.append(history_row)
-        train_losses.append(train_loss)
-        val_losses.append(val_score)
         print(
             f"  train={train_loss:.6f} val={val_score:.6f} "
             f"FY={val_metrics['fy_profile_rmse']:.6f} "
             f"COSMIC={val_metrics['cosmic_profile_rmse']:.6f}")
 
-        selection_key = _development_selection_key(val_metrics, config)
+        selection_semantics = config.get(
+            'background_checkpoint_selection', 'legacy')
+        if stage == 'background' and selection_semantics == 'bias_constrained_v1':
+            selection_audit = _background_bias_selection_audit(
+                val_metrics, background_selection_baseline)
+            selection_key = selection_audit['selection_key']
+            history_row['checkpoint_selection'] = selection_audit
+        else:
+            selection_key = _development_selection_key(
+                val_metrics, config, stage=stage)
+        history.append(history_row)
+        train_losses.append(train_loss)
+        val_losses.append(val_score)
         previous_key = best_selection_keys[stage]
         if (selection_key is not None
                 and (previous_key is None
@@ -3354,7 +3969,13 @@ def train_fsia(config=None):
             _atomic_torch_save(
                 model.state_dict(),
                 best_background if stage == 'background' else best_analysis)
-        if stage == 'analysis':
+        if stage == 'background':
+            _atomic_torch_save(
+                model.state_dict(),
+                os.path.join(
+                    config['save_dir'],
+                    f'epoch_{epoch + 1:02d}_background_model.pth'))
+        else:
             _atomic_torch_save(
                 model.state_dict(),
                 os.path.join(
@@ -3439,6 +4060,14 @@ def train_fsia(config=None):
             'resolved_gram_weight': config.get('resolved_gram_weight'),
             'gram_gradient_calibration': config.get(
                 'gram_gradient_calibration'),
+            'background_stratum_bias_gradient_target': float(config.get(
+                'background_stratum_bias_gradient_target', 0.0)),
+            'background_stratum_bias_calibration_batches': int(config.get(
+                'background_stratum_bias_calibration_batches', 20)),
+            'resolved_background_stratum_bias_weight': config.get(
+                'resolved_background_stratum_bias_weight'),
+            'background_stratum_bias_gradient_calibration': config.get(
+                'background_stratum_bias_gradient_calibration'),
             'stage': stage,
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
@@ -3463,6 +4092,13 @@ def train_fsia(config=None):
               'w', encoding='utf-8') as stream:
         json.dump(history, stream, ensure_ascii=False, indent=2)
     _record_resolved_training_config(config, covariance_strata)
+    if (background_only
+            and config.get('background_checkpoint_selection', 'legacy') in
+            ('bias_constrained_v1',)
+            and best_epochs['background'] is None):
+        raise RuntimeError(
+            'Background checkpoint selector found no eligible epoch; '
+            'see fsia_training_history.json checkpoint_selection audits')
     background_validation = None
     background_gate_passed = None
     if background_only:
@@ -3507,6 +4143,14 @@ def train_fsia(config=None):
         'best_selection_keys': best_selection_keys,
         'checkpoint_selection_semantics': config.get(
             'checkpoint_selection_semantics', 'mean_profile_rmse_v1'),
+        'background_checkpoint_selection': config.get(
+            'background_checkpoint_selection', 'legacy'),
+        'background_selection_baseline': config.get(
+            'background_selection_baseline'),
+        'background_selection_audits': [
+            row['checkpoint_selection'] for row in history
+            if row.get('stage') == 'background'
+            and 'checkpoint_selection' in row],
         'checkpoint': best_background if background_only else best_analysis,
         'checkpoint_sha256': _sha256_file(
             best_background if background_only else best_analysis),
