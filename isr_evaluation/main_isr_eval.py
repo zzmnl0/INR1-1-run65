@@ -78,6 +78,8 @@ CONFIG = {
 }
 _HISTORICAL_EPOCH12_SHA256 = (
     '486ffe73722cde1ff2909da93898e02d4d1e173700c9e4fa9dd2f0990e2fe56a')
+_SHARED_FULL30_POOL = 'shared-full30'
+_SHARED_FULL30_COUNTS = {'FY': 66612, 'COSMIC': 84364}
 # ─────────────────────────────────────────────
 
 
@@ -403,17 +405,18 @@ def _public_station_reports(station_reports):
     ]
 
 
-def _artifact_identity(path, save_dir):
+def _artifact_identity(path, save_dir, include_hash=True):
     return {
         'relative_path': os.path.relpath(path, save_dir).replace(os.sep, '/'),
-        'sha256': _sha256(path),
+        'sha256': _sha256(path) if include_hash else None,
         'size_bytes': int(os.path.getsize(path)),
     }
 
 
 def _build_isr_evaluation_contract(candidate_contract, baseline_contract,
                                    isr_input_files, poker_geometry_audit,
-                                   config, output_artifacts=None):
+                                   config, output_artifacts=None,
+                                   observation_profile_pool=None):
     """Build the schema-v2 ISR contract independently of report finalization."""
     unique_isr_files = {
         item['sha256']: item
@@ -429,10 +432,14 @@ def _build_isr_evaluation_contract(candidate_contract, baseline_contract,
     contract = {
         'evaluation_schema_version': 2,
         'stratified_metrics_contract_version': 4,
-        'evaluation_code_sha256': _evaluation_code_sha256(),
+        'evaluation_code_sha256': (
+            None if config.get('skip_hash_verification', False)
+            else _evaluation_code_sha256()),
         'candidate_checkpoint': candidate_contract,
         'baseline_checkpoints': baseline_contract,
-        'token_partitions': ['train', 'development'],
+        'token_partitions': (
+            ['all_valid_profiles'] if observation_profile_pool == 'shared-full30'
+            else ['train', 'development']),
         'isr_input_files': sorted(unique_isr_files.values(),
                                   key=lambda item: item['path']),
         'poker_geometry': {
@@ -491,6 +498,8 @@ def _build_isr_evaluation_contract(candidate_contract, baseline_contract,
                 'the stratum as single-mechanism evidence.'),
         },
     }
+    if observation_profile_pool is not None:
+        contract['observation_profile_pool'] = observation_profile_pool
     if output_artifacts is not None:
         contract['output_artifacts'] = output_artifacts
     return contract
@@ -498,7 +507,8 @@ def _build_isr_evaluation_contract(candidate_contract, baseline_contract,
 
 def _write_isr_final_artifacts(save_dir, station_reports, candidate_contract,
                                baseline_contract, isr_input_files,
-                               poker_geometry_audit, config):
+                               poker_geometry_audit, config,
+                               observation_profile_pool=None):
     """Persist ISR public reports, caches, and completion contract in that order."""
     from isr_evaluation.plots import save_metrics_report
 
@@ -599,16 +609,23 @@ def _write_isr_final_artifacts(save_dir, station_reports, candidate_contract,
         os.makedirs(os.path.dirname(csv_path), exist_ok=True)
         _save_stratified_csv(report.get('stratified', {}), csv_path)
         stratified_csv_paths.append(csv_path)
+    include_hash = not bool(config.get('skip_hash_verification', False))
     output_artifacts = {
-        'report_text': _artifact_identity(report_text_path, save_dir),
-        'report_json': _artifact_identity(report_json_path, save_dir),
-        'caches': [_artifact_identity(path, save_dir) for path in cache_paths],
+        'report_text': _artifact_identity(
+            report_text_path, save_dir, include_hash=include_hash),
+        'report_json': _artifact_identity(
+            report_json_path, save_dir, include_hash=include_hash),
+        'caches': [
+            _artifact_identity(path, save_dir, include_hash=include_hash)
+            for path in cache_paths],
         'stratified_csvs': [
-            _artifact_identity(path, save_dir) for path in stratified_csv_paths],
+            _artifact_identity(path, save_dir, include_hash=include_hash)
+            for path in stratified_csv_paths],
     }
     contract = _build_isr_evaluation_contract(
         candidate_contract, baseline_contract, isr_input_files,
-        poker_geometry_audit, config, output_artifacts=output_artifacts)
+        poker_geometry_audit, config, output_artifacts=output_artifacts,
+        observation_profile_pool=observation_profile_pool)
     contract_path = os.path.join(save_dir, 'isr_evaluation_contract.json')
     _write_json_atomically(contract_path, contract)
     return public_reports, contract
@@ -627,7 +644,7 @@ def _evaluation_code_sha256():
     return digest.hexdigest()
 
 
-def _checkpoint_evaluation_contract(checkpoint, config):
+def _checkpoint_evaluation_contract(checkpoint, config, verify_hashes=True):
     checkpoint = os.path.abspath(checkpoint)
     run_dir = os.path.dirname(checkpoint)
     with open(os.path.join(run_dir, 'run_manifest.json'), encoding='utf-8') as stream:
@@ -636,7 +653,7 @@ def _checkpoint_evaluation_contract(checkpoint, config):
         summary = json.load(stream)
     return {
         'path': checkpoint,
-        'sha256': _sha256(checkpoint),
+        'sha256': _sha256(checkpoint) if verify_hashes else None,
         'checkpoint_format_version': int(config['checkpoint_format_version']),
         'model_domain_semantics': config['model_domain_semantics'],
         'model_alt_range_km': list(map(float, config['alt_range'])),
@@ -645,7 +662,8 @@ def _checkpoint_evaluation_contract(checkpoint, config):
         'peak_search_alt_range_km': list(map(float, (
             config.get('peak_search_alt_range') or config['alt_range']))),
         'date_split': summary.get('date_split'),
-        'input_data_identity': manifest.get('data_identity'),
+        'input_data_identity': (manifest.get('data_identity')
+                                if verify_hashes else None),
     }
 
 
@@ -667,6 +685,8 @@ def _require_m2v_config(config):
         'strict_200_500_domain_v1': (13, (200.0, 500.0)),
         'hybrid_120_500_model_200_500_observation_v1': (
             14, (120.0, 500.0)),
+        'a2s_model120_500_obs120_500_peak200_500_v1': (
+            15, (120.0, 500.0)),
     }
     if domain not in contracts:
         raise ValueError(f'unsupported FSIA model domain: {domain}')
@@ -706,7 +726,11 @@ def _require_m2v_config(config):
         (200.0, 500.0) if domain in (
             'strict_200_500_domain_v1',
             'hybrid_120_500_model_200_500_observation_v1') else alt_range)
-    expected_peak = expected_observation
+    expected_peak = (
+        (200.0, 500.0) if domain in (
+            'strict_200_500_domain_v1',
+            'hybrid_120_500_model_200_500_observation_v1',
+            'a2s_model120_500_obs120_500_peak200_500_v1') else alt_range)
     observation = tuple(map(float, config.get('observation_alt_range') or alt_range))
     peak = tuple(map(float, config.get('peak_search_alt_range') or alt_range))
     if observation != expected_observation:
@@ -772,7 +796,8 @@ def _load_state_compat(model, state_dict):
 
 
 def _load_model_and_managers(config, device, checkpoint=None,
-                             historical_expected_sha256=None):
+                             historical_expected_sha256=None,
+                             verify_hashes=True):
     """加载模型、SpaceWeatherManager 和 IRIPeakManager。
 
     Returns:
@@ -793,7 +818,8 @@ def _load_model_and_managers(config, device, checkpoint=None,
         model, cfg, _, _ = load_fsia_analysis_checkpoint(
             ckpt, device,
             allow_historical_epoch=historical_expected_sha256 is not None,
-            expected_sha256=historical_expected_sha256)
+            expected_sha256=historical_expected_sha256,
+            verify_hashes=verify_hashes)
         _require_m2v_config(cfg)
         allowed_profile_ids = allowed_observation_profile_ids(cfg)
         model_name = 'FSIA-INR'
@@ -849,7 +875,7 @@ def _load_model_and_managers(config, device, checkpoint=None,
         cosmic_nb_index = COSMICNeighborhoodIndex(cosmic_path, cfg)
         print('[main] FY/COSMIC 正式局部邻域索引加载完成')
 
-        print('[main] ISR观测token已排除locked-test profile')
+        print('[main] 已加载checkpoint观测profile allowlist（可由显式ISR池覆盖）')
     else:
         allowed_profile_ids = None
 
@@ -958,6 +984,7 @@ def _process_station(station_name, day_records, model, sw_manager,
             fy_nb_index=fy_nb_index,
             cosmic_nb_index=cosmic_nb_index,
             allowed_profile_ids=allowed_profile_ids,
+            time_support=config.get('analysis_observation_time_support'),
         )
         baseline_fields = {}
         for label, context in baseline_contexts.items():
@@ -971,6 +998,9 @@ def _process_station(station_name, day_records, model, sw_manager,
                 fy_nb_index=baseline_fy_index,
                 cosmic_nb_index=baseline_cosmic_index,
                 allowed_profile_ids=baseline_allowed,
+                time_support=getattr(
+                    baseline_model, 'analysis_observation_time_support',
+                    'symmetric_legacy_v1'),
             )
         if primary_baseline_label is not None:
             baseline_pred, baseline_bkg, baseline_iri = baseline_fields[
@@ -1583,9 +1613,77 @@ def _is_historical_epoch_checkpoint(checkpoint):
             and parts[2] == 'model')
 
 
+def _apply_observation_profile_pool(mode, candidate_config,
+                                    candidate_allowed, baseline_context,
+                                    shared_full30_profile_split=None):
+    """Apply one explicit inference-only profile pool to every FSIA model."""
+    if mode == 'checkpoint':
+        return candidate_allowed, baseline_context, None
+    if mode != _SHARED_FULL30_POOL:
+        raise ValueError(f'unsupported observation profile pool: {mode}')
+    split_config = dict(candidate_config)
+    if shared_full30_profile_split is not None:
+        split_config['profile_split_semantics'] = (
+            'source_time_local_block80_dev20_v1')
+        split_config['profile_split_path'] = str(
+            os.path.abspath(shared_full30_profile_split))
+    if split_config.get('profile_split_semantics') != (
+            'source_time_local_block80_dev20_v1'):
+        raise ValueError(
+            'shared-full30 requires an A1-S2 profile split or explicit split path')
+    from inr_modules.mdia.checkpoint_io import shared_full30_profile_allowlist
+    # Revalidate the shared manifest at the override boundary, rather than
+    # trusting a checkpoint-specific allowlist assembled by a legacy loader.
+    shared, split_audit = shared_full30_profile_allowlist(
+        split_config, _SHARED_FULL30_COUNTS)
+
+    for source, expected in _SHARED_FULL30_COUNTS.items():
+        ids = np.asarray(shared.get(source), dtype=np.int64)
+        if (ids.ndim != 1 or ids.size != expected
+                or not np.array_equal(ids, np.unique(ids))):
+            raise ValueError(
+                f'{source} shared-full30 IDs must be sorted unique count={expected}')
+
+    updated = {}
+    equality = {}
+    original_counts = {}
+    for label, context in baseline_context.items():
+        original = context[-1]
+        if not isinstance(original, dict):
+            raise ValueError(f'{label} lacks FSIA observation profile IDs')
+        original_counts[label] = {}
+        for source, shared_ids in shared.items():
+            baseline_ids = np.asarray(original.get(source), dtype=np.int64)
+            if baseline_ids.ndim != 1 or np.setdiff1d(
+                    baseline_ids, shared_ids, assume_unique=False).size:
+                raise ValueError(
+                    f'{label} {source} checkpoint pool is not a full30 subset')
+            original_counts[label][source] = int(baseline_ids.size)
+        updated[label] = (*context[:-1], shared)
+        equality[label] = all(np.array_equal(
+            updated[label][-1][source], shared[source]) for source in shared)
+    if not all(equality.values()):
+        raise AssertionError('candidate and baseline shared-full30 pools differ')
+
+    audit = {
+        'semantics': 'shared_full_30d_all_profiles_v1',
+        'profile_split_path': str(split_config.get('profile_split_path', '')),
+        'source_counts': {source: int(ids.size)
+                          for source, ids in shared.items()},
+        'profile_split_audit': split_audit,
+        'baseline_checkpoint_pool_counts_before_override': original_counts,
+        'candidate_baseline_profile_ids_equal': equality,
+        'former_locked_test_profiles_role': 'observation_tokens_only',
+        'supervision_or_checkpoint_selection_role': False,
+    }
+    return shared, updated, audit
+
+
 def main(checkpoint=None, save_dir=None, preflight_only=False,
          baseline_checkpoint=None, baseline_checkpoint_sha256=None,
-         baseline_labels=None):
+         baseline_labels=None, observation_profile_pool='checkpoint',
+         verify_hashes=True, shared_full30_profile_split=None):
+    CONFIG['skip_hash_verification'] = not bool(verify_hashes)
     if checkpoint is not None:
         CONFIG['checkpoint_path'] = checkpoint
     if save_dir is not None:
@@ -1609,9 +1707,9 @@ def main(checkpoint=None, save_dir=None, preflight_only=False,
     # ==================== 加载模型 ====================
     (model, sw_manager, mdia_cfg, model_name, iri_peak_manager,
      fy_nb_index, cosmic_nb_index, allowed_profile_ids) = \
-        _load_model_and_managers(CONFIG, device)
+        _load_model_and_managers(CONFIG, device, verify_hashes=verify_hashes)
     candidate_contract = _checkpoint_evaluation_contract(
-        CONFIG['checkpoint_path'], mdia_cfg)
+        CONFIG['checkpoint_path'], mdia_cfg, verify_hashes=verify_hashes)
     if baseline_checkpoint is None:
         baseline_paths = []
     elif isinstance(baseline_checkpoint, (str, os.PathLike)):
@@ -1633,20 +1731,23 @@ def main(checkpoint=None, save_dir=None, preflight_only=False,
     baseline_contract = []
     for index, path in enumerate(baseline_paths):
         expected_sha = baseline_hashes[index] if index < len(baseline_hashes) else None
-        if _is_historical_epoch_checkpoint(path) and not expected_sha:
+        if (verify_hashes and _is_historical_epoch_checkpoint(path)
+                and not expected_sha):
             raise ValueError('historical ISR baseline requires --baseline-checkpoint-sha256')
-        if (os.path.basename(path) == 'epoch_12_model.pth'
+        if (verify_hashes and os.path.basename(path) == 'epoch_12_model.pth'
                 and expected_sha != _HISTORICAL_EPOCH12_SHA256):
             raise ValueError('historical epoch12 ISR baseline SHA256 is not approved')
         (baseline_model, baseline_sw, baseline_cfg, _, baseline_iri_peak,
          baseline_fy_index, baseline_cosmic_index,
          baseline_allowed) = _load_model_and_managers(
             CONFIG, device, checkpoint=path,
-            historical_expected_sha256=expected_sha)
+            historical_expected_sha256=expected_sha,
+            verify_hashes=verify_hashes)
         if (os.path.basename(path) == 'epoch_12_model.pth'
                 and baseline_cfg.get('background_trust_gate_enabled', False)):
             raise ValueError('historical epoch12 ISR baseline must be gate-off')
-        item_contract = _checkpoint_evaluation_contract(path, baseline_cfg)
+        item_contract = _checkpoint_evaluation_contract(
+            path, baseline_cfg, verify_hashes=verify_hashes)
         if (candidate_contract['observation_alt_range_km'] !=
                 item_contract['observation_alt_range_km']
                 or candidate_contract['peak_search_alt_range_km'] !=
@@ -1667,6 +1768,13 @@ def main(checkpoint=None, save_dir=None, preflight_only=False,
             baseline_model, baseline_sw, baseline_cfg, baseline_iri_peak,
             baseline_fy_index, baseline_cosmic_index, baseline_allowed)
         baseline_contract.append({'label': label, **item_contract})
+    (allowed_profile_ids, baseline_context,
+     observation_pool_audit) = _apply_observation_profile_pool(
+         observation_profile_pool, mdia_cfg, allowed_profile_ids,
+         baseline_context, shared_full30_profile_split)
+    if observation_pool_audit is not None:
+        print('[main] ISR观测token使用共享30天全部有效profile: '
+              f'{observation_pool_audit["source_counts"]}')
     CONFIG['alt_range'] = tuple(map(float, mdia_cfg['alt_range']))
     CONFIG['observation_alt_range'] = tuple(map(float, (
         mdia_cfg.get('observation_alt_range') or mdia_cfg['alt_range'])))
@@ -1762,7 +1870,8 @@ def main(checkpoint=None, save_dir=None, preflight_only=False,
     if station_reports:
         _write_isr_final_artifacts(
             save_dir, station_reports, candidate_contract, baseline_contract,
-            isr_input_files, poker_geometry_audit, CONFIG)
+            isr_input_files, poker_geometry_audit, CONFIG,
+            observation_profile_pool=observation_pool_audit)
         gate_summary = {
             report['station']: bool(
                 report['passed_m2w_m11_vs_raw_iri_gate'])
@@ -1815,9 +1924,25 @@ if __name__ == '__main__':
     parser.add_argument(
         '--preflight-only', action='store_true',
         help='只加载并核验模型与配置，不读取ISR数据或生成评估输出')
+    parser.add_argument(
+        '--observation-profile-pool',
+        choices=('checkpoint', 'shared-full30'),
+        default='checkpoint',
+        help=('ISR RO观测池：checkpoint使用原训练语义；'
+              'shared-full30统一使用A1-S2的30天全部有效profile'))
+    parser.add_argument(
+        '--skip-hash-verification', action='store_true',
+        help='跳过checkpoint/input SHA256核验（仅记录路径）')
+    parser.add_argument(
+        '--shared-full30-profile-split', default=None,
+        help=('可选A1-S2 profile_split.npz；用于A1-S旧日期checkpoint的'
+              'shared-full30推理覆盖'))
     args = parser.parse_args()
     main(checkpoint=args.checkpoint, save_dir=args.save_dir,
          preflight_only=args.preflight_only,
          baseline_checkpoint=args.baseline_checkpoint,
          baseline_checkpoint_sha256=args.baseline_checkpoint_sha256,
-         baseline_labels=args.baseline_label)
+         baseline_labels=args.baseline_label,
+         observation_profile_pool=args.observation_profile_pool,
+         verify_hashes=not args.skip_hash_verification,
+         shared_full30_profile_split=args.shared_full30_profile_split)

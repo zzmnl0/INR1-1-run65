@@ -1,0 +1,3824 @@
+{
+  "schema": 1,
+  "stage": "S1",
+  "collected_utc": "2026-10-09T07:49:37.452168+00:00",
+  "status": "TRAINING_SOURCE_CONFIRMED_BY_AUTHOR",
+  "user_decision": "2026-10-09: clean current workspace; retain historical identity and evidence gaps",
+  "no_model_execution": true,
+  "no_training_code_mutation": true,
+  "git": {
+    "head": "b8caf0df7d860b512f7a32b0b93b19552e02674d",
+    "last_commit": "b8caf0df7d860b512f7a32b0b93b19552e02674d 2026-08-21T15:08:29+08:00 Freeze A1-S background bias baseline",
+    "tracked_status": "M evaluate_giro_peak.py\n M inr_modules/config_mdia.py\n M inr_modules/data_managers/FY_dataloader.py\n M inr_modules/mdia/checkpoint_io.py\n M inr_modules/mdia/fsia_model.py\n M inr_modules/mdia/sliding_dataset.py\n M inr_modules/mdia/train_fsia.py\n M inr_modules/mdia/v14_contract.py\n M isr_evaluation/background_m00_eval.py\n M isr_evaluation/main_isr_eval.py\n M isr_evaluation/model_query.py\n M main_fsia.py\n M traditional_static_etkf/runner.py\n M traditional_static_etkf/test_runner.py",
+    "diff_stat": "evaluate_giro_peak.py                      |  867 +++-\n inr_modules/config_mdia.py                 |  177 +-\n inr_modules/data_managers/FY_dataloader.py |  521 ++-\n inr_modules/mdia/checkpoint_io.py          |  142 +-\n inr_modules/mdia/fsia_model.py             |  375 +-\n inr_modules/mdia/sliding_dataset.py        |   25 +-\n inr_modules/mdia/train_fsia.py             | 5958 ++++++++++++++++++++++++++--\n inr_modules/mdia/v14_contract.py           |   60 +-\n isr_evaluation/background_m00_eval.py      |  495 ++-\n isr_evaluation/main_isr_eval.py            |  179 +-\n isr_evaluation/model_query.py              |   15 +-\n main_fsia.py                               |  942 ++++-\n traditional_static_etkf/runner.py          |   55 +-\n traditional_static_etkf/test_runner.py     |   40 +\n 14 files changed, 9241 insertions(+), 610 deletions(-)"
+  },
+  "main_run": {
+    "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\checkpoints_fsia\\run67-m2w-120-500-analysis-a1s-10epoch",
+    "manifest": {
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\checkpoints_fsia\\run67-m2w-120-500-analysis-a1s-10epoch\\run_manifest.json",
+      "exists": true,
+      "expected_sha256": null,
+      "sha256": "3b134362fba37727a874d0dc7fb11d646910238cbf208ec40e7aefed6aaa44cf",
+      "bytes": 33150,
+      "matches_record": null
+    },
+    "summary": {
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\checkpoints_fsia\\run67-m2w-120-500-analysis-a1s-10epoch\\training_summary.json",
+      "exists": true,
+      "expected_sha256": null,
+      "sha256": "c493ec84470289e6470774685422547c8c9fb943f3711db0cd0caffa0b4162be",
+      "bytes": 27410,
+      "matches_record": null
+    },
+    "history": {
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\checkpoints_fsia\\run67-m2w-120-500-analysis-a1s-10epoch\\fsia_training_history.json",
+      "exists": true,
+      "expected_sha256": null,
+      "sha256": "88690d28e4c1727b474d6bdfdb53594e885586cbc277fa48d011fa19fe66d8a1",
+      "bytes": 180826,
+      "matches_record": null
+    },
+    "training_log": {
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\checkpoints_fsia\\run67-m2w-120-500-analysis-a1s-10epoch\\training.log",
+      "exists": true,
+      "expected_sha256": null,
+      "sha256": "3619f6aed78450eebf4cb62fa46864f5a486759eb988ac25da16375a0b788645",
+      "bytes": 45763,
+      "matches_record": null
+    },
+    "initial_config": {
+      "fy_path": "D:\\FYsatellite\\EDP_data\\fy_202409_qc_v2.npy",
+      "fy_profile_path": null,
+      "fy_profile_index_path": "D:\\FYsatellite\\EDP_data\\fy_202409_qc_v2_index.npz",
+      "fy_qc_report_path": "D:\\FYsatellite\\EDP_data\\fy_202409_qc_v2_report.json",
+      "iri_proxy_path": "D:\\code11\\IRI01\\output_results\\iri_september_full_proxy.pth",
+      "sw_path": "D:\\FYsatellite\\EDP_data\\kp\\OMNI_Kp_F107_20240901_20241001.txt",
+      "save_dir": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\checkpoints_fsia\\run67-m2w-120-500-background-stratum-bias-a1s",
+      "run_semantics": "M2-W_continuous_physical_local_letkf_120_500_obs_200_500",
+      "assimilation_semantics": "continuous_physical_local_letkf",
+      "checkpoint_format_version": 14,
+      "model_domain_semantics": "hybrid_120_500_model_200_500_observation_v1",
+      "checkpoint_selection_semantics": "mean_ccc_then_rmse_then_pearson_v1",
+      "background_training_semantics": "qc_v2_date_blocked_train_only_m2w_120_500_obs_200_500_low_alt_prior_v1",
+      "background_only": true,
+      "smoke_run": false,
+      "background_trust_gate_enabled": false,
+      "background_trust_gate_semantics": "disabled",
+      "background_trust_gate_altitude_core_km": 200.0,
+      "background_trust_gate_altitude_transition_km": 100.0,
+      "background_trust_gate_night_cosine_offset": 0.2,
+      "background_trust_gate_night_cosine_scale": 0.2,
+      "background_trust_gate_dip_core": 0.25,
+      "background_trust_gate_dip_transition": 0.25,
+      "giro_hmf2_path": "D:\\c_shuju\\GIRO_hmf2\\processed\\giro_hmf2_clean.npy",
+      "giro_nmf2_path": "D:\\c_shuju\\GIRO_hmf2\\processed\\giro_nmf2_clean.npy",
+      "total_hours": 720.0,
+      "start_date_str": "2024-09-01 00:00:00",
+      "bin_size_hours": 0.5,
+      "alt_range": [
+        120.0,
+        500.0
+      ],
+      "observation_alt_range": [
+        200.0,
+        500.0
+      ],
+      "peak_search_alt_range": [
+        200.0,
+        500.0
+      ],
+      "low_altitude_prior_range": [
+        120.0,
+        200.0
+      ],
+      "low_altitude_prior_semantics": "soft_iri_background_zero_analysis_increment_v1",
+      "low_altitude_anchor_levels_km": [
+        120.0,
+        130.0,
+        140.0,
+        150.0,
+        160.0,
+        170.0,
+        180.0,
+        190.0
+      ],
+      "low_altitude_anchor_profiles_per_source": 16,
+      "w_low_altitude_background_iri": 0.02,
+      "w_low_altitude_analysis_increment": 0.01,
+      "low_altitude_gradient_ratio_max": 0.25,
+      "seq_len": 36,
+      "tau_kp_init": 8.0,
+      "tau_solar_init": 72.0,
+      "basis_dim": 64,
+      "enkf_n_members": 8,
+      "enkf_pert_hidden": 64,
+      "enkf_anomaly_parameterization": "orthogonal_factor",
+      "enkf_scale_init": 1.1,
+      "enkf_scale_condition_max": 3.0,
+      "density_basis_semantics": "endpoint_context_symmetric",
+      "analysis_state_semantics": "legacy_feature_increment",
+      "context_semantics": "query_conditioning",
+      "mode_basis_semantics": "learned_density_basis",
+      "siren_hidden": 128,
+      "siren_layers": 3,
+      "omega_0": 30.0,
+      "sw_hidden_dim": 32,
+      "sw_lstm_layers": 2,
+      "sw_out_dim": 64,
+      "batch_size": 2048,
+      "lr": 0.0003,
+      "weight_decay": 0.0001,
+      "seed": 42,
+      "analysis_seed": 42,
+      "device": "cpu",
+      "num_workers": 0,
+      "pin_memory": false,
+      "prefetch_factor": 2,
+      "persistent_workers": false,
+      "use_memmap": true,
+      "scheduler_type": "cosine",
+      "min_lr": 1e-06,
+      "val_ratio": 0.1,
+      "use_date_blocked_split": true,
+      "date_split_manifest": "isr_validation_outputs\\run66-modelonly-m0\\date_split_manifest.json",
+      "development_days": 5,
+      "locked_test_days": 5,
+      "background_epochs": 5,
+      "analysis_epochs": 10,
+      "profile_points_per_epoch": 8,
+      "train_profile_fraction": 1.0,
+      "profile_subset_manifest": null,
+      "huber_delta": 0.2,
+      "w_iri": 0.02,
+      "w_increment": 0.01,
+      "w_vertical_background": 0.02,
+      "w_time_background": 0.01,
+      "background_stratum_bias_gradient_target": 0.05,
+      "background_stratum_bias_calibration_batches": 20,
+      "w_background_stratum_bias": 0.0,
+      "background_checkpoint_selection": "bias_constrained_v1",
+      "background_selection_baseline": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\checkpoints_fsia\\run66-m2w-120-500-obs-200-500-gate-off\\background_development_replay.json",
+      "w_vertical_analysis": 0.05,
+      "w_time_analysis": 0.0033,
+      "analysis_loss_active_only": false,
+      "analysis_exact_mode_loss": true,
+      "use_covariance_moment_loss": false,
+      "use_empirical_covariance_loss": false,
+      "covariance_gradient_target": 0.008139966,
+      "covariance_calibration_batches": 20,
+      "use_observation_gram_loss": true,
+      "gram_gradient_target": 0.02,
+      "gram_calibration_batches": 20,
+      "use_direction_loss": false,
+      "direction_gradient_target": 0.04,
+      "direction_calibration_batches": 20,
+      "structure_batch_size": 32,
+      "structure_alt_step_km": 20.0,
+      "structure_time_step_hours": 1.0,
+      "structure_huber_beta": 0.05,
+      "background_residual_cap": 0.5,
+      "r_fy_init": 0.04,
+      "r_cosmic_init": 0.04,
+      "r_mode": "global",
+      "use_distance_localization": true,
+      "use_physical_localization": true,
+      "representativeness_kernel_path": null,
+      "representativeness_floor": 1.0,
+      "physical_localization_space_km": 1800.0,
+      "physical_localization_time_hours": 1.5,
+      "observation_chunk_size": 4096,
+      "neighbor_directory_semantics": "token_exact_positive_support_v1",
+      "r_calibration_batches": null,
+      "r_sigma_min": 0.05,
+      "r_sigma_max": 0.4,
+      "r_min_profiles": 200,
+      "r_shrinkage_profiles": 200,
+      "background_seed_ckpt": null,
+      "source_dropout": [
+        0.25,
+        0.25,
+        0.5
+      ],
+      "source_mode_schedule": "random_profile",
+      "grad_clip": 1.0,
+      "use_amp": false,
+      "use_sw_freq": true,
+      "sw_gate_bias_init": -1.0,
+      "iri_hmf2_path": "D:\\IRI\\data01\\edp_peak_npy\\IRI_hmF2_20240901_20241001.npy",
+      "iri_nmf2_path": "D:\\IRI\\data01\\edp_peak_npy\\IRI_NmF2_20240901_20241001.npy",
+      "fy_nb_dt": 1.5,
+      "fy_nb_dlat": 5.0,
+      "fy_nb_dlon": 15.0,
+      "fy_nb_k_prof": 8,
+      "fy_nb_n_alt": 8,
+      "cosmic_path": "D:\\cosmic2\\cosmic245-274-September\\cosmic_september_2024_qc.npy",
+      "cosmic_profile_index_path": "D:\\cosmic2\\cosmic245-274-September\\cosmic_september_2024_qc_index.npz",
+      "cosmic_qc_report_path": "D:\\cosmic2\\cosmic245-274-September\\cosmic_september_2024_qc_report.json",
+      "cosmic_nb_dt": 1.5,
+      "cosmic_nb_dlat": 5.0,
+      "cosmic_nb_dlon": 15.0,
+      "cosmic_nb_k_prof": 8,
+      "cosmic_nb_n_alt": 8,
+      "use_cosmic": true,
+      "resume_ckpt": null,
+      "eval_only": false,
+      "max_train_batches": null,
+      "max_validation_batches": null,
+      "include_isr_overlay": false,
+      "smoke_auxiliary_gradient_ratio_max": 0.25,
+      "training_protocol_revision": "v14_hybrid_gram_calibration_v2",
+      "gram_weight_resolution_semantics": "target_over_median_no_lower_clip_reject_gt_one_v1",
+      "gradient_parameter_scope": "all_current_stage_trainable_parameters_v1",
+      "calibration_precision": "match_analysis_autocast_v1",
+      "gram_require_all_batches_finite_positive": true,
+      "gram_preflight_ratio_bounds": [
+        0.016,
+        0.024
+      ],
+      "gram_coverage_policy": "diagnostic_only_v1",
+      "low_altitude_anchor_selection": "first_16_unique_profiles_per_source_per_batch_first_record_v1",
+      "low_altitude_anchor_grouping": "source_profile_id_profile_balanced_v1",
+      "low_altitude_neighbor_profile_semantics": "synthetic_query_no_target_profile_exclusion_v1",
+      "training_protocol": {
+        "training_protocol_revision": "v14_hybrid_gram_calibration_v2",
+        "seed": 42,
+        "smoke_run": false,
+        "background_epochs": 5,
+        "analysis_epochs": 10,
+        "background_trust_gate_enabled": false,
+        "use_observation_gram_loss": true,
+        "analysis_exact_mode_loss": true,
+        "gram_gradient_target": 0.02,
+        "gram_calibration_batches": 20,
+        "gram_weight_resolution_semantics": "target_over_median_no_lower_clip_reject_gt_one_v1",
+        "gradient_parameter_scope": "all_current_stage_trainable_parameters_v1",
+        "calibration_precision": "match_analysis_autocast_v1",
+        "gram_require_all_batches_finite_positive": true,
+        "gram_preflight_ratio_bounds": [
+          0.016,
+          0.024
+        ],
+        "gram_coverage_policy": "diagnostic_only_v1",
+        "smoke_auxiliary_gradient_ratio_max": 0.25,
+        "low_altitude_anchor_selection": "first_16_unique_profiles_per_source_per_batch_first_record_v1",
+        "low_altitude_anchor_grouping": "source_profile_id_profile_balanced_v1",
+        "low_altitude_neighbor_profile_semantics": "synthetic_query_no_target_profile_exclusion_v1",
+        "low_altitude_prior_protocol": {
+          "range_km": [
+            120.0,
+            200.0
+          ],
+          "semantics": "soft_iri_background_zero_analysis_increment_v1",
+          "anchor_levels_km": [
+            120.0,
+            130.0,
+            140.0,
+            150.0,
+            160.0,
+            170.0,
+            180.0,
+            190.0
+          ],
+          "profiles_per_source": 16,
+          "background_weight": 0.02,
+          "analysis_weight": 0.01,
+          "low_altitude_gradient_ratio_max": 0.25
+        }
+      },
+      "input_data_sha256": {
+        "fy_path": "51c200d5e2ef1fcafdbc4938b7e1e7435f66179e5df0c241660aaaa9ce862272",
+        "fy_profile_index_path": "3d4ea4bacb9e1c6eebade0c89b9a913b763030b7aef6b3bbef40f911f79250b4",
+        "fy_qc_report_path": "541caa02ec889c5a22e427666a0dac5427ed997a548dcab5d9221c84a1ce4b71",
+        "cosmic_path": "4607f4f3491aae3a6738bd2f2b9cdaef96a3af26484c0924903ecc4c734d32f1",
+        "cosmic_profile_index_path": "af174cc2fe6b29ef77b3ae98a5bfd87db55fb45067f444db76ab35149cedf2cb",
+        "cosmic_qc_report_path": "ea2b16b45805407fbf310d59b3820d7e999638cf7c71e2f9c0816e0bfe6b4e5e",
+        "iri_proxy_path": "e567c2a922ace0fb0ada59e12946bc3c2e799c336005fc5f90244c71c7bdcd31",
+        "iri_hmf2_path": "2386fff2ee50544d87be509f4118c919fc3a7deff812921e870eb9169983fdb4",
+        "iri_nmf2_path": "c4e896553b1fd6174225cf32f74a20a608adea8b588b7c0552f2f9beea8d7077",
+        "sw_path": "ca0a3e5885ea25091a2cc69b85d3e059f3380bc078634c5c7ea84bd033bf3f78",
+        "date_split_manifest": "0576d83c72cbcfd5994e3afcb192429f965bf423a937f88a1db26eb09e21dbab"
+      }
+    },
+    "initial_code_identity": {
+      "python_files": 110,
+      "sha256": "7ec4eb49a46e9b3c53850b2bf1be029f950bb3f9e1353bdf2da0d29062af240c"
+    },
+    "resume_events": [
+      {
+        "created_utc": "2026-08-21T15:50:12.025235+00:00",
+        "checkpoint": {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\checkpoints_fsia\\run67-m2w-120-500-analysis-a1s-10epoch\\last_training_state.pth",
+          "size": 1219757,
+          "mtime_ns": 1787076068302328700,
+          "sha256": "850368b1587d489d9842f1c0dbe048c808e9a6b46a23663454b59e0a389761ef"
+        },
+        "code_identity": {
+          "python_files": 309,
+          "sha256": "5f600d01e06307b8ac4cd5c510224a38bcbad980a5eca71e824ffe418a217395"
+        },
+        "target_stage": "analysis",
+        "background_trust_gate_enabled": false,
+        "background_trust_gate_semantics": "disabled"
+      }
+    ],
+    "training_environment": {
+      "python": "3.12.12 | packaged by Anaconda, Inc. | (main, Oct 21 2025, 20:05:38) [MSC v.1929 64 bit (AMD64)]",
+      "torch": "2.12.1+cpu",
+      "cuda_runtime": null,
+      "cuda_device": null
+    },
+    "training_protocol": {
+      "training_protocol_revision": "v14_hybrid_gram_calibration_v2",
+      "seed": 42,
+      "smoke_run": false,
+      "background_epochs": 5,
+      "analysis_epochs": 10,
+      "background_trust_gate_enabled": false,
+      "use_observation_gram_loss": true,
+      "analysis_exact_mode_loss": true,
+      "gram_gradient_target": 0.02,
+      "gram_calibration_batches": 20,
+      "gram_weight_resolution_semantics": "target_over_median_no_lower_clip_reject_gt_one_v1",
+      "gradient_parameter_scope": "all_current_stage_trainable_parameters_v1",
+      "calibration_precision": "match_analysis_autocast_v1",
+      "gram_require_all_batches_finite_positive": true,
+      "gram_preflight_ratio_bounds": [
+        0.016,
+        0.024
+      ],
+      "gram_coverage_policy": "diagnostic_only_v1",
+      "smoke_auxiliary_gradient_ratio_max": 0.25,
+      "low_altitude_anchor_selection": "first_16_unique_profiles_per_source_per_batch_first_record_v1",
+      "low_altitude_anchor_grouping": "source_profile_id_profile_balanced_v1",
+      "low_altitude_neighbor_profile_semantics": "synthetic_query_no_target_profile_exclusion_v1",
+      "low_altitude_prior_protocol": {
+        "range_km": [
+          120.0,
+          200.0
+        ],
+        "semantics": "soft_iri_background_zero_analysis_increment_v1",
+        "anchor_levels_km": [
+          120.0,
+          130.0,
+          140.0,
+          150.0,
+          160.0,
+          170.0,
+          180.0,
+          190.0
+        ],
+        "profiles_per_source": 16,
+        "background_weight": 0.02,
+        "analysis_weight": 0.01,
+        "low_altitude_gradient_ratio_max": 0.25
+      }
+    },
+    "architecture": {
+      "checkpoint_format_version": 14,
+      "alt_range": [
+        120.0,
+        500.0
+      ],
+      "observation_alt_range": [
+        200.0,
+        500.0
+      ],
+      "peak_search_alt_range": [
+        200.0,
+        500.0
+      ],
+      "model_domain_semantics": "hybrid_120_500_model_200_500_observation_v1",
+      "basis_dim": 64,
+      "enkf_n_members": 8,
+      "enkf_pert_hidden": 64,
+      "enkf_anomaly_parameterization": "orthogonal_factor",
+      "enkf_scale_init": 1.1,
+      "enkf_scale_condition_max": 3.0,
+      "density_basis_semantics": "endpoint_context_symmetric",
+      "analysis_state_semantics": "legacy_feature_increment",
+      "context_semantics": "query_conditioning",
+      "mode_basis_semantics": "learned_density_basis",
+      "background_trust_gate_enabled": false,
+      "background_trust_gate_semantics": "disabled",
+      "background_trust_gate_altitude_core_km": 200.0,
+      "background_trust_gate_altitude_transition_km": 100.0,
+      "background_trust_gate_night_cosine_offset": 0.2,
+      "background_trust_gate_night_cosine_scale": 0.2,
+      "background_trust_gate_dip_core": 0.25,
+      "background_trust_gate_dip_transition": 0.25,
+      "assimilation_semantics": "continuous_physical_local_letkf",
+      "neighbor_directory_semantics": "token_exact_positive_support_v1",
+      "physical_localization_space_km": 1800.0,
+      "physical_localization_time_hours": 1.5,
+      "observation_chunk_size": 4096
+    },
+    "best_epochs": {
+      "background": 3,
+      "analysis": 15
+    },
+    "resolved_training": {
+      "analysis_exact_mode_loss": true,
+      "use_covariance_moment_loss": false,
+      "use_empirical_covariance_loss": false,
+      "covariance_gradient_target": 0.008139966,
+      "resolved_covariance_weight": null,
+      "use_direction_loss": false,
+      "direction_gradient_target": 0.04,
+      "resolved_direction_weight": null,
+      "use_observation_gram_loss": true,
+      "gram_gradient_target": 0.02,
+      "gram_calibration_batches": 20,
+      "resolved_gram_weight": 1.5550329423250582e-06,
+      "gram_gradient_calibration": {
+        "requested_batches": 20,
+        "processed_batches": 20,
+        "valid_batches": 20,
+        "raw_ratios": [
+          18550.1875,
+          12875.28515625,
+          6475.15576171875,
+          10755.4716796875,
+          35750.734375,
+          6771.0615234375,
+          12572.2265625,
+          48794.546875,
+          10772.2197265625,
+          15907.0283203125,
+          27057.4296875,
+          7709.052734375,
+          7889.9111328125,
+          15485.6513671875,
+          12847.642578125,
+          17458.064453125,
+          3921.92431640625,
+          6041.50927734375,
+          13626.40625,
+          15838.806640625
+        ],
+        "raw_ratio_summary": {
+          "min": 3921.92431640625,
+          "q1": 7844.696533203125,
+          "median": 12861.4638671875,
+          "q3": 16294.787353515625,
+          "max": 48794.546875
+        },
+        "median_ratio": 12861.4638671875,
+        "target_ratio": 0.02,
+        "resolved_weight": 1.5550329423250582e-06,
+        "achieved_median_ratio": 0.02,
+        "parameter_tensor_count": 8,
+        "parameter_count": 18119,
+        "gradient_parameter_scope": "all_current_stage_trainable_parameters_v1",
+        "calibration_precision": "match_analysis_autocast_v1",
+        "weight_resolution_semantics": "target_over_median_no_lower_clip_reject_gt_one_v1",
+        "require_all_batches_finite_positive": true
+      },
+      "background_stratum_bias_gradient_target": 0.05,
+      "background_stratum_bias_calibration_batches": 20,
+      "resolved_background_stratum_bias_weight": 0.015319562115810564,
+      "background_stratum_bias_gradient_calibration": {
+        "enabled": true,
+        "requested_batches": 20,
+        "processed_batches": 20,
+        "valid_batches": 20,
+        "raw_ratios": [
+          1.2840970754623413,
+          0.5576089024543762,
+          5.359020233154297,
+          3.114165782928467,
+          3.9879496097564697,
+          3.012214183807373,
+          3.7563016414642334,
+          2.2907917499542236,
+          2.7255539894104004,
+          8.997979164123535,
+          1.4722529649734497,
+          4.269490718841553,
+          2.5722153186798096,
+          4.586859226226807,
+          3.413435935974121,
+          0.4986748993396759,
+          4.407467365264893,
+          7.189619064331055,
+          4.500334739685059,
+          1.353690266609192
+        ],
+        "median_ratio": 3.263800859451294,
+        "target_ratio": 0.05,
+        "resolved_weight": 0.015319562115810564,
+        "achieved_median_ratio": 0.05,
+        "active_cells": [
+          {
+            "batch": 1,
+            "FY": 4,
+            "COSMIC": 4
+          },
+          {
+            "batch": 2,
+            "FY": 4,
+            "COSMIC": 4
+          },
+          {
+            "batch": 3,
+            "FY": 4,
+            "COSMIC": 4
+          },
+          {
+            "batch": 4,
+            "FY": 4,
+            "COSMIC": 4
+          },
+          {
+            "batch": 5,
+            "FY": 4,
+            "COSMIC": 4
+          },
+          {
+            "batch": 6,
+            "FY": 4,
+            "COSMIC": 4
+          },
+          {
+            "batch": 7,
+            "FY": 4,
+            "COSMIC": 4
+          },
+          {
+            "batch": 8,
+            "FY": 4,
+            "COSMIC": 4
+          },
+          {
+            "batch": 9,
+            "FY": 4,
+            "COSMIC": 4
+          },
+          {
+            "batch": 10,
+            "FY": 4,
+            "COSMIC": 4
+          },
+          {
+            "batch": 11,
+            "FY": 4,
+            "COSMIC": 4
+          },
+          {
+            "batch": 12,
+            "FY": 4,
+            "COSMIC": 4
+          },
+          {
+            "batch": 13,
+            "FY": 4,
+            "COSMIC": 4
+          },
+          {
+            "batch": 14,
+            "FY": 4,
+            "COSMIC": 4
+          },
+          {
+            "batch": 15,
+            "FY": 4,
+            "COSMIC": 4
+          },
+          {
+            "batch": 16,
+            "FY": 4,
+            "COSMIC": 4
+          },
+          {
+            "batch": 17,
+            "FY": 4,
+            "COSMIC": 4
+          },
+          {
+            "batch": 18,
+            "FY": 4,
+            "COSMIC": 4
+          },
+          {
+            "batch": 19,
+            "FY": 4,
+            "COSMIC": 4
+          },
+          {
+            "batch": 20,
+            "FY": 4,
+            "COSMIC": 4
+          }
+        ]
+      },
+      "background_checkpoint_selection": "bias_constrained_v1",
+      "background_selection_baseline": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\checkpoints_fsia\\run66-m2w-120-500-obs-200-500-gate-off\\background_development_replay.json",
+      "representativeness_kernel": null,
+      "covariance_strata": {
+        "FY": {
+          "profiles": 44625,
+          "frequencies": [
+            0.22836607629187008,
+            0.22428828466826028,
+            0.25092962776838407,
+            0.2964160112714856
+          ],
+          "weights": [
+            1.0947335263600186,
+            1.1146369074504687,
+            0.9962952650244946,
+            0.84340923058649
+          ]
+        },
+        "COSMIC": {
+          "profiles": 56099,
+          "frequencies": [
+            0.16274705665840444,
+            0.11399561645147148,
+            0.38040994355496033,
+            0.3428473833351638
+          ],
+          "weights": [
+            1.5361260912062689,
+            2.1930667843392584,
+            0.6571857656078353,
+            0.7291874231853267
+          ]
+        }
+      },
+      "date_split": {
+        "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\isr_validation_outputs\\run66-modelonly-m0\\date_split_manifest.json",
+        "sha256": "0576d83c72cbcfd5994e3afcb192429f965bf423a937f88a1db26eb09e21dbab",
+        "partitions": {
+          "development": [
+            3,
+            8,
+            17,
+            22,
+            29
+          ],
+          "locked_test": [
+            2,
+            10,
+            16,
+            18,
+            24
+          ],
+          "train": [
+            0,
+            1,
+            4,
+            5,
+            6,
+            7,
+            9,
+            11,
+            12,
+            13,
+            14,
+            15,
+            19,
+            20,
+            21,
+            23,
+            25,
+            26,
+            27,
+            28
+          ]
+        }
+      },
+      "input_data_sha256": {
+        "fy_path": "51c200d5e2ef1fcafdbc4938b7e1e7435f66179e5df0c241660aaaa9ce862272",
+        "fy_profile_index_path": "3d4ea4bacb9e1c6eebade0c89b9a913b763030b7aef6b3bbef40f911f79250b4",
+        "fy_qc_report_path": "541caa02ec889c5a22e427666a0dac5427ed997a548dcab5d9221c84a1ce4b71",
+        "cosmic_path": "4607f4f3491aae3a6738bd2f2b9cdaef96a3af26484c0924903ecc4c734d32f1",
+        "cosmic_profile_index_path": "af174cc2fe6b29ef77b3ae98a5bfd87db55fb45067f444db76ab35149cedf2cb",
+        "cosmic_qc_report_path": "ea2b16b45805407fbf310d59b3820d7e999638cf7c71e2f9c0816e0bfe6b4e5e",
+        "iri_proxy_path": "e567c2a922ace0fb0ada59e12946bc3c2e799c336005fc5f90244c71c7bdcd31",
+        "iri_hmf2_path": "2386fff2ee50544d87be509f4118c919fc3a7deff812921e870eb9169983fdb4",
+        "iri_nmf2_path": "c4e896553b1fd6174225cf32f74a20a608adea8b588b7c0552f2f9beea8d7077",
+        "sw_path": "ca0a3e5885ea25091a2cc69b85d3e059f3380bc078634c5c7ea84bd033bf3f78",
+        "date_split_manifest": "0576d83c72cbcfd5994e3afcb192429f965bf423a937f88a1db26eb09e21dbab"
+      },
+      "model_domain_data_summary": {
+        "model_alt_range_km": [
+          120.0,
+          500.0
+        ],
+        "observation_alt_range_km": [
+          200.0,
+          500.0
+        ],
+        "peak_search_alt_range_km": [
+          200.0,
+          500.0
+        ],
+        "development_sampling": "stable_8_points_per_profile",
+        "FY": {
+          "train_points": 3797772,
+          "development_points": 1001241,
+          "all_domain_points": 5660496,
+          "all_domain_profiles": 66612
+        },
+        "COSMIC": {
+          "train_points": 11389227,
+          "development_points": 2829661,
+          "all_domain_points": 17116564,
+          "all_domain_profiles": 84364
+        }
+      },
+      "low_altitude_prior_protocol": {
+        "range_km": [
+          120.0,
+          200.0
+        ],
+        "semantics": "soft_iri_background_zero_analysis_increment_v1",
+        "anchor_levels_km": [
+          120.0,
+          130.0,
+          140.0,
+          150.0,
+          160.0,
+          170.0,
+          180.0,
+          190.0
+        ],
+        "profiles_per_source": 16,
+        "background_weight": 0.02,
+        "analysis_weight": 0.01,
+        "low_altitude_gradient_ratio_max": 0.25
+      },
+      "training_protocol": {
+        "training_protocol_revision": "v14_hybrid_gram_calibration_v2",
+        "seed": 42,
+        "smoke_run": false,
+        "background_epochs": 5,
+        "analysis_epochs": 10,
+        "background_trust_gate_enabled": false,
+        "use_observation_gram_loss": true,
+        "analysis_exact_mode_loss": true,
+        "gram_gradient_target": 0.02,
+        "gram_calibration_batches": 20,
+        "gram_weight_resolution_semantics": "target_over_median_no_lower_clip_reject_gt_one_v1",
+        "gradient_parameter_scope": "all_current_stage_trainable_parameters_v1",
+        "calibration_precision": "match_analysis_autocast_v1",
+        "gram_require_all_batches_finite_positive": true,
+        "gram_preflight_ratio_bounds": [
+          0.016,
+          0.024
+        ],
+        "gram_coverage_policy": "diagnostic_only_v1",
+        "smoke_auxiliary_gradient_ratio_max": 0.25,
+        "low_altitude_anchor_selection": "first_16_unique_profiles_per_source_per_batch_first_record_v1",
+        "low_altitude_anchor_grouping": "source_profile_id_profile_balanced_v1",
+        "low_altitude_neighbor_profile_semantics": "synthetic_query_no_target_profile_exclusion_v1",
+        "low_altitude_prior_protocol": {
+          "range_km": [
+            120.0,
+            200.0
+          ],
+          "semantics": "soft_iri_background_zero_analysis_increment_v1",
+          "anchor_levels_km": [
+            120.0,
+            130.0,
+            140.0,
+            150.0,
+            160.0,
+            170.0,
+            180.0,
+            190.0
+          ],
+          "profiles_per_source": 16,
+          "background_weight": 0.02,
+          "analysis_weight": 0.01,
+          "low_altitude_gradient_ratio_max": 0.25
+        }
+      },
+      "low_altitude_anchor_history": [
+        {
+          "epoch": 6,
+          "stage": "analysis",
+          "raw_loss": 0.0059153191606299655,
+          "weighted_loss": 5.9153190293191375e-05,
+          "profiles_per_batch": 31.577083333333334,
+          "points_per_batch": 252.61666666666667,
+          "active_fraction": 1.0,
+          "FY": {
+            "raw_loss": 0.005664291004546603,
+            "profiles_per_batch": 15.577083333333333,
+            "points_per_batch": 124.61666666666666,
+            "active_fraction": 1.0
+          },
+          "COSMIC": {
+            "raw_loss": 0.006166347320978923,
+            "profiles_per_batch": 16.0,
+            "points_per_batch": 128.0,
+            "active_fraction": 1.0
+          },
+          "gradient_ratio_to_observation": 0.03640179055189947
+        },
+        {
+          "epoch": 7,
+          "stage": "analysis",
+          "raw_loss": 0.005673842014706072,
+          "weighted_loss": 5.6738418950885713e-05,
+          "profiles_per_batch": 31.577083333333334,
+          "points_per_batch": 252.61666666666667,
+          "active_fraction": 1.0,
+          "FY": {
+            "raw_loss": 0.005319828175546112,
+            "profiles_per_batch": 15.577083333333333,
+            "points_per_batch": 124.61666666666666,
+            "active_fraction": 1.0
+          },
+          "COSMIC": {
+            "raw_loss": 0.0060278558540630914,
+            "profiles_per_batch": 16.0,
+            "points_per_batch": 128.0,
+            "active_fraction": 1.0
+          },
+          "gradient_ratio_to_observation": 0.0
+        },
+        {
+          "epoch": 8,
+          "stage": "analysis",
+          "raw_loss": 0.0053747621328511744,
+          "weighted_loss": 5.374762017898623e-05,
+          "profiles_per_batch": 31.577083333333334,
+          "points_per_batch": 252.61666666666667,
+          "active_fraction": 1.0,
+          "FY": {
+            "raw_loss": 0.00499292243889613,
+            "profiles_per_batch": 15.577083333333333,
+            "points_per_batch": 124.61666666666666,
+            "active_fraction": 1.0
+          },
+          "COSMIC": {
+            "raw_loss": 0.005756601830489672,
+            "profiles_per_batch": 16.0,
+            "points_per_batch": 128.0,
+            "active_fraction": 1.0
+          },
+          "gradient_ratio_to_observation": 0.0
+        },
+        {
+          "epoch": 9,
+          "stage": "analysis",
+          "raw_loss": 0.005795785919265957,
+          "weighted_loss": 5.7957857963704856e-05,
+          "profiles_per_batch": 31.577083333333334,
+          "points_per_batch": 252.61666666666667,
+          "active_fraction": 1.0,
+          "FY": {
+            "raw_loss": 0.0053254667138996105,
+            "profiles_per_batch": 15.577083333333333,
+            "points_per_batch": 124.61666666666666,
+            "active_fraction": 1.0
+          },
+          "COSMIC": {
+            "raw_loss": 0.0062661051183871075,
+            "profiles_per_batch": 16.0,
+            "points_per_batch": 128.0,
+            "active_fraction": 1.0
+          },
+          "gradient_ratio_to_observation": 0.0
+        },
+        {
+          "epoch": 10,
+          "stage": "analysis",
+          "raw_loss": 0.005897324109294762,
+          "weighted_loss": 5.897323975811257e-05,
+          "profiles_per_batch": 31.577083333333334,
+          "points_per_batch": 252.61666666666667,
+          "active_fraction": 1.0,
+          "FY": {
+            "raw_loss": 0.005530965882674839,
+            "profiles_per_batch": 15.577083333333333,
+            "points_per_batch": 124.61666666666666,
+            "active_fraction": 1.0
+          },
+          "COSMIC": {
+            "raw_loss": 0.0062636823226057455,
+            "profiles_per_batch": 16.0,
+            "points_per_batch": 128.0,
+            "active_fraction": 1.0
+          },
+          "gradient_ratio_to_observation": 0.0
+        },
+        {
+          "epoch": 11,
+          "stage": "analysis",
+          "raw_loss": 0.006196302517855657,
+          "weighted_loss": 6.196302387782756e-05,
+          "profiles_per_batch": 31.577083333333334,
+          "points_per_batch": 252.61666666666667,
+          "active_fraction": 1.0,
+          "FY": {
+            "raw_loss": 0.005674756708625258,
+            "profiles_per_batch": 15.577083333333333,
+            "points_per_batch": 124.61666666666666,
+            "active_fraction": 1.0
+          },
+          "COSMIC": {
+            "raw_loss": 0.006717848342729363,
+            "profiles_per_batch": 16.0,
+            "points_per_batch": 128.0,
+            "active_fraction": 1.0
+          },
+          "gradient_ratio_to_observation": 0.0
+        },
+        {
+          "epoch": 12,
+          "stage": "analysis",
+          "raw_loss": 0.006234207283159776,
+          "weighted_loss": 6.23420714077838e-05,
+          "profiles_per_batch": 31.577083333333334,
+          "points_per_batch": 252.61666666666667,
+          "active_fraction": 1.0,
+          "FY": {
+            "raw_loss": 0.00559863159132874,
+            "profiles_per_batch": 15.577083333333333,
+            "points_per_batch": 124.61666666666666,
+            "active_fraction": 1.0
+          },
+          "COSMIC": {
+            "raw_loss": 0.006869782986116965,
+            "profiles_per_batch": 16.0,
+            "points_per_batch": 128.0,
+            "active_fraction": 1.0
+          },
+          "gradient_ratio_to_observation": 0.0
+        },
+        {
+          "epoch": 13,
+          "stage": "analysis",
+          "raw_loss": 0.006411405105366915,
+          "weighted_loss": 6.411404958157618e-05,
+          "profiles_per_batch": 31.577083333333334,
+          "points_per_batch": 252.61666666666667,
+          "active_fraction": 1.0,
+          "FY": {
+            "raw_loss": 0.0058712558184197405,
+            "profiles_per_batch": 15.577083333333333,
+            "points_per_batch": 124.61666666666666,
+            "active_fraction": 1.0
+          },
+          "COSMIC": {
+            "raw_loss": 0.0069515543769739455,
+            "profiles_per_batch": 16.0,
+            "points_per_batch": 128.0,
+            "active_fraction": 1.0
+          },
+          "gradient_ratio_to_observation": 0.0
+        },
+        {
+          "epoch": 14,
+          "stage": "analysis",
+          "raw_loss": 0.006550102523275806,
+          "weighted_loss": 6.550102363386637e-05,
+          "profiles_per_batch": 31.577083333333334,
+          "points_per_batch": 252.61666666666667,
+          "active_fraction": 1.0,
+          "FY": {
+            "raw_loss": 0.0059547596197262465,
+            "profiles_per_batch": 15.577083333333333,
+            "points_per_batch": 124.61666666666666,
+            "active_fraction": 1.0
+          },
+          "COSMIC": {
+            "raw_loss": 0.007145445426855682,
+            "profiles_per_batch": 16.0,
+            "points_per_batch": 128.0,
+            "active_fraction": 1.0
+          },
+          "gradient_ratio_to_observation": 0.0
+        },
+        {
+          "epoch": 15,
+          "stage": "analysis",
+          "raw_loss": 0.006358352456663852,
+          "weighted_loss": 6.358352316245448e-05,
+          "profiles_per_batch": 31.577083333333334,
+          "points_per_batch": 252.61666666666667,
+          "active_fraction": 1.0,
+          "FY": {
+            "raw_loss": 0.005896823052019802,
+            "profiles_per_batch": 15.577083333333333,
+            "points_per_batch": 124.61666666666666,
+            "active_fraction": 1.0
+          },
+          "COSMIC": {
+            "raw_loss": 0.006819881857578972,
+            "profiles_per_batch": 16.0,
+            "points_per_batch": 128.0,
+            "active_fraction": 1.0
+          },
+          "gradient_ratio_to_observation": 0.0
+        }
+      ],
+      "background_training_semantics": "qc_v2_date_blocked_train_only_m2w_120_500_obs_200_500_low_alt_prior_v1",
+      "background_loader_schedule": {
+        "fy_batches": 960,
+        "cosmic_batches": 960,
+        "background_epoch_batches": 960,
+        "pairing": "cycle_shorter_source_max_loader_length"
+      },
+      "background_update_steps": [
+        960,
+        960,
+        960,
+        960,
+        960
+      ]
+    },
+    "summary_fields": {
+      "completed_stage": "analysis",
+      "smoke_run": false,
+      "checkpoint_format_version": 14,
+      "model_domain_semantics": "hybrid_120_500_model_200_500_observation_v1",
+      "alt_range": [
+        120.0,
+        500.0
+      ],
+      "observation_alt_range": [
+        200.0,
+        500.0
+      ],
+      "peak_search_alt_range": [
+        200.0,
+        500.0
+      ],
+      "model_domain_data_summary": {
+        "model_alt_range_km": [
+          120.0,
+          500.0
+        ],
+        "observation_alt_range_km": [
+          200.0,
+          500.0
+        ],
+        "peak_search_alt_range_km": [
+          200.0,
+          500.0
+        ],
+        "development_sampling": "stable_8_points_per_profile",
+        "FY": {
+          "train_points": 3797772,
+          "development_points": 1001241,
+          "all_domain_points": 5660496,
+          "all_domain_profiles": 66612
+        },
+        "COSMIC": {
+          "train_points": 11389227,
+          "development_points": 2829661,
+          "all_domain_points": 17116564,
+          "all_domain_profiles": 84364
+        }
+      },
+      "best_scores": {
+        "background": 0.2752285324778257,
+        "analysis": 0.2424058728818378
+      },
+      "best_epochs": {
+        "background": 3,
+        "analysis": 15
+      },
+      "best_selection_keys": {
+        "background": [
+          -0.07149000026837363,
+          -0.08595994000854856,
+          0.699807667745562,
+          -0.36091822385787964,
+          0.7326538077743018
+        ],
+        "analysis": [
+          0.7573234343061397,
+          -0.32604119181632996,
+          0.7880303420836272
+        ]
+      },
+      "checkpoint_selection_semantics": "mean_ccc_then_rmse_then_pearson_v1",
+      "background_checkpoint_selection": "bias_constrained_v1",
+      "background_selection_baseline": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\checkpoints_fsia\\run66-m2w-120-500-obs-200-500-gate-off\\background_development_replay.json",
+      "background_selection_audits": [
+        {
+          "semantics": "bias_constrained_v1",
+          "eligible": false,
+          "rejection_reasons": [
+            "rmse_degradation",
+            "ccc_degradation",
+            "cell_abs_bias_worsening",
+            "magnetic_abs_bias_worsening",
+            "insufficient_mean_abs_bias_improvement_8",
+            "insufficient_mean_abs_bias_improvement_24"
+          ],
+          "thresholds": {
+            "rmse_degradation_max": 0.01,
+            "ccc_degradation_max": 0.01,
+            "cell_abs_bias_degradation_max": 0.02,
+            "magnetic_min_profiles": 30,
+            "mean_abs_bias_improvement_8_min": 0.005,
+            "mean_abs_bias_improvement_24_min": 0.005,
+            "source_conflict_abs_bias_min": 0.02
+          },
+          "rmse_delta_vs_a0": 0.016358032822608948,
+          "ccc_delta_vs_a0": -0.0286726821399772,
+          "mean_abs_bias_8": 0.10347836371191842,
+          "baseline_mean_abs_bias_8": 0.08460947006422523,
+          "mean_abs_bias_improvement_8": -0.01886889364769319,
+          "mean_abs_bias_24": 0.1211526864563391,
+          "baseline_mean_abs_bias_24": 0.09566643475517989,
+          "mean_abs_bias_improvement_24": -0.025486251701159215,
+          "magnetic_cells_compared": 24,
+          "cell_abs_bias_worsening": {
+            "FY:300-500_night": 0.024677712434554473,
+            "FY:300-500_day": 0.025146718263523295,
+            "COSMIC:200-300_night": 0.03292973067939503,
+            "COSMIC:200-300_day": 0.02934845513117551
+          },
+          "magnetic_abs_bias_worsening": {
+            "FY:200-300_night_abs_sinI_lt_0.25": 0.03924312038226341,
+            "FY:200-300_night_abs_sinI_0.25_0.5": 0.0340968478902727,
+            "FY:200-300_day_abs_sinI_0.25_0.5": 0.05968644027562103,
+            "FY:300-500_night_abs_sinI_lt_0.25": 0.06120508757550134,
+            "FY:300-500_night_abs_sinI_0.25_0.5": 0.03824801152075737,
+            "FY:300-500_night_abs_sinI_ge_0.5": 0.021494767560260176,
+            "FY:300-500_day_abs_sinI_ge_0.5": 0.026979000166091727,
+            "COSMIC:200-300_night_abs_sinI_lt_0.25": 0.05698937806714413,
+            "COSMIC:200-300_night_abs_sinI_0.25_0.5": 0.04518992332095412,
+            "COSMIC:200-300_day_abs_sinI_0.25_0.5": 0.041856889281912196,
+            "COSMIC:200-300_day_abs_sinI_ge_0.5": 0.03572550575643946,
+            "COSMIC:300-500_night_abs_sinI_lt_0.25": 0.04793351020761699,
+            "COSMIC:300-500_night_abs_sinI_0.25_0.5": 0.026462584721569163
+          },
+          "source_conflict_cells": {
+            "200-300_night": false,
+            "200-300_day": false,
+            "300-500_night": false,
+            "300-500_day": false
+          },
+          "selection_key": null
+        },
+        {
+          "semantics": "bias_constrained_v1",
+          "eligible": false,
+          "rejection_reasons": [
+            "ccc_degradation",
+            "cell_abs_bias_worsening",
+            "magnetic_abs_bias_worsening",
+            "insufficient_mean_abs_bias_improvement_24"
+          ],
+          "thresholds": {
+            "rmse_degradation_max": 0.01,
+            "ccc_degradation_max": 0.01,
+            "cell_abs_bias_degradation_max": 0.02,
+            "magnetic_min_profiles": 30,
+            "mean_abs_bias_improvement_8_min": 0.005,
+            "mean_abs_bias_improvement_24_min": 0.005,
+            "source_conflict_abs_bias_min": 0.02
+          },
+          "rmse_delta_vs_a0": 0.0062004029750823975,
+          "ccc_delta_vs_a0": -0.020471600372538146,
+          "mean_abs_bias_8": 0.06826250630276681,
+          "baseline_mean_abs_bias_8": 0.08460947006422523,
+          "mean_abs_bias_improvement_8": 0.016346963761458416,
+          "mean_abs_bias_24": 0.09129524883075328,
+          "baseline_mean_abs_bias_24": 0.09566643475517989,
+          "mean_abs_bias_improvement_24": 0.004371185924426604,
+          "magnetic_cells_compared": 24,
+          "cell_abs_bias_worsening": {
+            "FY:300-500_day": 0.029619467487439013,
+            "COSMIC:300-500_day": 0.025425620888201238
+          },
+          "magnetic_abs_bias_worsening": {
+            "FY:300-500_day_abs_sinI_lt_0.25": 0.04911170354789775,
+            "FY:300-500_day_abs_sinI_ge_0.5": 0.02986144003799867,
+            "COSMIC:200-300_day_abs_sinI_lt_0.25": 0.02333247587197002,
+            "COSMIC:300-500_day_abs_sinI_0.25_0.5": 0.04729171404644611
+          },
+          "source_conflict_cells": {
+            "200-300_night": false,
+            "200-300_day": false,
+            "300-500_night": false,
+            "300-500_day": false
+          },
+          "selection_key": null
+        },
+        {
+          "semantics": "bias_constrained_v1",
+          "eligible": true,
+          "rejection_reasons": [],
+          "thresholds": {
+            "rmse_degradation_max": 0.01,
+            "ccc_degradation_max": 0.01,
+            "cell_abs_bias_degradation_max": 0.02,
+            "magnetic_min_profiles": 30,
+            "mean_abs_bias_improvement_8_min": 0.005,
+            "mean_abs_bias_improvement_24_min": 0.005,
+            "source_conflict_abs_bias_min": 0.02
+          },
+          "rmse_delta_vs_a0": 0.0007270127534866333,
+          "ccc_delta_vs_a0": -0.0041126350942709555,
+          "mean_abs_bias_8": 0.07149000026837363,
+          "baseline_mean_abs_bias_8": 0.08460947006422523,
+          "mean_abs_bias_improvement_8": 0.013119469795851602,
+          "mean_abs_bias_24": 0.08595994000854856,
+          "baseline_mean_abs_bias_24": 0.09566643475517989,
+          "mean_abs_bias_improvement_24": 0.009706494746631322,
+          "magnetic_cells_compared": 24,
+          "cell_abs_bias_worsening": {},
+          "magnetic_abs_bias_worsening": {},
+          "source_conflict_cells": {
+            "200-300_night": false,
+            "200-300_day": false,
+            "300-500_night": false,
+            "300-500_day": false
+          },
+          "selection_key": [
+            -0.07149000026837363,
+            -0.08595994000854856,
+            0.699807667745562,
+            -0.36091822385787964,
+            0.7326538077743018
+          ]
+        },
+        {
+          "semantics": "bias_constrained_v1",
+          "eligible": false,
+          "rejection_reasons": [
+            "insufficient_mean_abs_bias_improvement_8",
+            "insufficient_mean_abs_bias_improvement_24"
+          ],
+          "thresholds": {
+            "rmse_degradation_max": 0.01,
+            "ccc_degradation_max": 0.01,
+            "cell_abs_bias_degradation_max": 0.02,
+            "magnetic_min_profiles": 30,
+            "mean_abs_bias_improvement_8_min": 0.005,
+            "mean_abs_bias_improvement_24_min": 0.005,
+            "source_conflict_abs_bias_min": 0.02
+          },
+          "rmse_delta_vs_a0": -0.00023983418941497803,
+          "ccc_delta_vs_a0": 6.174806927439214e-06,
+          "mean_abs_bias_8": 0.0824190787440047,
+          "baseline_mean_abs_bias_8": 0.08460947006422523,
+          "mean_abs_bias_improvement_8": 0.0021903913202205305,
+          "mean_abs_bias_24": 0.09343199000314983,
+          "baseline_mean_abs_bias_24": 0.09566643475517989,
+          "mean_abs_bias_improvement_24": 0.0022344447520300514,
+          "magnetic_cells_compared": 24,
+          "cell_abs_bias_worsening": {},
+          "magnetic_abs_bias_worsening": {},
+          "source_conflict_cells": {
+            "200-300_night": false,
+            "200-300_day": false,
+            "300-500_night": false,
+            "300-500_day": false
+          },
+          "selection_key": null
+        },
+        {
+          "semantics": "bias_constrained_v1",
+          "eligible": true,
+          "rejection_reasons": [],
+          "thresholds": {
+            "rmse_degradation_max": 0.01,
+            "ccc_degradation_max": 0.01,
+            "cell_abs_bias_degradation_max": 0.02,
+            "magnetic_min_profiles": 30,
+            "mean_abs_bias_improvement_8_min": 0.005,
+            "mean_abs_bias_improvement_24_min": 0.005,
+            "source_conflict_abs_bias_min": 0.02
+          },
+          "rmse_delta_vs_a0": -0.0011975020170211792,
+          "ccc_delta_vs_a0": -0.0008287198845565724,
+          "mean_abs_bias_8": 0.07784674035066237,
+          "baseline_mean_abs_bias_8": 0.08460947006422523,
+          "mean_abs_bias_improvement_8": 0.006762729713562857,
+          "mean_abs_bias_24": 0.09060435931725845,
+          "baseline_mean_abs_bias_24": 0.09566643475517989,
+          "mean_abs_bias_improvement_24": 0.0050620754379214344,
+          "magnetic_cells_compared": 24,
+          "cell_abs_bias_worsening": {},
+          "magnetic_abs_bias_worsening": {},
+          "source_conflict_cells": {
+            "200-300_night": false,
+            "200-300_day": false,
+            "300-500_night": false,
+            "300-500_day": false
+          },
+          "selection_key": [
+            -0.07784674035066237,
+            -0.09060435931725845,
+            0.7030915829552764,
+            -0.3589937090873718,
+            0.7364876412233297
+          ]
+        }
+      ],
+      "checkpoint": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\checkpoints_fsia\\run67-m2w-120-500-analysis-a1s-10epoch\\best_fsia_model.pth",
+      "checkpoint_sha256": "94f4da0b265c313a812159560db25c5ae5394b29603d75f47b18d5f6d9bb6dc1",
+      "checkpoint_stage": "analysis",
+      "background_training_semantics": "qc_v2_date_blocked_train_only_m2w_120_500_obs_200_500_low_alt_prior_v1",
+      "background_trust_gate_enabled": false,
+      "background_trust_gate_semantics": "disabled",
+      "background_trust_gate_parameters": {
+        "background_trust_gate_altitude_core_km": 200.0,
+        "background_trust_gate_altitude_transition_km": 100.0,
+        "background_trust_gate_night_cosine_offset": 0.2,
+        "background_trust_gate_night_cosine_scale": 0.2,
+        "background_trust_gate_dip_core": 0.25,
+        "background_trust_gate_dip_transition": 0.25
+      },
+      "background_development": null,
+      "background_development_gate_passed": null,
+      "background_loader_schedule": {
+        "fy_batches": 960,
+        "cosmic_batches": 960,
+        "background_epoch_batches": 960,
+        "pairing": "cycle_shorter_source_max_loader_length"
+      },
+      "background_update_steps": [
+        960,
+        960,
+        960,
+        960,
+        960
+      ],
+      "training_protocol": {
+        "training_protocol_revision": "v14_hybrid_gram_calibration_v2",
+        "seed": 42,
+        "smoke_run": false,
+        "background_epochs": 5,
+        "analysis_epochs": 10,
+        "background_trust_gate_enabled": false,
+        "use_observation_gram_loss": true,
+        "analysis_exact_mode_loss": true,
+        "gram_gradient_target": 0.02,
+        "gram_calibration_batches": 20,
+        "gram_weight_resolution_semantics": "target_over_median_no_lower_clip_reject_gt_one_v1",
+        "gradient_parameter_scope": "all_current_stage_trainable_parameters_v1",
+        "calibration_precision": "match_analysis_autocast_v1",
+        "gram_require_all_batches_finite_positive": true,
+        "gram_preflight_ratio_bounds": [
+          0.016,
+          0.024
+        ],
+        "gram_coverage_policy": "diagnostic_only_v1",
+        "smoke_auxiliary_gradient_ratio_max": 0.25,
+        "low_altitude_anchor_selection": "first_16_unique_profiles_per_source_per_batch_first_record_v1",
+        "low_altitude_anchor_grouping": "source_profile_id_profile_balanced_v1",
+        "low_altitude_neighbor_profile_semantics": "synthetic_query_no_target_profile_exclusion_v1",
+        "low_altitude_prior_protocol": {
+          "range_km": [
+            120.0,
+            200.0
+          ],
+          "semantics": "soft_iri_background_zero_analysis_increment_v1",
+          "anchor_levels_km": [
+            120.0,
+            130.0,
+            140.0,
+            150.0,
+            160.0,
+            170.0,
+            180.0,
+            190.0
+          ],
+          "profiles_per_source": 16,
+          "background_weight": 0.02,
+          "analysis_weight": 0.01,
+          "low_altitude_gradient_ratio_max": 0.25
+        }
+      },
+      "low_altitude_prior_protocol": {
+        "range_km": [
+          120.0,
+          200.0
+        ],
+        "semantics": "soft_iri_background_zero_analysis_increment_v1",
+        "anchor_levels_km": [
+          120.0,
+          130.0,
+          140.0,
+          150.0,
+          160.0,
+          170.0,
+          180.0,
+          190.0
+        ],
+        "profiles_per_source": 16,
+        "background_weight": 0.02,
+        "analysis_weight": 0.01,
+        "low_altitude_gradient_ratio_max": 0.25
+      },
+      "low_altitude_anchor_history": [
+        {
+          "epoch": 6,
+          "stage": "analysis",
+          "raw_loss": 0.0059153191606299655,
+          "weighted_loss": 5.9153190293191375e-05,
+          "profiles_per_batch": 31.577083333333334,
+          "points_per_batch": 252.61666666666667,
+          "active_fraction": 1.0,
+          "FY": {
+            "raw_loss": 0.005664291004546603,
+            "profiles_per_batch": 15.577083333333333,
+            "points_per_batch": 124.61666666666666,
+            "active_fraction": 1.0
+          },
+          "COSMIC": {
+            "raw_loss": 0.006166347320978923,
+            "profiles_per_batch": 16.0,
+            "points_per_batch": 128.0,
+            "active_fraction": 1.0
+          },
+          "gradient_ratio_to_observation": 0.03640179055189947
+        },
+        {
+          "epoch": 7,
+          "stage": "analysis",
+          "raw_loss": 0.005673842014706072,
+          "weighted_loss": 5.6738418950885713e-05,
+          "profiles_per_batch": 31.577083333333334,
+          "points_per_batch": 252.61666666666667,
+          "active_fraction": 1.0,
+          "FY": {
+            "raw_loss": 0.005319828175546112,
+            "profiles_per_batch": 15.577083333333333,
+            "points_per_batch": 124.61666666666666,
+            "active_fraction": 1.0
+          },
+          "COSMIC": {
+            "raw_loss": 0.0060278558540630914,
+            "profiles_per_batch": 16.0,
+            "points_per_batch": 128.0,
+            "active_fraction": 1.0
+          },
+          "gradient_ratio_to_observation": 0.0
+        },
+        {
+          "epoch": 8,
+          "stage": "analysis",
+          "raw_loss": 0.0053747621328511744,
+          "weighted_loss": 5.374762017898623e-05,
+          "profiles_per_batch": 31.577083333333334,
+          "points_per_batch": 252.61666666666667,
+          "active_fraction": 1.0,
+          "FY": {
+            "raw_loss": 0.00499292243889613,
+            "profiles_per_batch": 15.577083333333333,
+            "points_per_batch": 124.61666666666666,
+            "active_fraction": 1.0
+          },
+          "COSMIC": {
+            "raw_loss": 0.005756601830489672,
+            "profiles_per_batch": 16.0,
+            "points_per_batch": 128.0,
+            "active_fraction": 1.0
+          },
+          "gradient_ratio_to_observation": 0.0
+        },
+        {
+          "epoch": 9,
+          "stage": "analysis",
+          "raw_loss": 0.005795785919265957,
+          "weighted_loss": 5.7957857963704856e-05,
+          "profiles_per_batch": 31.577083333333334,
+          "points_per_batch": 252.61666666666667,
+          "active_fraction": 1.0,
+          "FY": {
+            "raw_loss": 0.0053254667138996105,
+            "profiles_per_batch": 15.577083333333333,
+            "points_per_batch": 124.61666666666666,
+            "active_fraction": 1.0
+          },
+          "COSMIC": {
+            "raw_loss": 0.0062661051183871075,
+            "profiles_per_batch": 16.0,
+            "points_per_batch": 128.0,
+            "active_fraction": 1.0
+          },
+          "gradient_ratio_to_observation": 0.0
+        },
+        {
+          "epoch": 10,
+          "stage": "analysis",
+          "raw_loss": 0.005897324109294762,
+          "weighted_loss": 5.897323975811257e-05,
+          "profiles_per_batch": 31.577083333333334,
+          "points_per_batch": 252.61666666666667,
+          "active_fraction": 1.0,
+          "FY": {
+            "raw_loss": 0.005530965882674839,
+            "profiles_per_batch": 15.577083333333333,
+            "points_per_batch": 124.61666666666666,
+            "active_fraction": 1.0
+          },
+          "COSMIC": {
+            "raw_loss": 0.0062636823226057455,
+            "profiles_per_batch": 16.0,
+            "points_per_batch": 128.0,
+            "active_fraction": 1.0
+          },
+          "gradient_ratio_to_observation": 0.0
+        },
+        {
+          "epoch": 11,
+          "stage": "analysis",
+          "raw_loss": 0.006196302517855657,
+          "weighted_loss": 6.196302387782756e-05,
+          "profiles_per_batch": 31.577083333333334,
+          "points_per_batch": 252.61666666666667,
+          "active_fraction": 1.0,
+          "FY": {
+            "raw_loss": 0.005674756708625258,
+            "profiles_per_batch": 15.577083333333333,
+            "points_per_batch": 124.61666666666666,
+            "active_fraction": 1.0
+          },
+          "COSMIC": {
+            "raw_loss": 0.006717848342729363,
+            "profiles_per_batch": 16.0,
+            "points_per_batch": 128.0,
+            "active_fraction": 1.0
+          },
+          "gradient_ratio_to_observation": 0.0
+        },
+        {
+          "epoch": 12,
+          "stage": "analysis",
+          "raw_loss": 0.006234207283159776,
+          "weighted_loss": 6.23420714077838e-05,
+          "profiles_per_batch": 31.577083333333334,
+          "points_per_batch": 252.61666666666667,
+          "active_fraction": 1.0,
+          "FY": {
+            "raw_loss": 0.00559863159132874,
+            "profiles_per_batch": 15.577083333333333,
+            "points_per_batch": 124.61666666666666,
+            "active_fraction": 1.0
+          },
+          "COSMIC": {
+            "raw_loss": 0.006869782986116965,
+            "profiles_per_batch": 16.0,
+            "points_per_batch": 128.0,
+            "active_fraction": 1.0
+          },
+          "gradient_ratio_to_observation": 0.0
+        },
+        {
+          "epoch": 13,
+          "stage": "analysis",
+          "raw_loss": 0.006411405105366915,
+          "weighted_loss": 6.411404958157618e-05,
+          "profiles_per_batch": 31.577083333333334,
+          "points_per_batch": 252.61666666666667,
+          "active_fraction": 1.0,
+          "FY": {
+            "raw_loss": 0.0058712558184197405,
+            "profiles_per_batch": 15.577083333333333,
+            "points_per_batch": 124.61666666666666,
+            "active_fraction": 1.0
+          },
+          "COSMIC": {
+            "raw_loss": 0.0069515543769739455,
+            "profiles_per_batch": 16.0,
+            "points_per_batch": 128.0,
+            "active_fraction": 1.0
+          },
+          "gradient_ratio_to_observation": 0.0
+        },
+        {
+          "epoch": 14,
+          "stage": "analysis",
+          "raw_loss": 0.006550102523275806,
+          "weighted_loss": 6.550102363386637e-05,
+          "profiles_per_batch": 31.577083333333334,
+          "points_per_batch": 252.61666666666667,
+          "active_fraction": 1.0,
+          "FY": {
+            "raw_loss": 0.0059547596197262465,
+            "profiles_per_batch": 15.577083333333333,
+            "points_per_batch": 124.61666666666666,
+            "active_fraction": 1.0
+          },
+          "COSMIC": {
+            "raw_loss": 0.007145445426855682,
+            "profiles_per_batch": 16.0,
+            "points_per_batch": 128.0,
+            "active_fraction": 1.0
+          },
+          "gradient_ratio_to_observation": 0.0
+        },
+        {
+          "epoch": 15,
+          "stage": "analysis",
+          "raw_loss": 0.006358352456663852,
+          "weighted_loss": 6.358352316245448e-05,
+          "profiles_per_batch": 31.577083333333334,
+          "points_per_batch": 252.61666666666667,
+          "active_fraction": 1.0,
+          "FY": {
+            "raw_loss": 0.005896823052019802,
+            "profiles_per_batch": 15.577083333333333,
+            "points_per_batch": 124.61666666666666,
+            "active_fraction": 1.0
+          },
+          "COSMIC": {
+            "raw_loss": 0.006819881857578972,
+            "profiles_per_batch": 16.0,
+            "points_per_batch": 128.0,
+            "active_fraction": 1.0
+          },
+          "gradient_ratio_to_observation": 0.0
+        }
+      ],
+      "r_mode": "global",
+      "use_distance_localization": true,
+      "assimilation_semantics": "continuous_physical_local_letkf",
+      "use_physical_localization": true,
+      "neighbor_directory_semantics": "token_exact_positive_support_v1",
+      "observation_chunk_size": 4096,
+      "source_mode_schedule": "random_profile",
+      "analysis_exact_mode_loss": true,
+      "use_empirical_covariance_loss": false,
+      "use_direction_loss": false,
+      "use_observation_gram_loss": true,
+      "representativeness_kernel": null,
+      "r_fy": 0.034467048943042755,
+      "r_cosmic": 0.02256251499056816,
+      "r_calibration": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\checkpoints_fsia\\run67-m2w-120-500-analysis-a1s-10epoch\\r_calibration.json",
+      "architecture": {
+        "checkpoint_format_version": 14,
+        "alt_range": [
+          120.0,
+          500.0
+        ],
+        "observation_alt_range": [
+          200.0,
+          500.0
+        ],
+        "peak_search_alt_range": [
+          200.0,
+          500.0
+        ],
+        "model_domain_semantics": "hybrid_120_500_model_200_500_observation_v1",
+        "basis_dim": 64,
+        "enkf_n_members": 8,
+        "enkf_pert_hidden": 64,
+        "enkf_anomaly_parameterization": "orthogonal_factor",
+        "enkf_scale_init": 1.1,
+        "enkf_scale_condition_max": 3.0,
+        "density_basis_semantics": "endpoint_context_symmetric",
+        "analysis_state_semantics": "legacy_feature_increment",
+        "context_semantics": "query_conditioning",
+        "mode_basis_semantics": "learned_density_basis",
+        "background_trust_gate_enabled": false,
+        "background_trust_gate_semantics": "disabled",
+        "background_trust_gate_altitude_core_km": 200.0,
+        "background_trust_gate_altitude_transition_km": 100.0,
+        "background_trust_gate_night_cosine_offset": 0.2,
+        "background_trust_gate_night_cosine_scale": 0.2,
+        "background_trust_gate_dip_core": 0.25,
+        "background_trust_gate_dip_transition": 0.25,
+        "assimilation_semantics": "continuous_physical_local_letkf",
+        "neighbor_directory_semantics": "token_exact_positive_support_v1",
+        "physical_localization_space_km": 1800.0,
+        "physical_localization_time_hours": 1.5,
+        "observation_chunk_size": 4096
+      },
+      "profile_subset": {
+        "FY": {
+          "available": 44625,
+          "selected": 44625
+        },
+        "COSMIC": {
+          "available": 56099,
+          "selected": 56099
+        }
+      },
+      "profile_subset_manifest": null,
+      "date_split": {
+        "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\isr_validation_outputs\\run66-modelonly-m0\\date_split_manifest.json",
+        "sha256": "0576d83c72cbcfd5994e3afcb192429f965bf423a937f88a1db26eb09e21dbab",
+        "partitions": {
+          "development": [
+            3,
+            8,
+            17,
+            22,
+            29
+          ],
+          "locked_test": [
+            2,
+            10,
+            16,
+            18,
+            24
+          ],
+          "train": [
+            0,
+            1,
+            4,
+            5,
+            6,
+            7,
+            9,
+            11,
+            12,
+            13,
+            14,
+            15,
+            19,
+            20,
+            21,
+            23,
+            25,
+            26,
+            27,
+            28
+          ]
+        }
+      },
+      "input_data_sha256": {
+        "fy_path": "51c200d5e2ef1fcafdbc4938b7e1e7435f66179e5df0c241660aaaa9ce862272",
+        "fy_profile_index_path": "3d4ea4bacb9e1c6eebade0c89b9a913b763030b7aef6b3bbef40f911f79250b4",
+        "fy_qc_report_path": "541caa02ec889c5a22e427666a0dac5427ed997a548dcab5d9221c84a1ce4b71",
+        "cosmic_path": "4607f4f3491aae3a6738bd2f2b9cdaef96a3af26484c0924903ecc4c734d32f1",
+        "cosmic_profile_index_path": "af174cc2fe6b29ef77b3ae98a5bfd87db55fb45067f444db76ab35149cedf2cb",
+        "cosmic_qc_report_path": "ea2b16b45805407fbf310d59b3820d7e999638cf7c71e2f9c0816e0bfe6b4e5e",
+        "iri_proxy_path": "e567c2a922ace0fb0ada59e12946bc3c2e799c336005fc5f90244c71c7bdcd31",
+        "iri_hmf2_path": "2386fff2ee50544d87be509f4118c919fc3a7deff812921e870eb9169983fdb4",
+        "iri_nmf2_path": "c4e896553b1fd6174225cf32f74a20a608adea8b588b7c0552f2f9beea8d7077",
+        "sw_path": "ca0a3e5885ea25091a2cc69b85d3e059f3380bc078634c5c7ea84bd033bf3f78",
+        "date_split_manifest": "0576d83c72cbcfd5994e3afcb192429f965bf423a937f88a1db26eb09e21dbab"
+      },
+      "allowed_profile_summary": {
+        "train": {
+          "FY": 44625,
+          "COSMIC": 56099
+        },
+        "development": {
+          "FY": 11591,
+          "COSMIC": 13924
+        }
+      },
+      "covariance_moment": {
+        "enabled": false,
+        "empirical_cells_enabled": false,
+        "gradient_target": 0.008139966,
+        "resolved_weight": null,
+        "strata": {
+          "FY": {
+            "profiles": 44625,
+            "frequencies": [
+              0.22836607629187008,
+              0.22428828466826028,
+              0.25092962776838407,
+              0.2964160112714856
+            ],
+            "weights": [
+              1.0947335263600186,
+              1.1146369074504687,
+              0.9962952650244946,
+              0.84340923058649
+            ]
+          },
+          "COSMIC": {
+            "profiles": 56099,
+            "frequencies": [
+              0.16274705665840444,
+              0.11399561645147148,
+              0.38040994355496033,
+              0.3428473833351638
+            ],
+            "weights": [
+              1.5361260912062689,
+              2.1930667843392584,
+              0.6571857656078353,
+              0.7291874231853267
+            ]
+          }
+        }
+      },
+      "direction_loss": {
+        "enabled": false,
+        "gradient_target": 0.04,
+        "resolved_weight": null
+      },
+      "observation_gram_loss": {
+        "enabled": true,
+        "gradient_target": 0.02,
+        "calibration_batches": 20,
+        "resolved_weight": 1.5550329423250582e-06,
+        "gradient_calibration": {
+          "requested_batches": 20,
+          "processed_batches": 20,
+          "valid_batches": 20,
+          "raw_ratios": [
+            18550.1875,
+            12875.28515625,
+            6475.15576171875,
+            10755.4716796875,
+            35750.734375,
+            6771.0615234375,
+            12572.2265625,
+            48794.546875,
+            10772.2197265625,
+            15907.0283203125,
+            27057.4296875,
+            7709.052734375,
+            7889.9111328125,
+            15485.6513671875,
+            12847.642578125,
+            17458.064453125,
+            3921.92431640625,
+            6041.50927734375,
+            13626.40625,
+            15838.806640625
+          ],
+          "raw_ratio_summary": {
+            "min": 3921.92431640625,
+            "q1": 7844.696533203125,
+            "median": 12861.4638671875,
+            "q3": 16294.787353515625,
+            "max": 48794.546875
+          },
+          "median_ratio": 12861.4638671875,
+          "target_ratio": 0.02,
+          "resolved_weight": 1.5550329423250582e-06,
+          "achieved_median_ratio": 0.02,
+          "parameter_tensor_count": 8,
+          "parameter_count": 18119,
+          "gradient_parameter_scope": "all_current_stage_trainable_parameters_v1",
+          "calibration_precision": "match_analysis_autocast_v1",
+          "weight_resolution_semantics": "target_over_median_no_lower_clip_reject_gt_one_v1",
+          "require_all_batches_finite_positive": true
+        }
+      }
+    }
+  },
+  "weights": [
+    {
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\checkpoints_fsia\\run67-m2w-120-500-analysis-a1s-10epoch\\best_fsia_model.pth",
+      "exists": true,
+      "expected_sha256": "94f4da0b265c313a812159560db25c5ae5394b29603d75f47b18d5f6d9bb6dc1",
+      "sha256": "94f4da0b265c313a812159560db25c5ae5394b29603d75f47b18d5f6d9bb6dc1",
+      "bytes": 579315,
+      "matches_record": true
+    },
+    {
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\checkpoints_fsia\\run67-m2w-120-500-analysis-a1s-10epoch\\epoch_15_model.pth",
+      "exists": true,
+      "expected_sha256": null,
+      "sha256": "734f19e054c4f97fb909d27cf83566f4fd87af38a60404ac234d8b0de5ad9482",
+      "bytes": 579237,
+      "matches_record": null
+    },
+    {
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\checkpoints_fsia\\run67-m2w-120-500-analysis-a1s-10epoch\\best_background_model.pth",
+      "exists": true,
+      "expected_sha256": null,
+      "sha256": "2ff04fa804fdc703ee741378dcfc0caa06147b616a812d64e848e58245c0cef9",
+      "bytes": 579847,
+      "matches_record": null
+    },
+    {
+      "role": "common_background",
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\FNDA_V19_slim_package\\B_model_code\\weights\\common_background_best_background_model.pth",
+      "exists": true,
+      "expected_sha256": "2ff04fa804fdc703ee741378dcfc0caa06147b616a812d64e848e58245c0cef9",
+      "sha256": "2ff04fa804fdc703ee741378dcfc0caa06147b616a812d64e848e58245c0cef9",
+      "bytes": 579847,
+      "matches_record": true
+    },
+    {
+      "role": "S6_N4D64",
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\FNDA_V19_slim_package\\B_model_code\\weights\\sensitivity\\N4D64_best_fsia_model.pth",
+      "exists": true,
+      "expected_sha256": "ebf8bfef5fd920c1912ea72585298954316efed6c24bfbe91a24827ed68db0b8",
+      "sha256": "ebf8bfef5fd920c1912ea72585298954316efed6c24bfbe91a24827ed68db0b8",
+      "bytes": 575859,
+      "matches_record": true
+    },
+    {
+      "role": "S6_N8D32",
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\FNDA_V19_slim_package\\B_model_code\\weights\\sensitivity\\N8D32_best_fsia_model.pth",
+      "exists": true,
+      "expected_sha256": "40d96fe4076f51bc53efd1512bc6fe2366b06f99e5536a776a823e584f7019c6",
+      "sha256": "40d96fe4076f51bc53efd1512bc6fe2366b06f99e5536a776a823e584f7019c6",
+      "bytes": 536307,
+      "matches_record": true
+    },
+    {
+      "role": "S6_N8D64_reproduction",
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\FNDA_V19_slim_package\\B_model_code\\weights\\sensitivity\\N8D64_reproduction_best_fsia_model.pth",
+      "exists": true,
+      "expected_sha256": "94f4da0b265c313a812159560db25c5ae5394b29603d75f47b18d5f6d9bb6dc1",
+      "sha256": "94f4da0b265c313a812159560db25c5ae5394b29603d75f47b18d5f6d9bb6dc1",
+      "bytes": 579315,
+      "matches_record": true
+    },
+    {
+      "role": "iri_proxy",
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\FNDA_V19_slim_package\\B_model_code\\weights\\iri_september_full_proxy.pth",
+      "exists": true,
+      "expected_sha256": "e567c2a922ace0fb0ada59e12946bc3c2e799c336005fc5f90244c71c7bdcd31",
+      "sha256": "e567c2a922ace0fb0ada59e12946bc3c2e799c336005fc5f90244c71c7bdcd31",
+      "bytes": 208133,
+      "matches_record": true
+    },
+    {
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\checkpoints_fsia\\run67-m2w-120-500-background-stratum-bias-a1s\\best_background_model.pth",
+      "exists": true,
+      "expected_sha256": null,
+      "sha256": "2ff04fa804fdc703ee741378dcfc0caa06147b616a812d64e848e58245c0cef9",
+      "bytes": 579847,
+      "matches_record": null
+    }
+  ],
+  "training_data_identity": [
+    {
+      "key": "fy_path",
+      "path": "D:\\FYsatellite\\EDP_data\\fy_202409_qc_v2.npy",
+      "exists": true,
+      "expected_sha256": "51c200d5e2ef1fcafdbc4938b7e1e7435f66179e5df0c241660aaaa9ce862272",
+      "sha256": "51c200d5e2ef1fcafdbc4938b7e1e7435f66179e5df0c241660aaaa9ce862272",
+      "bytes": 158450668,
+      "matches_record": true
+    },
+    {
+      "key": "fy_profile_index_path",
+      "path": "D:\\FYsatellite\\EDP_data\\fy_202409_qc_v2_index.npz",
+      "exists": true,
+      "expected_sha256": "3d4ea4bacb9e1c6eebade0c89b9a913b763030b7aef6b3bbef40f911f79250b4",
+      "sha256": "3d4ea4bacb9e1c6eebade0c89b9a913b763030b7aef6b3bbef40f911f79250b4",
+      "bytes": 7022636,
+      "matches_record": true
+    },
+    {
+      "key": "fy_qc_report_path",
+      "path": "D:\\FYsatellite\\EDP_data\\fy_202409_qc_v2_report.json",
+      "exists": true,
+      "expected_sha256": "541caa02ec889c5a22e427666a0dac5427ed997a548dcab5d9221c84a1ce4b71",
+      "sha256": "541caa02ec889c5a22e427666a0dac5427ed997a548dcab5d9221c84a1ce4b71",
+      "bytes": 7508,
+      "matches_record": true
+    },
+    {
+      "key": "cosmic_path",
+      "path": "D:\\cosmic2\\cosmic245-274-September\\cosmic_september_2024_qc.npy",
+      "exists": true,
+      "expected_sha256": "4607f4f3491aae3a6738bd2f2b9cdaef96a3af26484c0924903ecc4c734d32f1",
+      "sha256": "4607f4f3491aae3a6738bd2f2b9cdaef96a3af26484c0924903ecc4c734d32f1",
+      "bytes": 387528208,
+      "matches_record": true
+    },
+    {
+      "key": "cosmic_profile_index_path",
+      "path": "D:\\cosmic2\\cosmic245-274-September\\cosmic_september_2024_qc_index.npz",
+      "exists": true,
+      "expected_sha256": "af174cc2fe6b29ef77b3ae98a5bfd87db55fb45067f444db76ab35149cedf2cb",
+      "sha256": "af174cc2fe6b29ef77b3ae98a5bfd87db55fb45067f444db76ab35149cedf2cb",
+      "bytes": 8118435,
+      "matches_record": true
+    },
+    {
+      "key": "cosmic_qc_report_path",
+      "path": "D:\\cosmic2\\cosmic245-274-September\\cosmic_september_2024_qc_report.json",
+      "exists": true,
+      "expected_sha256": "ea2b16b45805407fbf310d59b3820d7e999638cf7c71e2f9c0816e0bfe6b4e5e",
+      "sha256": "ea2b16b45805407fbf310d59b3820d7e999638cf7c71e2f9c0816e0bfe6b4e5e",
+      "bytes": 6090,
+      "matches_record": true
+    },
+    {
+      "key": "iri_proxy_path",
+      "path": "D:\\code11\\IRI01\\output_results\\iri_september_full_proxy.pth",
+      "exists": true,
+      "expected_sha256": "e567c2a922ace0fb0ada59e12946bc3c2e799c336005fc5f90244c71c7bdcd31",
+      "sha256": "e567c2a922ace0fb0ada59e12946bc3c2e799c336005fc5f90244c71c7bdcd31",
+      "bytes": 208133,
+      "matches_record": true
+    },
+    {
+      "key": "iri_hmf2_path",
+      "path": "D:\\IRI\\data01\\edp_peak_npy\\IRI_hmF2_20240901_20241001.npy",
+      "exists": true,
+      "expected_sha256": "2386fff2ee50544d87be509f4118c919fc3a7deff812921e870eb9169983fdb4",
+      "sha256": "2386fff2ee50544d87be509f4118c919fc3a7deff812921e870eb9169983fdb4",
+      "bytes": 31581732,
+      "matches_record": true
+    },
+    {
+      "key": "iri_nmf2_path",
+      "path": "D:\\IRI\\data01\\edp_peak_npy\\IRI_NmF2_20240901_20241001.npy",
+      "exists": true,
+      "expected_sha256": "c4e896553b1fd6174225cf32f74a20a608adea8b588b7c0552f2f9beea8d7077",
+      "sha256": "c4e896553b1fd6174225cf32f74a20a608adea8b588b7c0552f2f9beea8d7077",
+      "bytes": 31581732,
+      "matches_record": true
+    },
+    {
+      "key": "sw_path",
+      "path": "D:\\FYsatellite\\EDP_data\\kp\\OMNI_Kp_F107_20240901_20241001.txt",
+      "exists": true,
+      "expected_sha256": "ca0a3e5885ea25091a2cc69b85d3e059f3380bc078634c5c7ea84bd033bf3f78",
+      "sha256": "ca0a3e5885ea25091a2cc69b85d3e059f3380bc078634c5c7ea84bd033bf3f78",
+      "bytes": 23083,
+      "matches_record": true
+    },
+    {
+      "key": "date_split_manifest",
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\isr_validation_outputs\\run66-modelonly-m0\\date_split_manifest.json",
+      "exists": true,
+      "expected_sha256": "0576d83c72cbcfd5994e3afcb192429f965bf423a937f88a1db26eb09e21dbab",
+      "sha256": "0576d83c72cbcfd5994e3afcb192429f965bf423a937f88a1db26eb09e21dbab",
+      "bytes": 1320,
+      "matches_record": true
+    }
+  ],
+  "maintenance_code": [
+    {
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\evaluate_giro_peak.py",
+      "exists": true,
+      "expected_sha256": "52b93e71c6876b0fdbb69533be32d86a2403372bd793ca35caf9fd2fd3f903c2",
+      "sha256": "52b93e71c6876b0fdbb69533be32d86a2403372bd793ca35caf9fd2fd3f903c2",
+      "bytes": 73437,
+      "matches_record": true
+    },
+    {
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\inr_modules\\__init__.py",
+      "exists": true,
+      "expected_sha256": "5f01321523977c9e4abc54975c4693385ada1517731824fbb6b76d065c45a6ca",
+      "sha256": "5f01321523977c9e4abc54975c4693385ada1517731824fbb6b76d065c45a6ca",
+      "bytes": 130,
+      "matches_record": true
+    },
+    {
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\inr_modules\\config_mdia.py",
+      "exists": true,
+      "expected_sha256": "6dc74aef86bf878abd731b73381fa96c8a30ed9c73033835a12fd8dc367e0ff5",
+      "sha256": "6dc74aef86bf878abd731b73381fa96c8a30ed9c73033835a12fd8dc367e0ff5",
+      "bytes": 25602,
+      "matches_record": true
+    },
+    {
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\inr_modules\\data_managers\\FY_dataloader.py",
+      "exists": true,
+      "expected_sha256": "be3d5c39c0d8b639732731d916429bfa89dcd6eaac91e1c90c8a0a15c1b2f210",
+      "sha256": "be3d5c39c0d8b639732731d916429bfa89dcd6eaac91e1c90c8a0a15c1b2f210",
+      "bytes": 97201,
+      "matches_record": true
+    },
+    {
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\inr_modules\\data_managers\\__init__.py",
+      "exists": true,
+      "expected_sha256": "a2de8ef18051e14db4653787df3dee775b33532c061508933ded86a0b69ddd29",
+      "sha256": "a2de8ef18051e14db4653787df3dee775b33532c061508933ded86a0b69ddd29",
+      "bytes": 250,
+      "matches_record": true
+    },
+    {
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\inr_modules\\data_managers\\iri_peak_manager.py",
+      "exists": true,
+      "expected_sha256": "533508769e616f008a9e8be09dd37b06cff335b54e9f40902d3a47e324c70ab9",
+      "sha256": "533508769e616f008a9e8be09dd37b06cff335b54e9f40902d3a47e324c70ab9",
+      "bytes": 7224,
+      "matches_record": true
+    },
+    {
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\inr_modules\\data_managers\\irinc_neural_proxy.py",
+      "exists": true,
+      "expected_sha256": "d79f48c659b1521740ba5f2b9ea5047c47e2525543cf0f6049974faa2515d63b",
+      "sha256": "d79f48c659b1521740ba5f2b9ea5047c47e2525543cf0f6049974faa2515d63b",
+      "bytes": 16996,
+      "matches_record": true
+    },
+    {
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\inr_modules\\data_managers\\profile_split.py",
+      "exists": true,
+      "expected_sha256": "b0169e87ab3bc3ab61006fc83c4cc7fa3143fe3ae4847bd5d89ab222e9ec5383",
+      "sha256": "b0169e87ab3bc3ab61006fc83c4cc7fa3143fe3ae4847bd5d89ab222e9ec5383",
+      "bytes": 21078,
+      "matches_record": true
+    },
+    {
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\inr_modules\\data_managers\\space_weather_manager.py",
+      "exists": true,
+      "expected_sha256": "c0f24961de158087060df1b87c7b1ea79da6ec2a0918b93c8c131befe22374dc",
+      "sha256": "c0f24961de158087060df1b87c7b1ea79da6ec2a0918b93c8c131befe22374dc",
+      "bytes": 4812,
+      "matches_record": true
+    },
+    {
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\inr_modules\\density_units.py",
+      "exists": true,
+      "expected_sha256": "f0399dfe93fc05496f29836b2a8af51c106acfca67dc43c9c25447bfc5f3e344",
+      "sha256": "f0399dfe93fc05496f29836b2a8af51c106acfca67dc43c9c25447bfc5f3e344",
+      "bytes": 506,
+      "matches_record": true
+    },
+    {
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\inr_modules\\mdia\\__init__.py",
+      "exists": true,
+      "expected_sha256": "aaba6d86515d698d33500de00b6cd43e57169dfa28202fde0a584e6d55deda3f",
+      "sha256": "aaba6d86515d698d33500de00b6cd43e57169dfa28202fde0a584e6d55deda3f",
+      "bytes": 183,
+      "matches_record": true
+    },
+    {
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\inr_modules\\mdia\\checkpoint_io.py",
+      "exists": true,
+      "expected_sha256": "0a75b02baa7133fcf29970bdec273e8099c90b1e48db47a26ae0ce50c4ecb190",
+      "sha256": "0a75b02baa7133fcf29970bdec273e8099c90b1e48db47a26ae0ce50c4ecb190",
+      "bytes": 18170,
+      "matches_record": true
+    },
+    {
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\inr_modules\\mdia\\evaluation_mdia.py",
+      "exists": true,
+      "expected_sha256": "da754a0d851cfc1f49ce92fd5bc83fc98d28133797c5a49e716c7c61e2f20d1d",
+      "sha256": "da754a0d851cfc1f49ce92fd5bc83fc98d28133797c5a49e716c7c61e2f20d1d",
+      "bytes": 10097,
+      "matches_record": true
+    },
+    {
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\inr_modules\\mdia\\evaluation_stats.py",
+      "exists": true,
+      "expected_sha256": "06c662004f9aabbfee2abbfdfe90806c0f0429cab83216a75ceb07915fed5192",
+      "sha256": "06c662004f9aabbfee2abbfdfe90806c0f0429cab83216a75ceb07915fed5192",
+      "bytes": 5665,
+      "matches_record": true
+    },
+    {
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\inr_modules\\mdia\\ewma_sw_encoder.py",
+      "exists": true,
+      "expected_sha256": "eeb9c4a901864ed6bd9563c0029f725dccec032fb08793d3d7db10840a375fc3",
+      "sha256": "eeb9c4a901864ed6bd9563c0029f725dccec032fb08793d3d7db10840a375fc3",
+      "bytes": 11113,
+      "matches_record": true
+    },
+    {
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\inr_modules\\mdia\\fsia_model.py",
+      "exists": true,
+      "expected_sha256": "f38a738fac1c924e46442aa743ad6cb5359acb6a60672858aed94230540bd085",
+      "sha256": "f38a738fac1c924e46442aa743ad6cb5359acb6a60672858aed94230540bd085",
+      "bytes": 110080,
+      "matches_record": true
+    },
+    {
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\inr_modules\\mdia\\m00_observation.py",
+      "exists": true,
+      "expected_sha256": "7ccdab9881354c8c88d81b818b938265e46852ee2b6508309acafdc093363527",
+      "sha256": "7ccdab9881354c8c88d81b818b938265e46852ee2b6508309acafdc093363527",
+      "bytes": 54589,
+      "matches_record": true
+    },
+    {
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\inr_modules\\mdia\\mdia_model.py",
+      "exists": true,
+      "expected_sha256": "74d9ce439729b5876abbc11559eebf399f5bcd2eddd64f275b3d32f4aad1b474",
+      "sha256": "74d9ce439729b5876abbc11559eebf399f5bcd2eddd64f275b3d32f4aad1b474",
+      "bytes": 33473,
+      "matches_record": true
+    },
+    {
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\inr_modules\\mdia\\physics_losses_mdia.py",
+      "exists": true,
+      "expected_sha256": "f68c7f9c68385d3c9858f16cdb328776f95a01528c5c32a12664b34f15e7ddb2",
+      "sha256": "f68c7f9c68385d3c9858f16cdb328776f95a01528c5c32a12664b34f15e7ddb2",
+      "bytes": 1997,
+      "matches_record": true
+    },
+    {
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\inr_modules\\mdia\\plotting.py",
+      "exists": true,
+      "expected_sha256": "e1dd67d289d6181ddc88e20ef93d003f54df829c45accf9d4755d7fe667d5c55",
+      "sha256": "e1dd67d289d6181ddc88e20ef93d003f54df829c45accf9d4755d7fe667d5c55",
+      "bytes": 2206,
+      "matches_record": true
+    },
+    {
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\inr_modules\\mdia\\siren_layers.py",
+      "exists": true,
+      "expected_sha256": "4ab2316823770f1e0b547d06581c2a76ae460b34b753c95753772209e082c0a7",
+      "sha256": "4ab2316823770f1e0b547d06581c2a76ae460b34b753c95753772209e082c0a7",
+      "bytes": 7513,
+      "matches_record": true
+    },
+    {
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\inr_modules\\mdia\\sliding_dataset.py",
+      "exists": true,
+      "expected_sha256": "45c7ce3256f6c934f0843083f75c91744f2e4d0a7c8b702c15d755561a93c1e2",
+      "sha256": "45c7ce3256f6c934f0843083f75c91744f2e4d0a7c8b702c15d755561a93c1e2",
+      "bytes": 18955,
+      "matches_record": true
+    },
+    {
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\inr_modules\\mdia\\train_fsia.py",
+      "exists": true,
+      "expected_sha256": "ff35d806c8d05d5a550a7d7f4aca01a39d508bf51bc18fa86cb5c09955c20b60",
+      "sha256": "ff35d806c8d05d5a550a7d7f4aca01a39d508bf51bc18fa86cb5c09955c20b60",
+      "bytes": 474663,
+      "matches_record": true
+    },
+    {
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\inr_modules\\mdia\\v14_contract.py",
+      "exists": true,
+      "expected_sha256": "d9999b31463e33bce56aff10c202172bc781e9d50e9c56dc504c9479c2cb2861",
+      "sha256": "d9999b31463e33bce56aff10c202172bc781e9d50e9c56dc504c9479c2cb2861",
+      "bytes": 12315,
+      "matches_record": true
+    },
+    {
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\inr_modules\\mdia\\visualization_mdia.py",
+      "exists": true,
+      "expected_sha256": "15877674299f22f9c274ec5b3f68110ca3a066392b365b3a8e41d06d01fabc62",
+      "sha256": "15877674299f22f9c274ec5b3f68110ca3a066392b365b3a8e41d06d01fabc62",
+      "bytes": 29930,
+      "matches_record": true
+    },
+    {
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\isr_evaluation\\__init__.py",
+      "exists": true,
+      "expected_sha256": "96d6464ae0de13eeb19dc46305b4f63861b687917d0d50a2a31b7e69756d2c8a",
+      "sha256": "96d6464ae0de13eeb19dc46305b4f63861b687917d0d50a2a31b7e69756d2c8a",
+      "bytes": 26,
+      "matches_record": true
+    },
+    {
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\isr_evaluation\\coord_convert.py",
+      "exists": true,
+      "expected_sha256": "0181e87acbd1a26f8b5079ca66b888b21a0476c06463fb13ef50e16b688bc686",
+      "sha256": "0181e87acbd1a26f8b5079ca66b888b21a0476c06463fb13ef50e16b688bc686",
+      "bytes": 5045,
+      "matches_record": true
+    },
+    {
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\isr_evaluation\\isr_loader.py",
+      "exists": true,
+      "expected_sha256": "050d3b3785362435775833c2934ac5738fdaf622bcef3b05e192c0e339132274",
+      "sha256": "050d3b3785362435775833c2934ac5738fdaf622bcef3b05e192c0e339132274",
+      "bytes": 46991,
+      "matches_record": true
+    },
+    {
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\isr_evaluation\\main_isr_eval.py",
+      "exists": true,
+      "expected_sha256": "f03abe46904159a1dc260b3b152c52c291419200726658186a561738ee8f9264",
+      "sha256": "f03abe46904159a1dc260b3b152c52c291419200726658186a561738ee8f9264",
+      "bytes": 96011,
+      "matches_record": true
+    },
+    {
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\isr_evaluation\\metrics.py",
+      "exists": true,
+      "expected_sha256": "6c0061c11fd5b8baeae9874be88866f5fba2f5fb56b1d696a2cba2e75a1d69a3",
+      "sha256": "6c0061c11fd5b8baeae9874be88866f5fba2f5fb56b1d696a2cba2e75a1d69a3",
+      "bytes": 7337,
+      "matches_record": true
+    },
+    {
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\isr_evaluation\\model_query.py",
+      "exists": true,
+      "expected_sha256": "7380491fe12412a926515462624c9e25ccb15523f156ee51b0615e561d5a9819",
+      "sha256": "7380491fe12412a926515462624c9e25ccb15523f156ee51b0615e561d5a9819",
+      "bytes": 9003,
+      "matches_record": true
+    },
+    {
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\isr_evaluation\\peak_qa.py",
+      "exists": true,
+      "expected_sha256": "18a8687f88117276b0d95cb3a32a5ad1e01336661753cf1b3131ccb3ebe67644",
+      "sha256": "18a8687f88117276b0d95cb3a32a5ad1e01336661753cf1b3131ccb3ebe67644",
+      "bytes": 14401,
+      "matches_record": true
+    },
+    {
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\isr_evaluation\\plots.py",
+      "exists": true,
+      "expected_sha256": "3ba7da86b7c258a110ba4359a65796868fa8ff188b4c575b09fa26787e085b0c",
+      "sha256": "3ba7da86b7c258a110ba4359a65796868fa8ff188b4c575b09fa26787e085b0c",
+      "bytes": 21988,
+      "matches_record": true
+    },
+    {
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\main_fsia.py",
+      "exists": true,
+      "expected_sha256": "bb83ab00dff9b85a5deb64f1a4767dc6f9a0001687f2c55b6caf2fcecd3e72b3",
+      "sha256": "bb83ab00dff9b85a5deb64f1a4767dc6f9a0001687f2c55b6caf2fcecd3e72b3",
+      "bytes": 93920,
+      "matches_record": true
+    },
+    {
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\qc_profile_data.py",
+      "exists": true,
+      "expected_sha256": "35b1c19d8dcd87f8f853f9bba0b0ceffd7c7efe1dcf31a6f8e35abf82a19e298",
+      "sha256": "35b1c19d8dcd87f8f853f9bba0b0ceffd7c7efe1dcf31a6f8e35abf82a19e298",
+      "bytes": 32081,
+      "matches_record": true
+    },
+    {
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\traditional_static_etkf\\cli.py",
+      "exists": true,
+      "expected_sha256": "97ee705831e547e52e13339f89e2637fdb38b5f8ae94ee790a9f102dc8a9a4fb",
+      "sha256": "97ee705831e547e52e13339f89e2637fdb38b5f8ae94ee790a9f102dc8a9a4fb",
+      "bytes": 21745,
+      "matches_record": true
+    },
+    {
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\traditional_static_etkf\\core.py",
+      "exists": true,
+      "expected_sha256": "b0507bc3a638d785101fdd3257c1d815d5e1c4aaa4fa46adcefbc1e4755254ec",
+      "sha256": "b0507bc3a638d785101fdd3257c1d815d5e1c4aaa4fa46adcefbc1e4755254ec",
+      "bytes": 30880,
+      "matches_record": true
+    },
+    {
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\traditional_static_etkf\\runner.py",
+      "exists": true,
+      "expected_sha256": "8e7a456e9c20c0566ab454c2eb4a8d061a0fc9b9f79c36319ac822387bcc5e5f",
+      "sha256": "8e7a456e9c20c0566ab454c2eb4a8d061a0fc9b9f79c36319ac822387bcc5e5f",
+      "bytes": 38836,
+      "matches_record": true
+    }
+  ],
+  "figures": [
+    {
+      "section": "main",
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\a1s_submission_v17\\run_20260920_v19\\submission_v19.3\\upload_flat\\Figure1_architecture.png",
+      "exists": true,
+      "expected_sha256": "4364325fd17c808b100aed7ea7ba07f7a40f48c6a6ca0af3339987d5f4a858ca",
+      "sha256": "4364325fd17c808b100aed7ea7ba07f7a40f48c6a6ca0af3339987d5f4a858ca",
+      "bytes": 1428164,
+      "matches_record": true
+    },
+    {
+      "section": "main",
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\a1s_submission_v17\\run_20260920_v19\\submission_v19.3\\upload_flat\\Figure2_RO_coverage.pdf",
+      "exists": true,
+      "expected_sha256": "d3189807f1640d159c3975052a215fc29f8a68d5d16e0426e072b497be94b53d",
+      "sha256": "e5c8e728dabdd34c0e166703e11bb82f09098bf839ba568bf676a2025cd25a68",
+      "bytes": 342337,
+      "matches_record": false
+    },
+    {
+      "section": "main",
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\a1s_submission_v17\\run_20260920_v19\\submission_v19.3\\upload_flat\\Figure3_GIRO_coverage.pdf",
+      "exists": true,
+      "expected_sha256": "124703769d018a75269f31acc79a53ef230969929391029de7667ec5062c48e0",
+      "sha256": "124703769d018a75269f31acc79a53ef230969929391029de7667ec5062c48e0",
+      "bytes": 132996,
+      "matches_record": true
+    },
+    {
+      "section": "main",
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\a1s_submission_v17\\run_20260920_v19\\submission_v19.3\\upload_flat\\Figure4_ISR_height_bins.pdf",
+      "exists": true,
+      "expected_sha256": "56878892d0e9d487fd272745ef88fff0da4adcb96ea88b5ddceeb472fc8055f8",
+      "sha256": "56878892d0e9d487fd272745ef88fff0da4adcb96ea88b5ddceeb472fc8055f8",
+      "bytes": 13526,
+      "matches_record": true
+    },
+    {
+      "section": "main",
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\a1s_submission_v17\\run_20260920_v19\\submission_v19.3\\upload_flat\\Figure5_query_update.pdf",
+      "exists": true,
+      "expected_sha256": "9e0d6c0cb650c5d9055f1000e49d3db1cbb070e834f4e0efe95ee3954a330d4b",
+      "sha256": "9e0d6c0cb650c5d9055f1000e49d3db1cbb070e834f4e0efe95ee3954a330d4b",
+      "bytes": 15731,
+      "matches_record": true
+    },
+    {
+      "section": "main",
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\a1s_submission_v17\\run_20260920_v19\\submission_v19.3\\upload_flat\\Figure6_Jicamarca_profiles.pdf",
+      "exists": true,
+      "expected_sha256": "27240edf552223d90767c91ae1d37574389ef4d17e5a08f7c24facdf59465b38",
+      "sha256": "27240edf552223d90767c91ae1d37574389ef4d17e5a08f7c24facdf59465b38",
+      "bytes": 24778,
+      "matches_record": true
+    },
+    {
+      "section": "main",
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\a1s_submission_v17\\run_20260920_v19\\submission_v19.3\\upload_flat\\Figure7_shared_basis_diagnostics.pdf",
+      "exists": true,
+      "expected_sha256": "4a1ebd2910ca665eb9e4660b332c402c66497a39fbcec34fdbb30ef516b86a32",
+      "sha256": "4a1ebd2910ca665eb9e4660b332c402c66497a39fbcec34fdbb30ef516b86a32",
+      "bytes": 71606,
+      "matches_record": true
+    },
+    {
+      "section": "supporting_information",
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\a1s_submission_v17\\run_20260920_v19\\submission_v19.3\\work\\clean_SI\\figures\\FigureS1_GIRO_error_ECDF.pdf",
+      "exists": true,
+      "expected_sha256": "c6673e1c3f5adce5063e8f032999f57634976e8e4a0bce6fc1100d3c69187873",
+      "sha256": "c6673e1c3f5adce5063e8f032999f57634976e8e4a0bce6fc1100d3c69187873",
+      "bytes": 57180,
+      "matches_record": true
+    },
+    {
+      "section": "supporting_information",
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\a1s_submission_v17\\run_20260920_v19\\submission_v19.3\\work\\clean_SI\\figures\\FigureS2_PokerFlat_low_altitude.pdf",
+      "exists": true,
+      "expected_sha256": "3f92de5fe4d23291ca157655f2d310995d5e9fd7b2466912907143344e1b9633",
+      "sha256": "3f92de5fe4d23291ca157655f2d310995d5e9fd7b2466912907143344e1b9633",
+      "bytes": 16368,
+      "matches_record": true
+    },
+    {
+      "section": "supporting_information",
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\a1s_submission_v17\\run_20260920_v19\\submission_v19.3\\work\\clean_SI\\figures\\FigureS3_latitude_height_slice.pdf",
+      "exists": true,
+      "expected_sha256": "2301f490589900facb31f17996bbeaad5acf7c3812a713d36d7ff54671750e20",
+      "sha256": "2301f490589900facb31f17996bbeaad5acf7c3812a713d36d7ff54671750e20",
+      "bytes": 168879,
+      "matches_record": true
+    },
+    {
+      "section": "supporting_information",
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\a1s_submission_v17\\run_20260920_v19\\submission_v19.3\\work\\clean_SI\\figures\\FigureS4_observation_support.pdf",
+      "exists": true,
+      "expected_sha256": "401714e1c1418851feabb7b32581475dc6b7254e9cf5e65120727d3a996622e9",
+      "sha256": "401714e1c1418851feabb7b32581475dc6b7254e9cf5e65120727d3a996622e9",
+      "bytes": 54580,
+      "matches_record": true
+    },
+    {
+      "section": "supporting_information",
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\a1s_submission_v17\\run_20260920_v19\\submission_v19.3\\work\\clean_SI\\figures\\FigureS5_covariance_correlation.pdf",
+      "exists": true,
+      "expected_sha256": "359fe6f08ae96d0c89ca91827a5e7c3aec05ef7209ffa1cb5be07201a417a886",
+      "sha256": "359fe6f08ae96d0c89ca91827a5e7c3aec05ef7209ffa1cb5be07201a417a886",
+      "bytes": 83338,
+      "matches_record": true
+    },
+    {
+      "section": "supporting_information",
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\a1s_submission_v17\\run_20260920_v19\\submission_v19.3\\work\\clean_SI\\figures\\FigureS6_200km_boundary_gradient.pdf",
+      "exists": true,
+      "expected_sha256": "01bfabbff94ee80ffc491b6e1099244d7740bddd0a7b900a10c6b4be10f6d6a1",
+      "sha256": "01bfabbff94ee80ffc491b6e1099244d7740bddd0a7b900a10c6b4be10f6d6a1",
+      "bytes": 29760,
+      "matches_record": true
+    }
+  ],
+  "result_lineage": [
+    {
+      "item": "Figure 1",
+      "source_files": [
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\a1s_submission_v17\\run_20260920_v19\\submission_v19\\01_article_file\\figures\\Figure1_architecture.png",
+          "exists": true,
+          "expected_sha256": "4364325fd17c808b100aed7ea7ba07f7a40f48c6a6ca0af3339987d5f4a858ca",
+          "sha256": "4364325fd17c808b100aed7ea7ba07f7a40f48c6a6ca0af3339987d5f4a858ca",
+          "bytes": 1428164,
+          "matches_record": true
+        }
+      ],
+      "generators": []
+    },
+    {
+      "item": "Figure 2",
+      "source_files": [
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\build\\a1s_submission_v15\\run_20260919_202003\\data\\figure2_counts_v13.npz",
+          "exists": true,
+          "expected_sha256": "0c381f4639d94d2137ca67493357eee1fae69b136db8f49ed29fc2a0a6940273",
+          "sha256": "0c381f4639d94d2137ca67493357eee1fae69b136db8f49ed29fc2a0a6940273",
+          "bytes": 20031,
+          "matches_record": true
+        },
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\build\\a1s_submission_v15\\run_20260919_202003\\data\\figure2_provenance_v13.json",
+          "exists": true,
+          "expected_sha256": "a98625f644ca95855fcdab09d5a067b0df06b0f462dbb9eb41afdab269235785",
+          "sha256": "a98625f644ca95855fcdab09d5a067b0df06b0f462dbb9eb41afdab269235785",
+          "bytes": 1277,
+          "matches_record": true
+        }
+      ],
+      "generators": [
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\build\\a1s_submission_v15\\run_20260919_202003\\sources\\figures_v15.py",
+          "exists": true,
+          "expected_sha256": "2764190808b7ae1c542c8f20c76485e7058f308fcc8ee006f1251997d64176cf",
+          "sha256": "2764190808b7ae1c542c8f20c76485e7058f308fcc8ee006f1251997d64176cf",
+          "bytes": 9619,
+          "matches_record": true
+        },
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\build\\a1s_submission_v13\\run_20260919_025039\\sources\\figure2_v13.py",
+          "exists": true,
+          "expected_sha256": "ee74f73cb9bc9c81fea66f04d563a0b0a1fc05fe886debd9721cb9d100982b33",
+          "sha256": "ee74f73cb9bc9c81fea66f04d563a0b0a1fc05fe886debd9721cb9d100982b33",
+          "bytes": 4789,
+          "matches_record": true
+        }
+      ]
+    },
+    {
+      "item": "Figure 3",
+      "source_files": [
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\build\\a1s_submission_v15\\run_20260919_202003\\data\\giro_station_coverage_v15.csv",
+          "exists": true,
+          "expected_sha256": "ed580d21ee9cb7a9a81e636e766a472f8ba97903b7ca337c948c0f1150deaf53",
+          "sha256": "ed580d21ee9cb7a9a81e636e766a472f8ba97903b7ca337c948c0f1150deaf53",
+          "bytes": 9015,
+          "matches_record": true
+        },
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\build\\a1s_submission_v15\\run_20260919_202003\\data\\figure3_aacgm_grid_v14.npz",
+          "exists": true,
+          "expected_sha256": "59b67c35d53cdbde1cf33dc685669464688a4eadc78dd43e91f5cf68809b332f",
+          "sha256": "59b67c35d53cdbde1cf33dc685669464688a4eadc78dd43e91f5cf68809b332f",
+          "bytes": 470217,
+          "matches_record": true
+        }
+      ],
+      "generators": [
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\build\\a1s_submission_v15\\run_20260919_202003\\sources\\figure3_v15.py",
+          "exists": true,
+          "expected_sha256": "213b09bbec1277e90263e73e2345908a0217bd79cb6d02f8e64c4131ef0351d4",
+          "sha256": "213b09bbec1277e90263e73e2345908a0217bd79cb6d02f8e64c4131ef0351d4",
+          "bytes": 8327,
+          "matches_record": true
+        }
+      ]
+    },
+    {
+      "item": "Figure 4",
+      "source_files": [
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\build\\a1s_submission_v9\\run_20260916_211340\\review_package\\data\\figures\\figure4_height_bin_metrics.csv",
+          "exists": true,
+          "expected_sha256": "c1ddfe15501fd01cc5d26f944d9b824c85355ba02e31f604584d3ce8b5336b16",
+          "sha256": "c1ddfe15501fd01cc5d26f944d9b824c85355ba02e31f604584d3ce8b5336b16",
+          "bytes": 5843,
+          "matches_record": true
+        }
+      ],
+      "generators": [
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\build\\output\\v82_isr_figures.py",
+          "exists": true,
+          "expected_sha256": "00cf9a0061b323a3e3dfd0eb02cd895147376aade7f713e2acb78cfcaa7bcd0e",
+          "sha256": "00cf9a0061b323a3e3dfd0eb02cd895147376aade7f713e2acb78cfcaa7bcd0e",
+          "bytes": 8505,
+          "matches_record": true
+        }
+      ]
+    },
+    {
+      "item": "Figure 5",
+      "source_files": [
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\build\\a1s_submission_v9\\run_20260916_211340\\review_package\\data\\experiments\\ro_toggle\\statistics\\paired_metrics.csv",
+          "exists": true,
+          "expected_sha256": "f8c3a2c8334deddfcd5c21ca8af6af8b9f77c514130a8405009f9f582636a2c3",
+          "sha256": "f8c3a2c8334deddfcd5c21ca8af6af8b9f77c514130a8405009f9f582636a2c3",
+          "bytes": 8653,
+          "matches_record": true
+        },
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\build\\a1s_submission_v15\\run_20260919_202003\\data\\support_strata_v14\\stratified_metrics.csv",
+          "exists": true,
+          "expected_sha256": "88a89da683392c475d9be64882c84f99129933ca1c69c7bd1e5410e0cbf28334",
+          "sha256": "88a89da683392c475d9be64882c84f99129933ca1c69c7bd1e5410e0cbf28334",
+          "bytes": 6472,
+          "matches_record": true
+        },
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\build\\a1s_submission_v15\\run_20260919_202003\\data\\support_strata_v14\\paired_contrasts.csv",
+          "exists": true,
+          "expected_sha256": "af79493f7ac6507e6019fde6dbd9db80582ff9c6cb496ae78aee1dfe0c4c25be",
+          "sha256": "af79493f7ac6507e6019fde6dbd9db80582ff9c6cb496ae78aee1dfe0c4c25be",
+          "bytes": 4543,
+          "matches_record": true
+        }
+      ],
+      "generators": [
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\build\\a1s_submission_v15\\run_20260919_202003\\sources\\figures_v15.py",
+          "exists": true,
+          "expected_sha256": "2764190808b7ae1c542c8f20c76485e7058f308fcc8ee006f1251997d64176cf",
+          "sha256": "2764190808b7ae1c542c8f20c76485e7058f308fcc8ee006f1251997d64176cf",
+          "bytes": 9619,
+          "matches_record": true
+        }
+      ]
+    },
+    {
+      "item": "Figure 6",
+      "source_files": [
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\build\\a1s_submission_v15\\run_20260919_202003\\data\\frozen_v12\\figure7_profile_points.csv",
+          "exists": true,
+          "expected_sha256": "622d6e399b37edc8c855ebe3770527d77b117b865bc8c2af8f877cd24c952f31",
+          "sha256": "622d6e399b37edc8c855ebe3770527d77b117b865bc8c2af8f877cd24c952f31",
+          "bytes": 17412,
+          "matches_record": true
+        },
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\build\\a1s_submission_v15\\run_20260919_202003\\data\\frozen_v12\\figure7_selected_profiles.csv",
+          "exists": true,
+          "expected_sha256": "a7e5b8c7dd8ab633b14fc532694b4c5892d50dcc6ce19b2cc69083eea8e294f6",
+          "sha256": "a7e5b8c7dd8ab633b14fc532694b4c5892d50dcc6ce19b2cc69083eea8e294f6",
+          "bytes": 448,
+          "matches_record": true
+        }
+      ],
+      "generators": [
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\build\\a1s_submission_v15\\run_20260919_202003\\sources\\profile_window_table_v15.py",
+          "exists": true,
+          "expected_sha256": "67e354c88ba79121ef381a4991d76bd4e0b4099c49fa781d047553cd2022dd96",
+          "sha256": "67e354c88ba79121ef381a4991d76bd4e0b4099c49fa781d047553cd2022dd96",
+          "bytes": 10506,
+          "matches_record": true
+        },
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\build\\output\\figure_revision_profiles.py",
+          "exists": true,
+          "expected_sha256": "604e2d9a0d03b870c61cad4e0ee538134d3a8512e125b6a1e37d891cf62c4788",
+          "sha256": "604e2d9a0d03b870c61cad4e0ee538134d3a8512e125b6a1e37d891cf62c4788",
+          "bytes": 5758,
+          "matches_record": true
+        }
+      ]
+    },
+    {
+      "item": "Figure 7",
+      "source_files": [
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65-A1S-restored\\build\\a1s_revision_additional_analysis\\run_20260912_restored\\E2\\low_day.npz",
+          "exists": true,
+          "expected_sha256": "329a67cb16386205e117f5d8f6c4c5c295af11034a1cac4c9a575cbeaacc9572",
+          "sha256": "329a67cb16386205e117f5d8f6c4c5c295af11034a1cac4c9a575cbeaacc9572",
+          "bytes": 21245174,
+          "matches_record": true
+        },
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65-A1S-restored\\build\\a1s_revision_additional_analysis\\run_20260912_restored\\E2\\middle_day.npz",
+          "exists": true,
+          "expected_sha256": "b4b411a8c9a0b64141ea061c0619ec5ff52f667b93eaabef2df4ac56d17e1512",
+          "sha256": "b4b411a8c9a0b64141ea061c0619ec5ff52f667b93eaabef2df4ac56d17e1512",
+          "bytes": 21270405,
+          "matches_record": true
+        },
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65-A1S-restored\\build\\a1s_revision_additional_analysis\\run_20260912_restored\\E2\\high_day.npz",
+          "exists": true,
+          "expected_sha256": "90e1c016315409cfe5932f06c3f068290254452a1198cd008d0b442aeec7fd17",
+          "sha256": "90e1c016315409cfe5932f06c3f068290254452a1198cd008d0b442aeec7fd17",
+          "bytes": 21290540,
+          "matches_record": true
+        },
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65-A1S-restored\\build\\a1s_revision_additional_analysis\\run_20260912_restored\\E2\\E2_queries.csv",
+          "exists": true,
+          "expected_sha256": "391aefa635468c8d4fb9e7d28484ab32993e8946e6126f7ba7bde5116d7ed473",
+          "sha256": "391aefa635468c8d4fb9e7d28484ab32993e8946e6126f7ba7bde5116d7ed473",
+          "bytes": 728,
+          "matches_record": true
+        }
+      ],
+      "generators": [
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\build\\a1s_submission_v13\\run_20260919_025039\\sources\\figure_remaining_v13.py",
+          "exists": true,
+          "expected_sha256": "3c6c2ed88802d7265818390967d1c0b97842a41d7777527ddebdac9a8b8d2a2c",
+          "sha256": "3c6c2ed88802d7265818390967d1c0b97842a41d7777527ddebdac9a8b8d2a2c",
+          "bytes": 6288,
+          "matches_record": true
+        }
+      ]
+    },
+    {
+      "item": "Figure S1",
+      "source_files": [
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\build\\a1s_submission_v15\\run_20260919_202003\\data\\peak_statistics\\ecdf_common_records.csv.gz",
+          "exists": true,
+          "expected_sha256": "2332087355a58abb598c042b97373af60c7b358613c297fd60c45087c3afb9d1",
+          "sha256": "2332087355a58abb598c042b97373af60c7b358613c297fd60c45087c3afb9d1",
+          "bytes": 6669946,
+          "matches_record": true
+        }
+      ],
+      "generators": [
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\build\\a1s_submission_v13\\run_20260919_025039\\sources\\figure_remaining_v13.py",
+          "exists": true,
+          "expected_sha256": "3c6c2ed88802d7265818390967d1c0b97842a41d7777527ddebdac9a8b8d2a2c",
+          "sha256": "3c6c2ed88802d7265818390967d1c0b97842a41d7777527ddebdac9a8b8d2a2c",
+          "bytes": 6288,
+          "matches_record": true
+        }
+      ]
+    },
+    {
+      "item": "Figure S2",
+      "source_files": [
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\isr_validation_outputs\\m2w-a1s-full30-analysis-isr\\isr_evaluation_cache.npz",
+          "exists": true,
+          "expected_sha256": "eeac0105bf41ced6f28ee2f3e5a7720eef60b658b777c9a0c6fbb64b3371f29d",
+          "sha256": "eeac0105bf41ced6f28ee2f3e5a7720eef60b658b777c9a0c6fbb64b3371f29d",
+          "bytes": 4005012,
+          "matches_record": true
+        },
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\isr_validation_outputs\\traditional-static-etkf-raw-iri-full30-isr\\isr_etkf_cache.npz",
+          "exists": true,
+          "expected_sha256": "88f48e986302270ca5ae19fa231b6a9dedf6ceb3544fc64e12be6e0acfc61147",
+          "sha256": "88f48e986302270ca5ae19fa231b6a9dedf6ceb3544fc64e12be6e0acfc61147",
+          "bytes": 7255580,
+          "matches_record": true
+        }
+      ],
+      "generators": [
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\build\\output\\v82_si_error_figures.py",
+          "exists": true,
+          "expected_sha256": "345e4f15bf4757102b586a9b08fee80a1e25473f0ba27ecb820db16d8bf79621",
+          "sha256": "345e4f15bf4757102b586a9b08fee80a1e25473f0ba27ecb820db16d8bf79621",
+          "bytes": 2509,
+          "matches_record": true
+        },
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\a1s_submission_v17\\run_20260920_012527_v17.2c\\sources\\a2_si.py",
+          "exists": true,
+          "expected_sha256": "097e49161c6e416731588d6ebc53d5a1f49d4fcc8f823cd6cebaf9b12b30b54c",
+          "sha256": "097e49161c6e416731588d6ebc53d5a1f49d4fcc8f823cd6cebaf9b12b30b54c",
+          "bytes": 18792,
+          "matches_record": true
+        }
+      ]
+    },
+    {
+      "item": "Figure S3",
+      "source_files": [
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\build\\a1s_submission_v15\\run_20260919_202003\\data\\frozen_v12\\figure8_arrays.npz",
+          "exists": true,
+          "expected_sha256": "61b280f190a00aeccc8b29b652d15f4cecf769d3b1e2cc7dc0f912e48587c7b8",
+          "sha256": "61b280f190a00aeccc8b29b652d15f4cecf769d3b1e2cc7dc0f912e48587c7b8",
+          "bytes": 1403618,
+          "matches_record": true
+        },
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\build\\a1s_submission_v9\\run_20260916_211340\\review_package\\data\\figures\\slice_arrays.npz",
+          "exists": true,
+          "expected_sha256": "af9b94fb90a23553ee22026b40fed93a42aec80789a712179e4b76488c952203",
+          "sha256": "af9b94fb90a23553ee22026b40fed93a42aec80789a712179e4b76488c952203",
+          "bytes": 1413525,
+          "matches_record": true
+        }
+      ],
+      "generators": [
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\build\\output\\figure_revision_maps.py",
+          "exists": true,
+          "expected_sha256": "6abe90bb7905d5676d72807c5be412115184c147746a1e1b9b2ed386d7daddde",
+          "sha256": "6abe90bb7905d5676d72807c5be412115184c147746a1e1b9b2ed386d7daddde",
+          "bytes": 6449,
+          "matches_record": true
+        }
+      ]
+    },
+    {
+      "item": "Figure S4",
+      "source_files": [
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65-A1S-restored\\build\\a1s_revision_additional_analysis\\run_20260912_restored\\E1_support_by_query.csv.gz",
+          "exists": true,
+          "expected_sha256": "61ca21e8e8046316c2fd196149f10391ceadaa3e9dbccc727621e2313ae8fd67",
+          "sha256": "61ca21e8e8046316c2fd196149f10391ceadaa3e9dbccc727621e2313ae8fd67",
+          "bytes": 5650440,
+          "matches_record": true
+        },
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65-A1S-restored\\build\\a1s_revision_additional_analysis\\run_20260912_restored\\E1_support_summary.csv",
+          "exists": true,
+          "expected_sha256": "9a8bea1571034dceaf8dc071f91e38de4988ea0823bf27ebdf6eb14d7fcc60c2",
+          "sha256": "9a8bea1571034dceaf8dc071f91e38de4988ea0823bf27ebdf6eb14d7fcc60c2",
+          "bytes": 5677,
+          "matches_record": true
+        }
+      ],
+      "generators": [
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65-A1S-restored\\build\\a1s_revision_additional_analysis\\run_20260912_restored\\support_diagnostic.py",
+          "exists": true,
+          "expected_sha256": "5a1eb5d49508707469b87ec3f90289b3311ffdc2178f6f1178e97d7bcb87f050",
+          "sha256": "5a1eb5d49508707469b87ec3f90289b3311ffdc2178f6f1178e97d7bcb87f050",
+          "bytes": 7242,
+          "matches_record": true
+        }
+      ]
+    },
+    {
+      "item": "Figure S5",
+      "source_files": [
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65-A1S-restored\\build\\a1s_revision_additional_analysis\\run_20260912_restored\\E2\\low_day.npz",
+          "exists": true,
+          "expected_sha256": "329a67cb16386205e117f5d8f6c4c5c295af11034a1cac4c9a575cbeaacc9572",
+          "sha256": "329a67cb16386205e117f5d8f6c4c5c295af11034a1cac4c9a575cbeaacc9572",
+          "bytes": 21245174,
+          "matches_record": true
+        },
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65-A1S-restored\\build\\a1s_revision_additional_analysis\\run_20260912_restored\\E2\\middle_day.npz",
+          "exists": true,
+          "expected_sha256": "b4b411a8c9a0b64141ea061c0619ec5ff52f667b93eaabef2df4ac56d17e1512",
+          "sha256": "b4b411a8c9a0b64141ea061c0619ec5ff52f667b93eaabef2df4ac56d17e1512",
+          "bytes": 21270405,
+          "matches_record": true
+        },
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65-A1S-restored\\build\\a1s_revision_additional_analysis\\run_20260912_restored\\E2\\high_day.npz",
+          "exists": true,
+          "expected_sha256": "90e1c016315409cfe5932f06c3f068290254452a1198cd008d0b442aeec7fd17",
+          "sha256": "90e1c016315409cfe5932f06c3f068290254452a1198cd008d0b442aeec7fd17",
+          "bytes": 21290540,
+          "matches_record": true
+        }
+      ],
+      "generators": [
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\tmp\\v7_s3_figures\\plot_figures.py",
+          "exists": true,
+          "expected_sha256": "572e89665800b89b90db848a7415590c87712043907b8cf263f1d131ed3e49e1",
+          "sha256": "572e89665800b89b90db848a7415590c87712043907b8cf263f1d131ed3e49e1",
+          "bytes": 8905,
+          "matches_record": true
+        },
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65-A1S-restored\\build\\a1s_supplement_v3\\run_20260913_011526\\P3_mechanism\\build_mechanism_figures.py",
+          "exists": true,
+          "expected_sha256": "b8473085c5deed7d67dc24e7027ccde47ffffe00f534fd26c35d13e7225b9708",
+          "sha256": "b8473085c5deed7d67dc24e7027ccde47ffffe00f534fd26c35d13e7225b9708",
+          "bytes": 37219,
+          "matches_record": true
+        }
+      ]
+    },
+    {
+      "item": "Figure S6",
+      "source_files": [
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65-A1S-restored\\build\\a1s_supplement_v4\\run_20260913_090939\\W3_mechanism\\conditional_three_query_120_500\\low_day.npz",
+          "exists": true,
+          "expected_sha256": "d47b8fe72ef2784d77312e05bfea9067d03c2a9f627b515ba548d39a2fecd578",
+          "sha256": "d47b8fe72ef2784d77312e05bfea9067d03c2a9f627b515ba548d39a2fecd578",
+          "bytes": 191935,
+          "matches_record": true
+        },
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65-A1S-restored\\build\\a1s_supplement_v4\\run_20260913_090939\\W3_mechanism\\conditional_three_query_120_500\\middle_day.npz",
+          "exists": true,
+          "expected_sha256": "0e650dbd1f80416178189405d9d9b5783f62af679c1a928f4bd1281567ad415f",
+          "sha256": "0e650dbd1f80416178189405d9d9b5783f62af679c1a928f4bd1281567ad415f",
+          "bytes": 189734,
+          "matches_record": true
+        },
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65-A1S-restored\\build\\a1s_supplement_v4\\run_20260913_090939\\W3_mechanism\\conditional_three_query_120_500\\high_day.npz",
+          "exists": true,
+          "expected_sha256": "b87f3813ad609db662a9518dfe8861e189cbb5dc75f99c56fa3db0a379c271df",
+          "sha256": "b87f3813ad609db662a9518dfe8861e189cbb5dc75f99c56fa3db0a379c271df",
+          "bytes": 183686,
+          "matches_record": true
+        }
+      ],
+      "generators": [
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\build\\output\\v82_si_profiles.py",
+          "exists": true,
+          "expected_sha256": "9f1545039966ec05c6db266702c9ea0ba4951ae7d5e395332e87b6e71201855b",
+          "sha256": "9f1545039966ec05c6db266702c9ea0ba4951ae7d5e395332e87b6e71201855b",
+          "bytes": 2427,
+          "matches_record": true
+        }
+      ]
+    },
+    {
+      "item": "Table 1",
+      "source_files": [
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\checkpoints_fsia\\run67-m2w-120-500-analysis-a1s-10epoch\\run_manifest.json",
+          "exists": true,
+          "expected_sha256": "3b134362fba37727a874d0dc7fb11d646910238cbf208ec40e7aefed6aaa44cf",
+          "sha256": "3b134362fba37727a874d0dc7fb11d646910238cbf208ec40e7aefed6aaa44cf",
+          "bytes": 33150,
+          "matches_record": true
+        },
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\checkpoints_fsia\\run67-m2w-120-500-analysis-a1s-10epoch\\r_calibration.json",
+          "exists": true,
+          "expected_sha256": "b54929575e725c349cef74b5d32135169b13cc6db04f0f473b880894d7bf925c",
+          "sha256": "b54929575e725c349cef74b5d32135169b13cc6db04f0f473b880894d7bf925c",
+          "bytes": 8097,
+          "matches_record": true
+        }
+      ],
+      "generators": []
+    },
+    {
+      "item": "Table 2",
+      "source_files": [
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\build\\a1s_submission_v9\\run_20260916_211340\\review_package\\data\\isr\\daytime_isr_metrics.csv",
+          "exists": true,
+          "expected_sha256": "a7146bd4e066b19fce8040c0ae36ad6c0bfc6d1537e818049168f7f28ab53135",
+          "sha256": "a7146bd4e066b19fce8040c0ae36ad6c0bfc6d1537e818049168f7f28ab53135",
+          "bytes": 9417,
+          "matches_record": true
+        }
+      ],
+      "generators": [
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\FNDA_A1S_V19_archive_review\\00_inventory\\verify_scientific.py",
+          "exists": true,
+          "expected_sha256": "1ef2ed39ed740c1284937974424547f9df3edd366e9c5fd52d91b9aaf2ed2f0a",
+          "sha256": "1ef2ed39ed740c1284937974424547f9df3edd366e9c5fd52d91b9aaf2ed2f0a",
+          "bytes": 7461,
+          "matches_record": true
+        }
+      ]
+    },
+    {
+      "item": "Table 3",
+      "source_files": [
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\build\\a1s_submission_v15\\run_20260919_202003\\data\\peak_statistics\\metrics.csv",
+          "exists": true,
+          "expected_sha256": "9bee8c9c314f81d7eb43d0a4b395269ff0a15de61f2f94e77b524ca76047c1aa",
+          "sha256": "9bee8c9c314f81d7eb43d0a4b395269ff0a15de61f2f94e77b524ca76047c1aa",
+          "bytes": 54412,
+          "matches_record": true
+        },
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\build\\a1s_submission_v15\\run_20260919_202003\\data\\peak_statistics\\coverage.csv",
+          "exists": true,
+          "expected_sha256": "f060b2e156ad79f409d0fbfbf14b2db9438f6fe68b153f1ff4507dba8714afc9",
+          "sha256": "f060b2e156ad79f409d0fbfbf14b2db9438f6fe68b153f1ff4507dba8714afc9",
+          "bytes": 15967,
+          "matches_record": true
+        }
+      ],
+      "generators": [
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\build\\a1s_submission_v15\\run_20260919_202003\\sources\\restratify_v15.py",
+          "exists": true,
+          "expected_sha256": "4184d181699782f114098f32d74be6e14477950864d4bb7d54198d7893b944de",
+          "sha256": "4184d181699782f114098f32d74be6e14477950864d4bb7d54198d7893b944de",
+          "bytes": 20188,
+          "matches_record": true
+        },
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\FNDA_A1S_V19_archive_review\\00_inventory\\verify_scientific.py",
+          "exists": true,
+          "expected_sha256": "1ef2ed39ed740c1284937974424547f9df3edd366e9c5fd52d91b9aaf2ed2f0a",
+          "sha256": "1ef2ed39ed740c1284937974424547f9df3edd366e9c5fd52d91b9aaf2ed2f0a",
+          "bytes": 7461,
+          "matches_record": true
+        }
+      ]
+    },
+    {
+      "item": "Table 4",
+      "source_files": [
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\build\\a1s_submission_v15\\run_20260919_202003\\data\\profile_window_metrics_v15.csv",
+          "exists": true,
+          "expected_sha256": "9eb5db7ac9019b6eb31a9ae636de9e4f1f8c2a0c391c782c1ea1d6b5b2d20b2a",
+          "sha256": "9eb5db7ac9019b6eb31a9ae636de9e4f1f8c2a0c391c782c1ea1d6b5b2d20b2a",
+          "bytes": 629,
+          "matches_record": true
+        }
+      ],
+      "generators": [
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\build\\a1s_submission_v15\\run_20260919_202003\\sources\\profile_window_table_v15.py",
+          "exists": true,
+          "expected_sha256": "67e354c88ba79121ef381a4991d76bd4e0b4099c49fa781d047553cd2022dd96",
+          "sha256": "67e354c88ba79121ef381a4991d76bd4e0b4099c49fa781d047553cd2022dd96",
+          "bytes": 10506,
+          "matches_record": true
+        }
+      ]
+    },
+    {
+      "item": "Table S1",
+      "source_files": [
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\checkpoints_fsia\\run67-m2w-120-500-analysis-a1s-10epoch\\run_manifest.json",
+          "exists": true,
+          "expected_sha256": "3b134362fba37727a874d0dc7fb11d646910238cbf208ec40e7aefed6aaa44cf",
+          "sha256": "3b134362fba37727a874d0dc7fb11d646910238cbf208ec40e7aefed6aaa44cf",
+          "bytes": 33150,
+          "matches_record": true
+        },
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\checkpoints_fsia\\run67-m2w-120-500-analysis-a1s-10epoch\\training_summary.json",
+          "exists": true,
+          "expected_sha256": "c493ec84470289e6470774685422547c8c9fb943f3711db0cd0caffa0b4162be",
+          "sha256": "c493ec84470289e6470774685422547c8c9fb943f3711db0cd0caffa0b4162be",
+          "bytes": 27410,
+          "matches_record": true
+        }
+      ],
+      "generators": []
+    },
+    {
+      "item": "Table S2",
+      "source_files": [
+        {
+          "path": "D:\\FYsatellite\\EDP_data\\fy_202409_qc_v2_report.json",
+          "exists": true,
+          "expected_sha256": "541caa02ec889c5a22e427666a0dac5427ed997a548dcab5d9221c84a1ce4b71",
+          "sha256": "541caa02ec889c5a22e427666a0dac5427ed997a548dcab5d9221c84a1ce4b71",
+          "bytes": 7508,
+          "matches_record": true
+        },
+        {
+          "path": "D:\\cosmic2\\cosmic245-274-September\\cosmic_september_2024_qc_report.json",
+          "exists": true,
+          "expected_sha256": "ea2b16b45805407fbf310d59b3820d7e999638cf7c71e2f9c0816e0bfe6b4e5e",
+          "sha256": "ea2b16b45805407fbf310d59b3820d7e999638cf7c71e2f9c0816e0bfe6b4e5e",
+          "bytes": 6090,
+          "matches_record": true
+        }
+      ],
+      "generators": [
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\qc_profile_data.py",
+          "exists": true,
+          "expected_sha256": "35b1c19d8dcd87f8f853f9bba0b0ceffd7c7efe1dcf31a6f8e35abf82a19e298",
+          "sha256": "35b1c19d8dcd87f8f853f9bba0b0ceffd7c7efe1dcf31a6f8e35abf82a19e298",
+          "bytes": 32081,
+          "matches_record": true
+        }
+      ]
+    },
+    {
+      "item": "Table S3",
+      "source_files": [
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65-A1S-restored\\build\\a1s_revision_additional_analysis\\run_20260912_restored\\E1_support_summary.csv",
+          "exists": true,
+          "expected_sha256": "9a8bea1571034dceaf8dc071f91e38de4988ea0823bf27ebdf6eb14d7fcc60c2",
+          "sha256": "9a8bea1571034dceaf8dc071f91e38de4988ea0823bf27ebdf6eb14d7fcc60c2",
+          "bytes": 5677,
+          "matches_record": true
+        },
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65-A1S-restored\\build\\a1s_revision_additional_analysis\\run_20260912_restored\\E1_support_by_query.csv.gz",
+          "exists": true,
+          "expected_sha256": "61ca21e8e8046316c2fd196149f10391ceadaa3e9dbccc727621e2313ae8fd67",
+          "sha256": "61ca21e8e8046316c2fd196149f10391ceadaa3e9dbccc727621e2313ae8fd67",
+          "bytes": 5650440,
+          "matches_record": true
+        }
+      ],
+      "generators": [
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65-A1S-restored\\build\\a1s_revision_additional_analysis\\run_20260912_restored\\support_diagnostic.py",
+          "exists": true,
+          "expected_sha256": "5a1eb5d49508707469b87ec3f90289b3311ffdc2178f6f1178e97d7bcb87f050",
+          "sha256": "5a1eb5d49508707469b87ec3f90289b3311ffdc2178f6f1178e97d7bcb87f050",
+          "bytes": 7242,
+          "matches_record": true
+        }
+      ]
+    },
+    {
+      "item": "Table S4",
+      "source_files": [
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\build\\a1s_submission_v15\\run_20260919_202003\\data\\support_strata_v14\\support_group_counts.csv",
+          "exists": true,
+          "expected_sha256": "2f8e6fead728908e9c9fb96155ea9f0d6bc841585580e63238099d92a15d8f71",
+          "sha256": "2f8e6fead728908e9c9fb96155ea9f0d6bc841585580e63238099d92a15d8f71",
+          "bytes": 738,
+          "matches_record": true
+        },
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\build\\a1s_submission_v15\\run_20260919_202003\\data\\support_strata_v14\\stratified_metrics.csv",
+          "exists": true,
+          "expected_sha256": "88a89da683392c475d9be64882c84f99129933ca1c69c7bd1e5410e0cbf28334",
+          "sha256": "88a89da683392c475d9be64882c84f99129933ca1c69c7bd1e5410e0cbf28334",
+          "bytes": 6472,
+          "matches_record": true
+        },
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\build\\a1s_submission_v15\\run_20260919_202003\\data\\support_strata_v14\\paired_contrasts.csv",
+          "exists": true,
+          "expected_sha256": "af79493f7ac6507e6019fde6dbd9db80582ff9c6cb496ae78aee1dfe0c4c25be",
+          "sha256": "af79493f7ac6507e6019fde6dbd9db80582ff9c6cb496ae78aee1dfe0c4c25be",
+          "bytes": 4543,
+          "matches_record": true
+        }
+      ],
+      "generators": []
+    },
+    {
+      "item": "Table S5",
+      "source_files": [
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\build\\a1s_submission_v9\\run_20260916_211340\\review_package\\data\\experiments\\ro_toggle\\statistics\\paired_metrics.csv",
+          "exists": true,
+          "expected_sha256": "f8c3a2c8334deddfcd5c21ca8af6af8b9f77c514130a8405009f9f582636a2c3",
+          "sha256": "f8c3a2c8334deddfcd5c21ca8af6af8b9f77c514130a8405009f9f582636a2c3",
+          "bytes": 8653,
+          "matches_record": true
+        }
+      ],
+      "generators": [
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\build\\output\\fnda_v82_physical_tables.py",
+          "exists": true,
+          "expected_sha256": "ae7110ad84e5b6cdeeaa223d03c201fa307edb8071986080c034285e85dfdb83",
+          "sha256": "ae7110ad84e5b6cdeeaa223d03c201fa307edb8071986080c034285e85dfdb83",
+          "bytes": 4049,
+          "matches_record": true
+        }
+      ]
+    },
+    {
+      "item": "Table S6",
+      "source_files": [
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\build\\a1s_submission_v9\\run_20260916_211340\\review_package\\data\\experiments\\sensitivity\\metrics.csv",
+          "exists": true,
+          "expected_sha256": "965f8d714fabb6233f261ea7cd3e5dc35e33df4718473e56ceb571f7887571cf",
+          "sha256": "965f8d714fabb6233f261ea7cd3e5dc35e33df4718473e56ceb571f7887571cf",
+          "bytes": 5560,
+          "matches_record": true
+        },
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\build\\a1s_submission_v9\\run_20260916_211340\\review_package\\data\\experiments\\sensitivity\\paired_bootstrap.csv",
+          "exists": true,
+          "expected_sha256": "e47fcca485ccda6da37c5e83aa687d4a47d7bfe9eeeaafb65cee274acfe89106",
+          "sha256": "e47fcca485ccda6da37c5e83aa687d4a47d7bfe9eeeaafb65cee274acfe89106",
+          "bytes": 16761,
+          "matches_record": true
+        },
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65-A1S-restored\\build\\a1s_submission_v8\\run_20260914_021617\\experiments\\sensitivity\\evaluation_population.npz",
+          "exists": true,
+          "expected_sha256": "ee781f3775c56d75c700668b6a1b0c4bbd63ef89f759fec7959cad32f705dd01",
+          "sha256": "ee781f3775c56d75c700668b6a1b0c4bbd63ef89f759fec7959cad32f705dd01",
+          "bytes": 1062192,
+          "matches_record": true
+        },
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65-A1S-restored\\build\\a1s_submission_v8\\run_20260914_021617\\experiments\\sensitivity\\inputs\\raw_isr_targets.npz",
+          "exists": true,
+          "expected_sha256": "134d992c2679c183d6f788a2061a4761eccdba34e9d9f47353a245034f99994e",
+          "sha256": "134d992c2679c183d6f788a2061a4761eccdba34e9d9f47353a245034f99994e",
+          "bytes": 4581521,
+          "matches_record": true
+        },
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65-A1S-restored\\build\\a1s_submission_v8\\run_20260914_021617\\experiments\\sensitivity\\evaluation\\N4D64\\prediction.npy",
+          "exists": true,
+          "expected_sha256": "0b20ec93046d01f2517f04d0b84f774875f4564bb83851afbc90ac6e32ef8bb9",
+          "sha256": "0b20ec93046d01f2517f04d0b84f774875f4564bb83851afbc90ac6e32ef8bb9",
+          "bytes": 825048,
+          "matches_record": true
+        },
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65-A1S-restored\\build\\a1s_submission_v8\\run_20260914_021617\\experiments\\sensitivity\\evaluation\\N8D32\\prediction.npy",
+          "exists": true,
+          "expected_sha256": "05687ade297569f78fe92527738d76483003db36e43722b39a26cc8da6196ff6",
+          "sha256": "05687ade297569f78fe92527738d76483003db36e43722b39a26cc8da6196ff6",
+          "bytes": 825048,
+          "matches_record": true
+        },
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65-A1S-restored\\build\\a1s_submission_v8\\run_20260914_021617\\experiments\\sensitivity\\evaluation\\N8D64_reproduction\\prediction.npy",
+          "exists": true,
+          "expected_sha256": "7c42fe49cca78edb85a897bf19ff2d90e1b85cf8d67c407fd52b977616926471",
+          "sha256": "7c42fe49cca78edb85a897bf19ff2d90e1b85cf8d67c407fd52b977616926471",
+          "bytes": 825048,
+          "matches_record": true
+        }
+      ],
+      "generators": [
+        {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\build\\output\\fnda_v8_s5_tables.py",
+          "exists": true,
+          "expected_sha256": "8c05b0a4abbb3d3c625e55cfaf06d370a8075dc9f0f3e3dcff6fbfea3b74bcdc",
+          "sha256": "8c05b0a4abbb3d3c625e55cfaf06d370a8075dc9f0f3e3dcff6fbfea3b74bcdc",
+          "bytes": 30089,
+          "matches_record": true
+        }
+      ]
+    }
+  ],
+  "contracts": {
+    "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\isr_validation_outputs\\m2w-a1s-full30-analysis-isr\\isr_evaluation_contract.json": {
+      "identity": {
+        "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\isr_validation_outputs\\m2w-a1s-full30-analysis-isr\\isr_evaluation_contract.json",
+        "exists": true,
+        "expected_sha256": null,
+        "sha256": "21d08bff130ae3cdf2a704afd16517045321ec10f070c04de862ee3eaffbdfb5",
+        "bytes": 61980,
+        "matches_record": null
+      },
+      "candidate_checkpoint": {
+        "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\checkpoints_fsia\\run67-m2w-120-500-analysis-a1s-10epoch\\best_fsia_model.pth",
+        "sha256": null,
+        "checkpoint_format_version": 14,
+        "model_domain_semantics": "hybrid_120_500_model_200_500_observation_v1",
+        "model_alt_range_km": [
+          120.0,
+          500.0
+        ],
+        "observation_alt_range_km": [
+          200.0,
+          500.0
+        ],
+        "peak_search_alt_range_km": [
+          200.0,
+          500.0
+        ],
+        "date_split": {
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\isr_validation_outputs\\run66-modelonly-m0\\date_split_manifest.json",
+          "sha256": "0576d83c72cbcfd5994e3afcb192429f965bf423a937f88a1db26eb09e21dbab",
+          "partitions": {
+            "development": [
+              3,
+              8,
+              17,
+              22,
+              29
+            ],
+            "locked_test": [
+              2,
+              10,
+              16,
+              18,
+              24
+            ],
+            "train": [
+              0,
+              1,
+              4,
+              5,
+              6,
+              7,
+              9,
+              11,
+              12,
+              13,
+              14,
+              15,
+              19,
+              20,
+              21,
+              23,
+              25,
+              26,
+              27,
+              28
+            ]
+          }
+        },
+        "input_data_identity": null
+      },
+      "baseline_checkpoint": null,
+      "hash_verification": null,
+      "evaluation_code_sha256": "c8e25b6bc20f17d21147fbcfd2581d37cffdfa63b9ff87ab746635bc9771feb6"
+    },
+    "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\isr_validation_outputs\\m2w-a1s2-vs-a1s-giro-full30\\giro_peak_contract.json": {
+      "identity": {
+        "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\isr_validation_outputs\\m2w-a1s2-vs-a1s-giro-full30\\giro_peak_contract.json",
+        "exists": true,
+        "expected_sha256": null,
+        "sha256": "8e49e0975b32d6f646a91b5e2c2c81bb0e3f5e56d4f3f2d0f23ad39854e1f3c4",
+        "bytes": 3984,
+        "matches_record": null
+      },
+      "candidate_checkpoint": {
+        "checkpoint_format_version": 14,
+        "date_split": null,
+        "input_data_identity": null,
+        "model_alt_range_km": [
+          120.0,
+          500.0
+        ],
+        "model_domain_semantics": "hybrid_120_500_model_200_500_observation_v1",
+        "observation_alt_range_km": [
+          200.0,
+          500.0
+        ],
+        "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\checkpoints_fsia\\run67-m2w-120-500-background-a1s2\\best_fsia_model.pth",
+        "peak_search_alt_range_km": [
+          200.0,
+          500.0
+        ],
+        "sha256": null
+      },
+      "baseline_checkpoint": {
+        "checkpoint_format_version": 14,
+        "date_split": {
+          "partitions": {
+            "development": [
+              3,
+              8,
+              17,
+              22,
+              29
+            ],
+            "locked_test": [
+              2,
+              10,
+              16,
+              18,
+              24
+            ],
+            "train": [
+              0,
+              1,
+              4,
+              5,
+              6,
+              7,
+              9,
+              11,
+              12,
+              13,
+              14,
+              15,
+              19,
+              20,
+              21,
+              23,
+              25,
+              26,
+              27,
+              28
+            ]
+          },
+          "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\isr_validation_outputs\\run66-modelonly-m0\\date_split_manifest.json",
+          "sha256": "0576d83c72cbcfd5994e3afcb192429f965bf423a937f88a1db26eb09e21dbab"
+        },
+        "input_data_identity": null,
+        "model_alt_range_km": [
+          120.0,
+          500.0
+        ],
+        "model_domain_semantics": "hybrid_120_500_model_200_500_observation_v1",
+        "observation_alt_range_km": [
+          200.0,
+          500.0
+        ],
+        "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\checkpoints_fsia\\run67-m2w-120-500-analysis-a1s-10epoch\\best_fsia_model.pth",
+        "peak_search_alt_range_km": [
+          200.0,
+          500.0
+        ],
+        "sha256": null
+      },
+      "hash_verification": false,
+      "evaluation_code_sha256": null
+    }
+  },
+  "sensitivity_runs": {
+    "FNDA_V8_N4D64": {
+      "run": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65-A1S-restored\\build\\a1s_submission_v8\\run_20260914_021617\\experiments\\sensitivity\\runs\\fnda-v8-n4d64",
+      "summary": {
+        "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65-A1S-restored\\build\\a1s_submission_v8\\run_20260914_021617\\experiments\\sensitivity\\runs\\fnda-v8-n4d64\\training_summary.json",
+        "exists": true,
+        "expected_sha256": null,
+        "sha256": "a3a064759f878ce7f2f44c1e78e2a34b6623c81bdd506199545a8deaf5ec856a",
+        "bytes": 31080,
+        "matches_record": null
+      },
+      "manifest": {
+        "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65-A1S-restored\\build\\a1s_submission_v8\\run_20260914_021617\\experiments\\sensitivity\\runs\\fnda-v8-n4d64\\run_manifest.json",
+        "exists": true,
+        "expected_sha256": null,
+        "sha256": "93fbf3318580249fc7fe723ce96ff9b8a3bd1f904ec809bcf456ae5c69a07d7e",
+        "bytes": 36509,
+        "matches_record": null
+      },
+      "weight": {
+        "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65-A1S-restored\\build\\a1s_submission_v8\\run_20260914_021617\\experiments\\sensitivity\\runs\\fnda-v8-n4d64\\best_fsia_model.pth",
+        "exists": true,
+        "expected_sha256": "ebf8bfef5fd920c1912ea72585298954316efed6c24bfbe91a24827ed68db0b8",
+        "sha256": "ebf8bfef5fd920c1912ea72585298954316efed6c24bfbe91a24827ed68db0b8",
+        "bytes": 575859,
+        "matches_record": true
+      },
+      "architecture": {
+        "checkpoint_format_version": 14,
+        "alt_range": [
+          120.0,
+          500.0
+        ],
+        "observation_alt_range": [
+          200.0,
+          500.0
+        ],
+        "peak_search_alt_range": [
+          200.0,
+          500.0
+        ],
+        "model_domain_semantics": "hybrid_120_500_model_200_500_observation_v1",
+        "basis_dim": 64,
+        "enkf_n_members": 4,
+        "enkf_pert_hidden": 64,
+        "enkf_anomaly_parameterization": "orthogonal_factor",
+        "enkf_scale_init": 1.1,
+        "enkf_scale_condition_max": 3.0,
+        "density_basis_semantics": "endpoint_context_symmetric",
+        "analysis_state_semantics": "legacy_feature_increment",
+        "context_semantics": "query_conditioning",
+        "mode_basis_semantics": "learned_density_basis",
+        "background_trust_gate_enabled": false,
+        "background_trust_gate_semantics": "disabled",
+        "background_trust_gate_altitude_core_km": 200.0,
+        "background_trust_gate_altitude_transition_km": 100.0,
+        "background_trust_gate_night_cosine_offset": 0.2,
+        "background_trust_gate_night_cosine_scale": 0.2,
+        "background_trust_gate_dip_core": 0.25,
+        "background_trust_gate_dip_transition": 0.25,
+        "assimilation_semantics": "continuous_physical_local_letkf",
+        "neighbor_directory_semantics": "token_exact_positive_support_v1",
+        "physical_localization_space_km": 1800.0,
+        "physical_localization_time_hours": 1.5,
+        "observation_chunk_size": 4096
+      },
+      "best_epochs": {
+        "background": 3,
+        "analysis": 15
+      },
+      "training_protocol": {
+        "training_protocol_revision": "v14_hybrid_gram_calibration_v2",
+        "seed": 42,
+        "smoke_run": false,
+        "background_epochs": 5,
+        "analysis_epochs": 10,
+        "background_trust_gate_enabled": false,
+        "use_observation_gram_loss": true,
+        "analysis_exact_mode_loss": true,
+        "gram_gradient_target": 0.02,
+        "gram_calibration_batches": 20,
+        "gram_weight_resolution_semantics": "target_over_median_no_lower_clip_reject_gt_one_v1",
+        "gradient_parameter_scope": "all_current_stage_trainable_parameters_v1",
+        "calibration_precision": "match_analysis_autocast_v1",
+        "gram_require_all_batches_finite_positive": true,
+        "gram_preflight_ratio_bounds": [
+          0.016,
+          0.024
+        ],
+        "gram_coverage_policy": "diagnostic_only_v1",
+        "smoke_auxiliary_gradient_ratio_max": 0.25,
+        "low_altitude_anchor_selection": "first_16_unique_profiles_per_source_per_batch_first_record_v1",
+        "low_altitude_anchor_grouping": "source_profile_id_profile_balanced_v1",
+        "low_altitude_neighbor_profile_semantics": "synthetic_query_no_target_profile_exclusion_v1",
+        "low_altitude_prior_protocol": {
+          "range_km": [
+            120.0,
+            200.0
+          ],
+          "semantics": "soft_iri_background_zero_analysis_increment_v1",
+          "anchor_levels_km": [
+            120.0,
+            130.0,
+            140.0,
+            150.0,
+            160.0,
+            170.0,
+            180.0,
+            190.0
+          ],
+          "profiles_per_source": 16,
+          "background_weight": 0.02,
+          "analysis_weight": 0.01,
+          "low_altitude_gradient_ratio_max": 0.25
+        }
+      }
+    },
+    "FNDA_V8_N8D32": {
+      "run": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65-A1S-restored\\build\\a1s_submission_v8\\run_20260914_021617\\experiments\\sensitivity\\runs\\fnda-v8-n8d32",
+      "summary": {
+        "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65-A1S-restored\\build\\a1s_submission_v8\\run_20260914_021617\\experiments\\sensitivity\\runs\\fnda-v8-n8d32\\training_summary.json",
+        "exists": true,
+        "expected_sha256": null,
+        "sha256": "4b838d168473fe10fd9a7d7751e95f194dd67d3fb5dd01cb2789743c0c905210",
+        "bytes": 31062,
+        "matches_record": null
+      },
+      "manifest": {
+        "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65-A1S-restored\\build\\a1s_submission_v8\\run_20260914_021617\\experiments\\sensitivity\\runs\\fnda-v8-n8d32\\run_manifest.json",
+        "exists": true,
+        "expected_sha256": null,
+        "sha256": "219cebef97d34805c93bcea48b27a8efb470647b6657326a687c112c0d89ec23",
+        "bytes": 36576,
+        "matches_record": null
+      },
+      "weight": {
+        "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65-A1S-restored\\build\\a1s_submission_v8\\run_20260914_021617\\experiments\\sensitivity\\runs\\fnda-v8-n8d32\\best_fsia_model.pth",
+        "exists": true,
+        "expected_sha256": "40d96fe4076f51bc53efd1512bc6fe2366b06f99e5536a776a823e584f7019c6",
+        "sha256": "40d96fe4076f51bc53efd1512bc6fe2366b06f99e5536a776a823e584f7019c6",
+        "bytes": 536307,
+        "matches_record": true
+      },
+      "architecture": {
+        "checkpoint_format_version": 14,
+        "alt_range": [
+          120.0,
+          500.0
+        ],
+        "observation_alt_range": [
+          200.0,
+          500.0
+        ],
+        "peak_search_alt_range": [
+          200.0,
+          500.0
+        ],
+        "model_domain_semantics": "hybrid_120_500_model_200_500_observation_v1",
+        "basis_dim": 32,
+        "enkf_n_members": 8,
+        "enkf_pert_hidden": 64,
+        "enkf_anomaly_parameterization": "orthogonal_factor",
+        "enkf_scale_init": 1.1,
+        "enkf_scale_condition_max": 3.0,
+        "density_basis_semantics": "endpoint_context_symmetric",
+        "analysis_state_semantics": "legacy_feature_increment",
+        "context_semantics": "query_conditioning",
+        "mode_basis_semantics": "learned_density_basis",
+        "background_trust_gate_enabled": false,
+        "background_trust_gate_semantics": "disabled",
+        "background_trust_gate_altitude_core_km": 200.0,
+        "background_trust_gate_altitude_transition_km": 100.0,
+        "background_trust_gate_night_cosine_offset": 0.2,
+        "background_trust_gate_night_cosine_scale": 0.2,
+        "background_trust_gate_dip_core": 0.25,
+        "background_trust_gate_dip_transition": 0.25,
+        "assimilation_semantics": "continuous_physical_local_letkf",
+        "neighbor_directory_semantics": "token_exact_positive_support_v1",
+        "physical_localization_space_km": 1800.0,
+        "physical_localization_time_hours": 1.5,
+        "observation_chunk_size": 4096
+      },
+      "best_epochs": {
+        "background": 3,
+        "analysis": 8
+      },
+      "training_protocol": {
+        "training_protocol_revision": "v14_hybrid_gram_calibration_v2",
+        "seed": 42,
+        "smoke_run": false,
+        "background_epochs": 5,
+        "analysis_epochs": 10,
+        "background_trust_gate_enabled": false,
+        "use_observation_gram_loss": true,
+        "analysis_exact_mode_loss": true,
+        "gram_gradient_target": 0.02,
+        "gram_calibration_batches": 20,
+        "gram_weight_resolution_semantics": "target_over_median_no_lower_clip_reject_gt_one_v1",
+        "gradient_parameter_scope": "all_current_stage_trainable_parameters_v1",
+        "calibration_precision": "match_analysis_autocast_v1",
+        "gram_require_all_batches_finite_positive": true,
+        "gram_preflight_ratio_bounds": [
+          0.016,
+          0.024
+        ],
+        "gram_coverage_policy": "diagnostic_only_v1",
+        "smoke_auxiliary_gradient_ratio_max": 0.25,
+        "low_altitude_anchor_selection": "first_16_unique_profiles_per_source_per_batch_first_record_v1",
+        "low_altitude_anchor_grouping": "source_profile_id_profile_balanced_v1",
+        "low_altitude_neighbor_profile_semantics": "synthetic_query_no_target_profile_exclusion_v1",
+        "low_altitude_prior_protocol": {
+          "range_km": [
+            120.0,
+            200.0
+          ],
+          "semantics": "soft_iri_background_zero_analysis_increment_v1",
+          "anchor_levels_km": [
+            120.0,
+            130.0,
+            140.0,
+            150.0,
+            160.0,
+            170.0,
+            180.0,
+            190.0
+          ],
+          "profiles_per_source": 16,
+          "background_weight": 0.02,
+          "analysis_weight": 0.01,
+          "low_altitude_gradient_ratio_max": 0.25
+        }
+      }
+    },
+    "FNDA_V8_N8D64_REPRODUCTION": {
+      "run": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65-A1S-restored\\build\\a1s_submission_v8\\run_20260914_021617\\experiments\\sensitivity\\runs\\fnda-v8-n8d64-reproduction",
+      "summary": {
+        "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65-A1S-restored\\build\\a1s_submission_v8\\run_20260914_021617\\experiments\\sensitivity\\runs\\fnda-v8-n8d64-reproduction\\training_summary.json",
+        "exists": true,
+        "expected_sha256": null,
+        "sha256": "01f75e0d395ea0179181b74073582590f051f134bef33036436af4df605936bd",
+        "bytes": 21360,
+        "matches_record": null
+      },
+      "manifest": {
+        "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65-A1S-restored\\build\\a1s_submission_v8\\run_20260914_021617\\experiments\\sensitivity\\runs\\fnda-v8-n8d64-reproduction\\run_manifest.json",
+        "exists": true,
+        "expected_sha256": null,
+        "sha256": "6801f3d9d994c8f62a5d41d5a9be9ff39c516f5424e3ce391c66ac3853d329fe",
+        "bytes": 28370,
+        "matches_record": null
+      },
+      "weight": {
+        "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65-A1S-restored\\build\\a1s_submission_v8\\run_20260914_021617\\experiments\\sensitivity\\runs\\fnda-v8-n8d64-reproduction\\best_fsia_model.pth",
+        "exists": true,
+        "expected_sha256": "94f4da0b265c313a812159560db25c5ae5394b29603d75f47b18d5f6d9bb6dc1",
+        "sha256": "94f4da0b265c313a812159560db25c5ae5394b29603d75f47b18d5f6d9bb6dc1",
+        "bytes": 579315,
+        "matches_record": true
+      },
+      "architecture": {
+        "checkpoint_format_version": 14,
+        "alt_range": [
+          120.0,
+          500.0
+        ],
+        "observation_alt_range": [
+          200.0,
+          500.0
+        ],
+        "peak_search_alt_range": [
+          200.0,
+          500.0
+        ],
+        "model_domain_semantics": "hybrid_120_500_model_200_500_observation_v1",
+        "basis_dim": 64,
+        "enkf_n_members": 8,
+        "enkf_pert_hidden": 64,
+        "enkf_anomaly_parameterization": "orthogonal_factor",
+        "enkf_scale_init": 1.1,
+        "enkf_scale_condition_max": 3.0,
+        "density_basis_semantics": "endpoint_context_symmetric",
+        "analysis_state_semantics": "legacy_feature_increment",
+        "context_semantics": "query_conditioning",
+        "mode_basis_semantics": "learned_density_basis",
+        "background_trust_gate_enabled": false,
+        "background_trust_gate_semantics": "disabled",
+        "background_trust_gate_altitude_core_km": 200.0,
+        "background_trust_gate_altitude_transition_km": 100.0,
+        "background_trust_gate_night_cosine_offset": 0.2,
+        "background_trust_gate_night_cosine_scale": 0.2,
+        "background_trust_gate_dip_core": 0.25,
+        "background_trust_gate_dip_transition": 0.25,
+        "assimilation_semantics": "continuous_physical_local_letkf",
+        "neighbor_directory_semantics": "token_exact_positive_support_v1",
+        "physical_localization_space_km": 1800.0,
+        "physical_localization_time_hours": 1.5,
+        "observation_chunk_size": 4096
+      },
+      "best_epochs": {
+        "background": 3,
+        "analysis": 15
+      },
+      "training_protocol": {
+        "training_protocol_revision": "v14_hybrid_gram_calibration_v2",
+        "seed": 42,
+        "smoke_run": false,
+        "background_epochs": 5,
+        "analysis_epochs": 10,
+        "background_trust_gate_enabled": false,
+        "use_observation_gram_loss": true,
+        "analysis_exact_mode_loss": true,
+        "gram_gradient_target": 0.02,
+        "gram_calibration_batches": 20,
+        "gram_weight_resolution_semantics": "target_over_median_no_lower_clip_reject_gt_one_v1",
+        "gradient_parameter_scope": "all_current_stage_trainable_parameters_v1",
+        "calibration_precision": "match_analysis_autocast_v1",
+        "gram_require_all_batches_finite_positive": true,
+        "gram_preflight_ratio_bounds": [
+          0.016,
+          0.024
+        ],
+        "gram_coverage_policy": "diagnostic_only_v1",
+        "smoke_auxiliary_gradient_ratio_max": 0.25,
+        "low_altitude_anchor_selection": "first_16_unique_profiles_per_source_per_batch_first_record_v1",
+        "low_altitude_anchor_grouping": "source_profile_id_profile_balanced_v1",
+        "low_altitude_neighbor_profile_semantics": "synthetic_query_no_target_profile_exclusion_v1",
+        "low_altitude_prior_protocol": {
+          "range_km": [
+            120.0,
+            200.0
+          ],
+          "semantics": "soft_iri_background_zero_analysis_increment_v1",
+          "anchor_levels_km": [
+            120.0,
+            130.0,
+            140.0,
+            150.0,
+            160.0,
+            170.0,
+            180.0,
+            190.0
+          ],
+          "profiles_per_source": 16,
+          "background_weight": 0.02,
+          "analysis_weight": 0.01,
+          "low_altitude_gradient_ratio_max": 0.25
+        }
+      }
+    }
+  },
+  "figure2_layout_exception": {
+    "v192": {
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\a1s_submission_v17\\run_20260920_v19\\submission_v19.2\\upload_flat\\Figure2_RO_coverage.pdf",
+      "exists": true,
+      "expected_sha256": null,
+      "sha256": "e5c8e728dabdd34c0e166703e11bb82f09098bf839ba568bf676a2025cd25a68",
+      "bytes": 342337,
+      "matches_record": null
+    },
+    "v193": {
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\a1s_submission_v17\\run_20260920_v19\\submission_v19.3\\upload_flat\\Figure2_RO_coverage.pdf",
+      "exists": true,
+      "expected_sha256": null,
+      "sha256": "e5c8e728dabdd34c0e166703e11bb82f09098bf839ba568bf676a2025cd25a68",
+      "bytes": 342337,
+      "matches_record": null
+    },
+    "record": {
+      "Figure2": "Removed only external title text; preserved media box, plot geometry and other extracted text",
+      "SI": "Added allowbreak positions in inline Phi_q expression; mathematical tokens unchanged",
+      "source_science_change": false
+    },
+    "verification_scope": "Current bytes equal V19.2; title-only explanation from historical layout record, not new visual review"
+  },
+  "evidence_ledgers": [
+    {
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\FNDA_V19_slim_work\\code_build_ledger.json",
+      "exists": true,
+      "expected_sha256": null,
+      "sha256": "75edb6092a12d80c61d3e725a37306ac1ebd3076c666409a3c0c222486e6e8dd",
+      "bytes": 35588,
+      "matches_record": null
+    },
+    {
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\FNDA_V19_slim_work\\v19_lineage.json",
+      "exists": true,
+      "expected_sha256": null,
+      "sha256": "8b0488316700bbb2e2239052858cc0c28d4f7a9371584f321c24c065540baab5",
+      "bytes": 66316,
+      "matches_record": null
+    },
+    {
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\FNDA_V19_slim_work\\source_ledger.json",
+      "exists": true,
+      "expected_sha256": null,
+      "sha256": "1c91e51b637d64677584b078136a941ad44ee5e070433e153c7fb93f745b7f6d",
+      "bytes": 104204,
+      "matches_record": null
+    },
+    {
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\FNDA_V19_slim_work\\author_decisions_20260922.json",
+      "exists": true,
+      "expected_sha256": null,
+      "sha256": "c822b13bc9db7b5b1205fe2117658e7b773f422d9b863b8a633278198c2d49e9",
+      "bytes": 1968,
+      "matches_record": null
+    },
+    {
+      "path": "D:\\code11\\IRI01\\IRI03\\INR1-1-run65\\FNDA_V19_slim_work\\A1S_weight_resolution_20260922.json",
+      "exists": true,
+      "expected_sha256": null,
+      "sha256": "e03b2967e52c64213980a723902c6112a0cb82785d93e967390e001f41a3426f",
+      "bytes": 2069,
+      "matches_record": null
+    }
+  ],
+  "limitations": [
+    "Historical cache-to-checkpoint byte binding not established",
+    "Historical single frozen snapshot not established; current training source confirmed by user N8D64 rerun",
+    "Current defaults and inherited initial manifest config are not an executable final analysis recipe",
+    "Source lineage hashing is not inference or scientific reproduction",
+    "No complete untracked-file inventory; S2/S3 must establish full maintenance scope"
+  ],
+  "training_source_confirmation": {
+    "date": "2026-10-09",
+    "source": "direct user statement at S2 authorization",
+    "statement": "Current workspace reran N8D64 sensitivity experiment; all parameters and results identical; confirmed training source",
+    "rerun_executed_by_this_audit": false
+  }
+}

@@ -39,6 +39,7 @@ CANONICAL_DEFAULT = (
     "run67-p0a-v14-epoch15-vs-v13-epoch12-isr-qav2-r4-all-alt")
 OUTPUT_DEFAULT = "isr_validation_outputs/traditional-static-etkf-raw-iri-full-isr"
 DAY_SECONDS = 86400.0
+_FULL30_PROFILE_COUNTS = {"FY": 66612, "COSMIC": 84364}
 
 
 def _station_label(value: str) -> str:
@@ -72,9 +73,43 @@ def _profile_ids(config: Mapping, source: str, days: Iterable[int]) -> np.ndarra
         passed & finite & np.isin(date_code, days)]))
 
 
-def _load_online_indices(config: Mapping, days: Mapping[str, Sequence[int]]):
-    """Load strict train+development token indexes and audit the split."""
+def _load_online_indices(config: Mapping, days: Mapping[str, Sequence[int]],
+                         shared_full30_profile_split=None):
+    """Load the legacy online pool or an explicit shared A1-S2 full30 pool."""
     indexes, allowed, audit = {}, {}, {}
+    if shared_full30_profile_split:
+        from inr_modules.data_managers.profile_split import load_profile_split
+
+        split_path = Path(shared_full30_profile_split).resolve()
+        split = load_profile_split(split_path, expected_seed=42)
+        expected_counts = _FULL30_PROFILE_COUNTS
+        missing = {"FY", "COSMIC"}.difference(split["sources"])
+        if missing:
+            raise ValueError(f"shared full30 split lacks sources: {sorted(missing)}")
+        for source in ("FY", "COSMIC"):
+            source_split = split["sources"][source]
+            ids = np.unique(np.concatenate((
+                source_split["train"], source_split["development"]))).astype(
+                    np.int64, copy=False)
+            if len(ids) != expected_counts[source]:
+                raise ValueError(
+                    f"shared full30 {source} count {len(ids)} != "
+                    f"{expected_counts[source]}")
+            allowed[source] = ids
+            indexes[source] = _load_source_index(source, config, ids)
+            audit[source] = {
+                "shared_train_profiles": int(len(source_split["train"])),
+                "shared_development_profiles": int(
+                    len(source_split["development"])),
+                "online_profiles": int(len(ids)),
+            }
+        audit.update({
+            "observation_pool_semantics": "shared_full30_a1s2_profile_split_v1",
+            "profile_split_path": str(split_path),
+            "profile_split_seed": int(split["seed"]),
+        })
+        return indexes, allowed, audit
+
     online_days = list(days.get("train", ())) + list(days.get("development", ()))
     locked_days = days.get("locked_test", ())
     for source in ("FY", "COSMIC"):
@@ -647,9 +682,15 @@ def run_isr(args):
     output_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = Path(args.manifest).resolve()
     config = load_manifest(manifest_path)
-    split_path = _split_path(config, manifest_path)
-    split_days = _date_days(split_path)
-    indexes, allowed, split_audit = _load_online_indices(config, split_days)
+    if args.shared_full30_profile_split:
+        # The A1-S2 profile manifest intentionally has no legacy date split.
+        split_days = {"train": [], "development": [], "locked_test": []}
+    else:
+        split_path = _split_path(config, manifest_path)
+        split_days = _date_days(split_path)
+    indexes, allowed, split_audit = _load_online_indices(
+        config, split_days,
+        shared_full30_profile_split=args.shared_full30_profile_split)
     proxy = load_iri_proxy(config["iri_proxy_path"], device=args.device)
     field_path = Path(args.static_dir).resolve() / "static_anomalies.npy"
     field = np.load(field_path, mmap_mode="r")
@@ -724,6 +765,10 @@ def build_parser():
     command.add_argument("--max-days", type=int, default=0,
                          help="smoke limit; 0 processes every loaded day")
     command.add_argument("--resume", action="store_true")
+    command.add_argument(
+        "--shared-full30-profile-split", default=None,
+        help=("A1-S2 profile_split.npz: use its train+development IDs as the "
+              "shared 30-day online FY/COSMIC observation pool"))
     command.set_defaults(func=run_isr)
     report_command = sub.add_parser("report")
     report_command.add_argument("--output-dir", default=OUTPUT_DEFAULT)

@@ -64,11 +64,54 @@ def _great_circle_km(lat_a, lon_a, lat_b, lon_b):
     return 6371.0088 * 2.0 * np.arcsin(np.sqrt(np.clip(hav, 0.0, 1.0)))
 
 
+def _resolve_time_lag_window(time_lag_min_hours=None,
+                             time_lag_max_hours=None,
+                             time_support=None):
+    """Resolve optional causal lag support (query time minus token time).
+
+    ``None`` preserves the legacy symmetric query.  Bounds are half-open:
+    the lower bound is inclusive and the upper bound is exclusive.  Keeping
+    this policy in one helper makes the dense and ragged payload paths agree.
+    """
+    if time_support is not None:
+        named = {
+            'causal_past_lag_0p5_1p5_v1': (0.5, 1.5),
+            'causal_current_lag_0_0p5_v1': (0.0, 0.5),
+        }
+        if time_support not in named:
+            raise ValueError(f'unknown time_support: {time_support}')
+        support = named[time_support]
+        if (time_lag_min_hours is not None
+                or time_lag_max_hours is not None):
+            supplied = (time_lag_min_hours, time_lag_max_hours)
+            if tuple(map(float, supplied)) != support:
+                raise ValueError('time_support conflicts with explicit lag bounds')
+        time_lag_min_hours, time_lag_max_hours = support
+    if time_lag_min_hours is None and time_lag_max_hours is None:
+        return None, None
+    if time_lag_min_hours is None or time_lag_max_hours is None:
+        raise ValueError('lag window requires both min and max bounds')
+    lower, upper = map(float, (time_lag_min_hours, time_lag_max_hours))
+    if not np.isfinite([lower, upper]).all() or lower < 0.0 or lower >= upper:
+        raise ValueError('lag bounds must be finite, nonnegative and increasing')
+    return lower, upper
+
+
+def _time_lag_mask(lag_hours, lower, upper):
+    """Return signed-lag membership; ``None`` denotes legacy symmetric mode."""
+    if lower is None:
+        return np.ones(np.asarray(lag_hours).shape, dtype=bool)
+    lag_hours = np.asarray(lag_hours)
+    return (lag_hours >= lower) & (lag_hours < upper)
+
+
 def _token_observation_payload(
         token_coords, token_values, token_profile_ids, token_ids,
         coords_np, source_code, space_radius_km=1800.0,
         time_radius_hours=1.5, exclude_profile_ids=None,
-        allowed_profile_ids=None):
+        allowed_profile_ids=None, time_lag_min_hours=None,
+        time_lag_max_hours=None, time_support=None,
+        include_contract_metadata=False):
     """Query exact sampled tokens with continuous physical support.
 
     M2-V keeps the result ragged: every positive-support token is stored once
@@ -76,6 +119,8 @@ def _token_observation_payload(
     batch-wide padded observation tensor before the LETKF can chunk it.
     """
     coords_np = np.asarray(coords_np, dtype=np.float32)
+    lag_min, lag_max = _resolve_time_lag_window(
+        time_lag_min_hours, time_lag_max_hours, time_support)
     allowed = (None if allowed_profile_ids is None else
                np.asarray(allowed_profile_ids, dtype=np.int64))
     time_sorted = (
@@ -97,6 +142,9 @@ def _token_observation_payload(
         time_distance = np.abs(candidate_coords[:, 3] - query[3])
         mask = (distance < float(space_radius_km)) & (
             time_distance < float(time_radius_hours))
+        if lag_min is not None:
+            signed_lag = query[3] - candidate_coords[:, 3]
+            mask &= _time_lag_mask(signed_lag, lag_min, lag_max)
         if allowed is not None:
             mask &= np.isin(token_profile_ids[candidate], allowed,
                             assume_unique=False)
@@ -126,8 +174,17 @@ def _token_observation_payload(
             np.diff(row_ptr),
         )
         space_u = distances / float(space_radius_km)
+        vertical_distances = np.abs(
+            token_coords[selected, 2] - np.repeat(coords_np[:, 2], np.diff(row_ptr))
+        ).astype(np.float32)
+        # 3-D contract: horizontal, vertical and absolute UTC-time kernels are
+        # multiplied.  The query API remains backward compatible; the explicit
+        # vertical radius is intentionally conservative for ISR tokens.
+        vertical_u = vertical_distances / 100.0
         time_u = time_distances / float(time_radius_hours)
-        localization = _gaspari_cohn_numpy(space_u) * _gaspari_cohn_numpy(time_u)
+        localization = (_gaspari_cohn_numpy(space_u)
+                        * _gaspari_cohn_numpy(vertical_u)
+                        * _gaspari_cohn_numpy(time_u))
         payload = {
             'coords': np.asarray(token_coords[selected], dtype=np.float32),
             'value': np.asarray(token_values[selected], dtype=np.float32),
@@ -135,12 +192,19 @@ def _token_observation_payload(
             'profile_id': np.asarray(token_profile_ids[selected], dtype=np.int64),
             'token_id': np.asarray(token_ids[selected], dtype=np.int64),
             'source': np.full(total, source_code, dtype=np.int8),
-            'rho_squared': np.maximum(space_u, time_u).astype(np.float32) ** 2,
+            'rho_squared': np.maximum.reduce(
+                [space_u, vertical_u, time_u]).astype(np.float32) ** 2,
             'localization_weight': localization.astype(np.float32),
             'space_distance_km': distances,
+            'vertical_distance_km': vertical_distances,
             'time_distance_hours': time_distances,
+            'time_lag_hours': np.asarray(
+                np.repeat(coords_np[:, 3], np.diff(row_ptr))
+                - token_coords[selected, 3], dtype=np.float32),
             'query_index': query_index,
             'row_ptr': row_ptr,
+            'localization_semantics': 'horizontal_vertical_time_gaspari_cohn_v2',
+            'time_semantics': 'relative_utc_hours_v1',
         }
     else:
         payload = {
@@ -153,10 +217,17 @@ def _token_observation_payload(
             'rho_squared': np.zeros(0, dtype=np.float32),
             'localization_weight': np.zeros(0, dtype=np.float32),
             'space_distance_km': np.zeros(0, dtype=np.float32),
+            'vertical_distance_km': np.zeros(0, dtype=np.float32),
             'time_distance_hours': np.zeros(0, dtype=np.float32),
+            'time_lag_hours': np.zeros(0, dtype=np.float32),
             'query_index': np.zeros(0, dtype=np.int64),
             'row_ptr': row_ptr,
+            'localization_semantics': 'horizontal_vertical_time_gaspari_cohn_v2',
+            'time_semantics': 'relative_utc_hours_v1',
         }
+    if not include_contract_metadata:
+        payload.pop('localization_semantics', None)
+        payload.pop('time_semantics', None)
     return payload
 
 
@@ -175,20 +246,31 @@ def _profile_representative_days(relative_hours, profile_ids):
     return row_days
 
 
-def _observation_payload_from_cached(cached, dlat, dlon, dt, source_code):
+def _observation_payload_from_cached(cached, dlat, dlon, dt, source_code,
+                                     time_lag_min_hours=None,
+                                     time_lag_max_hours=None,
+                                     time_support=None,
+                                     include_contract_metadata=False):
     """Flatten selected profiles into physical log10Ne observations."""
+    lag_min, lag_max = _resolve_time_lag_window(
+        time_lag_min_hours, time_lag_max_hours, time_support)
     values = cached['sel_abs']
     valid = cached['valid_prof'][:, :, None] & cached['sel_vmask']
     query_lat = cached['lat_q'][:, None, None]
     query_lon = cached['lon_q'][:, None, None]
     query_time = cached['t_q'][:, None, None]
+    time_lag = query_time - values[..., 3]
+    if lag_min is not None:
+        valid &= _time_lag_mask(time_lag, lag_min, lag_max)
     dlat_n = np.abs(values[..., 0] - query_lat) / dlat
     dlon_n = np.abs(
         (values[..., 1] - query_lon + 180.0) % 360.0 - 180.0) / dlon
     dt_n = np.abs(values[..., 3] - query_time) / dt
+    vertical_distance = np.abs(values[..., 2] - cached['alt_q'][:, None, None])
+    vertical_n = vertical_distance / 100.0
     # Max-norm matches the rectangular hard window and reaches one on every
     # boundary, allowing the ETKF precision to taper continuously to zero.
-    rho_squared = np.maximum.reduce([dlat_n, dlon_n, dt_n]) ** 2
+    rho_squared = np.maximum.reduce([dlat_n, dlon_n, vertical_n, dt_n]) ** 2
     profile_ids = np.broadcast_to(
         cached['sel_ids'][:, :, None], valid.shape).copy()
     profile_ids[~valid] = -1
@@ -201,10 +283,24 @@ def _observation_payload_from_cached(cached, dlat, dlon, dt, source_code):
         'source': np.full(flat_valid.shape, source_code, dtype=np.int8),
         'rho_squared': rho_squared.reshape(values.shape[0], -1).astype(
             np.float32, copy=False),
+        'time_lag_hours': time_lag.reshape(values.shape[0], -1).astype(
+            np.float32, copy=False),
+        'vertical_distance_km': vertical_distance.reshape(values.shape[0], -1).astype(
+            np.float32, copy=False),
+        'localization_semantics': 'horizontal_vertical_time_gaspari_cohn_v2',
+        'time_semantics': 'relative_utc_hours_v1',
     }
     payload['coords'][~flat_valid] = 0.0
     payload['value'][~flat_valid] = 0.0
     payload['rho_squared'][~flat_valid] = 1.0
+    payload['time_lag_hours'][~flat_valid] = 0.0
+    # Keep the legacy payload value-only/array-only contract by default.  The
+    # v2 semantic labels are opt-in metadata (numeric distance fields above are
+    # safe for legacy consumers); callers using an explicit lag window request
+    # the labels below.
+    if not include_contract_metadata:
+        payload.pop('localization_semantics', None)
+        payload.pop('time_semantics', None)
     return payload
 
 
@@ -448,7 +544,10 @@ class FY3D_Dataset(Dataset):
                  bin_size_hours: float = 3.0, use_memmap: bool = False,
                  profile_path: str = None, val_ratio: float = None,
                  split_seed: int = 42, profile_index_path: str = None,
-                 split_days=None, alt_range=None):
+                 split_days=None, alt_range=None,
+                 magnetic_sidecar_path: str = None,
+                 magnetic_sidecar_source: str = None,
+                 magnetic_sidecar_strict: bool = False):
         super().__init__()
 
         if val_days is None:
@@ -456,6 +555,8 @@ class FY3D_Dataset(Dataset):
 
         self.use_memmap = use_memmap
         self.npy_path = npy_path
+        self.magnetic_sidecar = None
+        self.magnetic_sidecar_source = magnetic_sidecar_source
 
         print(f"Loading data from {npy_path}...")
         print(f"  内存模式: {'Memory-Mapped (按需加载)' if use_memmap else '全量加载到内存'}")
@@ -502,6 +603,61 @@ class FY3D_Dataset(Dataset):
         self.raw_profile_ids = np.rint(profile_id_raw).astype(np.int64)
         self.split_profile_ids = np.unique(
             np.rint(split_profile_ids).astype(np.int64))
+
+        # Optional row-aligned AACGM sidecar.  It is carried as metadata only;
+        # model coordinates/targets remain the first five data columns.
+        if magnetic_sidecar_path is not None:
+            try:
+                from ..mdia.m00_observation import load_magnetic_sidecar
+            except ImportError:  # pragma: no cover - direct module execution
+                from mdia.m00_observation import load_magnetic_sidecar
+            # QD sidecars may be sparse: only explicitly authorized Train and
+            # Development rows are converted. Validate the sparse identity first,
+            # then densify metadata for the existing row-indexed __getitem__ path.
+            with np.load(magnetic_sidecar_path, allow_pickle=False) as sidecar_probe:
+                if "row_index" not in sidecar_probe.files:
+                    raise ValueError("magnetic sidecar requires row_index")
+                authorized_rows = np.asarray(
+                    sidecar_probe["row_index"], dtype=np.int64).reshape(-1)
+                sidecar_is_qd = "qd_latitude_deg" in sidecar_probe.files
+            if (authorized_rows.size == 0 or np.any(authorized_rows < 0)
+                    or np.any(authorized_rows >= len(raw_data))
+                    or np.unique(authorized_rows).size != authorized_rows.size):
+                raise ValueError("magnetic sidecar authorized rows are invalid")
+            self.magnetic_sidecar = load_magnetic_sidecar(
+                magnetic_sidecar_path,
+                expected_rows=authorized_rows.size,
+                source=magnetic_sidecar_source,
+                strict_aacgm=bool(magnetic_sidecar_strict and not sidecar_is_qd),
+                strict_qd=bool(magnetic_sidecar_strict and sidecar_is_qd),
+                expected_profile_ids=self.raw_profile_ids[authorized_rows],
+                expected_coords=np.asarray(raw_data[authorized_rows, :4], dtype=np.float64),
+                expected_row_indices=authorized_rows,
+            )
+            dense = {}
+            per_row = {"row_index", "profile_id", "magnetic_sin_i",
+                       "qd_latitude_deg", "qd_longitude_deg", "aacgm_latitude_deg",
+                       "aacgm_valid_mask", "aacgm_failure_reason", "latitude_deg",
+                       "longitude_deg", "altitude_km", "utc_hours", "source"}
+            for key, value in self.magnetic_sidecar.items():
+                arr = np.asarray(value)
+                if (key not in per_row or arr.ndim != 1
+                        or arr.size != authorized_rows.size):
+                    dense[key] = value
+                    continue
+                if arr.dtype.kind in "fc":
+                    fill = np.full(len(raw_data), np.nan, dtype=arr.dtype)
+                elif arr.dtype.kind == "b":
+                    fill = np.zeros(len(raw_data), dtype=arr.dtype)
+                elif arr.dtype.kind in "iu":
+                    fill = np.full(len(raw_data), -1, dtype=arr.dtype)
+                else:
+                    fill = np.full(len(raw_data), "", dtype=arr.dtype)
+                fill[authorized_rows] = arr
+                dense[key] = fill
+            dense["row_index"] = np.arange(len(raw_data), dtype=np.int64)
+            dense["profile_id"] = self.raw_profile_ids
+            self.magnetic_sidecar = dense
         if profile_index_path is None and profile_path is not None:
             del profile_id_raw, profile_raw
 
@@ -520,6 +676,14 @@ class FY3D_Dataset(Dataset):
                 # 全量模式：复制有效数据
                 self.data = raw_data[~isnan_mask]
                 self.raw_profile_ids = self.raw_profile_ids[~isnan_mask]
+                if self.magnetic_sidecar is not None:
+                    self.magnetic_sidecar = {
+                        key: (np.asarray(value)[~isnan_mask]
+                              if np.asarray(value).ndim == 1
+                              and np.asarray(value).size == len(isnan_mask)
+                              else value)
+                        for key, value in self.magnetic_sidecar.items()
+                    }
                 self.valid_indices = None
         else:
             self.data = raw_data
@@ -584,6 +748,18 @@ class FY3D_Dataset(Dataset):
                 else working_indices[~is_val])
 
         self.profile_ids = self.raw_profile_ids[self.selected_indices]
+        if magnetic_sidecar_strict and self.magnetic_sidecar is not None:
+            latitude_key = ("qd_latitude_deg"
+                            if "qd_latitude_deg" in self.magnetic_sidecar
+                            else "aacgm_latitude_deg")
+            selected_latitude = np.asarray(
+                self.magnetic_sidecar[latitude_key], dtype=np.float64)[self.selected_indices]
+            selected_sin_i = np.asarray(
+                self.magnetic_sidecar["magnetic_sin_i"], dtype=np.float64)[self.selected_indices]
+            if (not np.isfinite(selected_latitude).all()
+                    or not np.isfinite(selected_sin_i).all()):
+                raise ValueError(
+                    "strict magnetic sidecar does not cover selected Train/Development rows")
         print(f"Mode '{mode}': {len(self.selected_indices)} samples selected.")
 
         # --- [关键步骤] 预计算时间分箱 (Bin Indexing) ---
@@ -624,9 +800,21 @@ class FY3D_Dataset(Dataset):
             data_sample = self.data[actual_idx]
 
         # 同时返回数据集索引（供 P2 预计算邻域查询使用）
-        return (torch.from_numpy(data_sample),
+        item = (torch.from_numpy(np.asarray(data_sample, dtype=np.float32)),
                 torch.tensor(idx, dtype=torch.long),
                 torch.tensor(self.profile_ids[idx], dtype=torch.long))
+        if self.magnetic_sidecar is not None:
+            actual_idx = int(actual_idx)
+            magnetic_latitude_key = (
+                'qd_latitude_deg' if 'qd_latitude_deg' in self.magnetic_sidecar
+                else 'aacgm_latitude_deg')
+            aacgm = np.asarray(
+                self.magnetic_sidecar[magnetic_latitude_key])[actual_idx]
+            sin_i = np.asarray(
+                self.magnetic_sidecar['magnetic_sin_i'])[actual_idx]
+            # Metadata only: model code still consumes columns 0:5.
+            item += (torch.as_tensor([aacgm, sin_i], dtype=torch.float32),)
+        return item
 
 
 class TimeBinSampler(Sampler):
@@ -692,11 +880,22 @@ class ProfileTimeBinSampler(Sampler):
     """Keep complete profile blocks together and give each profile equal weight."""
 
     def __init__(self, dataset: FY3D_Dataset, batch_size: int,
-                 points_per_profile: int = None, shuffle: bool = True):
+                 points_per_profile: int = None, shuffle: bool = True,
+                 sampling_semantics: str = 'legacy_profile_time_bin_v1',
+                 schedule_seed: int = 42, max_batches: int = None):
         self.dataset = dataset
         self.batch_size = batch_size
         self.points_per_profile = points_per_profile
         self.shuffle = shuffle
+        self.sampling_semantics = str(sampling_semantics)
+        self.schedule_seed = int(schedule_seed)
+        self.max_batches = (None if max_batches is None else int(max_batches))
+        if self.max_batches is not None and self.max_batches < 1:
+            raise ValueError('max_batches must be positive when provided')
+        self._iteration = 0
+        self.last_profile_order = np.empty(0, dtype=np.int64)
+        self.last_update_kinds = []
+        self._natural_batches = None
         self.profiles_by_bin = {}
 
         profile_ids = dataset.profile_ids
@@ -714,16 +913,191 @@ class ProfileTimeBinSampler(Sampler):
         if max_profile > batch_size:
             raise ValueError('batch_size must fit one complete sampled profile')
 
-    def _sample_profile(self, indices):
+    def _sample_profile(self, indices, rng=None):
         n = self.points_per_profile
         if n is None:
             return indices
         if self.shuffle:
-            return np.random.choice(indices, n, replace=len(indices) < n)
+            rng = np.random if rng is None else rng
+            if len(indices) < n:
+                # A short profile contributes only its available distinct
+                # observations. Repeating a row would create fake vertical
+                # exposure and violate the profile-level weighting contract.
+                return np.asarray(indices)
+            return rng.choice(indices, n, replace=False)
+        if len(indices) <= n:
+            return np.asarray(indices)
         positions = np.linspace(0, len(indices) - 1, n).round().astype(int)
         return indices[positions]
 
+    def _balanced_profile_order(self, rng):
+        """Build a deterministic source/date/physical-stratum pass."""
+        groups = {}
+        for bin_id, profiles in self.profiles_by_bin.items():
+            for indices in profiles:
+                rows = np.asarray(
+                    self.dataset.data[self.dataset.selected_indices[indices]])
+                med = np.nanmedian(rows, axis=0)
+                lat, lon, alt, rel_hour = map(float, med[:4])
+                alt_band = 0 if alt < 300.0 else 1
+                local_hour = (rel_hour + lon / 15.0) % 24.0
+                day_band = 0 if 6.0 <= local_hour < 18.0 else 1
+                abs_sin_i = abs(np.sin(np.deg2rad(lat)))
+                mag_band = (0 if abs_sin_i < 0.25 else
+                            1 if abs_sin_i < 0.5 else 2)
+                key = (int(bin_id), alt_band, day_band, mag_band)
+                groups.setdefault(key, []).append(indices)
+        keys = sorted(groups)
+        for key in keys:
+            rng.shuffle(groups[key])
+        order = []
+        while keys:
+            next_keys = []
+            for key in keys:
+                queue = groups[key]
+                if queue:
+                    order.append(queue.pop())
+                if queue:
+                    next_keys.append(key)
+            keys = next_keys
+        return order
+
+    def _legacy_profile_order(self, rng):
+        """Build one legacy profile/time-bin pass for mixed A1-S8 sampling."""
+        bin_ids = list(self.profiles_by_bin)
+        if self.shuffle:
+            rng.shuffle(bin_ids)
+        order = []
+        for bin_id in bin_ids:
+            profiles = list(self.profiles_by_bin[bin_id])
+            if self.shuffle:
+                rng.shuffle(profiles)
+            order.extend(profiles)
+        return order
+
+    def _ensure_natural_plan(self):
+        if self._natural_batches is not None:
+            return
+        rng = np.random.default_rng(self.schedule_seed + self._iteration)
+        self._iteration += 1
+        bin_ids = list(self.profiles_by_bin)
+        if self.shuffle:
+            rng.shuffle(bin_ids)
+        profile_order = []
+        for bin_id in bin_ids:
+            profiles = list(self.profiles_by_bin[bin_id])
+            if self.shuffle:
+                rng.shuffle(profiles)
+            profile_order.extend(profiles)
+        self.last_profile_order = np.asarray([
+            int(self.dataset.profile_ids[int(np.asarray(indices)[0])])
+            for indices in profile_order
+        ], dtype=np.int64)
+        batches = []
+        batch = []
+        for indices in profile_order:
+            selected = self._sample_profile(indices, rng).tolist()
+            if len(selected) > self.batch_size:
+                raise RuntimeError(
+                    'sampled profile exceeds batch_size in natural epoch')
+            if batch and len(batch) + len(selected) > self.batch_size:
+                batches.append(batch)
+                batch = []
+            batch.extend(selected)
+        if batch:
+            batches.append(batch)
+        self._natural_batches = batches
+
     def __iter__(self):
+        if self.sampling_semantics == 'source_complete_profile_pass_v1':
+            # One natural pass: every profile is consumed exactly once and a
+            # sampled profile is never split across two batches.  Cache the
+            # concrete plan so DataLoader.__len__ and iteration agree even
+            # when shuffled profile sizes produce different packing.
+            self._ensure_natural_plan()
+            try:
+                yield from self._natural_batches
+            finally:
+                self._natural_batches = None
+            return
+        if self.sampling_semantics == 'a1s8_mixed_gate_aware_v1':
+            rng = np.random.default_rng(self.schedule_seed + self._iteration)
+            self._iteration += 1
+
+            def batches(order):
+                batch = []
+                for indices in order:
+                    batch.extend(self._sample_profile(indices, rng).tolist())
+                    if len(batch) >= self.batch_size:
+                        yield batch[:self.batch_size]
+                        batch = batch[self.batch_size:]
+                if batch:
+                    yield batch
+
+            legacy = list(batches(self._legacy_profile_order(rng)))
+            balanced = list(batches(self._balanced_profile_order(rng)))
+            if not legacy and not balanced:
+                raise ValueError('A1-S8 sampler has no active profiles')
+            target = self.max_batches or max(len(legacy), len(balanced))
+            target = max(1, int(target))
+            produced = []
+            self.last_update_kinds = []
+            for update in range(target):
+                is_balanced = update % 4 == 3
+                pool = balanced if is_balanced else legacy
+                if not pool:
+                    pool = legacy or balanced
+                produced.append(pool[update % len(pool)])
+                self.last_update_kinds.append(
+                    'balanced' if is_balanced else 'legacy')
+            self.last_profile_order = np.asarray(
+                [int(self.dataset.profile_ids[int(np.asarray(p)[0])])
+                 for p in (self._balanced_profile_order(rng)
+                           if balanced else self._legacy_profile_order(rng))],
+                dtype=np.int64)
+            for batch in produced:
+                yield batch
+            return
+        if self.sampling_semantics == 'source_date_physical_stratum_balanced_v1':
+            rng = np.random.default_rng(self.schedule_seed + self._iteration)
+            self._iteration += 1
+            profile_order = self._balanced_profile_order(rng)
+            self.last_profile_order = np.asarray([
+                int(self.dataset.profile_ids[int(np.asarray(p)[0])])
+                for p in profile_order
+            ], dtype=np.int64)
+
+            def batches(order):
+                batch = []
+                for indices in order:
+                    batch.extend(self._sample_profile(indices, rng).tolist())
+                    if len(batch) >= self.batch_size:
+                        yield batch[:self.batch_size]
+                        batch = batch[self.batch_size:]
+                if batch:
+                    yield batch
+
+            produced = list(batches(profile_order))
+            if self.max_batches is not None and len(produced) < self.max_batches:
+                # Recycle rotated complete-profile passes until the fixed
+                # virtual update budget is met.  A sparse profile is sampled
+                # without replacement within each pass; repetition is only
+                # across passes, which is required when the A1-S budget is
+                # larger than one full profile sweep.
+                pass_index = 1
+                while len(produced) < self.max_batches:
+                    shift = pass_index % max(1, len(profile_order))
+                    rotated = profile_order[shift:] + profile_order[:shift]
+                    pass_index += 1
+                    for batch in batches(rotated):
+                        produced.append(batch)
+                        if len(produced) >= self.max_batches:
+                            break
+            if self.max_batches is not None:
+                produced = produced[:self.max_batches]
+            for batch in produced:
+                yield batch
+            return
         bin_ids = list(self.profiles_by_bin)
         if self.shuffle:
             np.random.shuffle(bin_ids)
@@ -742,11 +1116,17 @@ class ProfileTimeBinSampler(Sampler):
                 yield batch
 
     def __len__(self):
+        if self.sampling_semantics == 'source_complete_profile_pass_v1':
+            self._ensure_natural_plan()
+            return len(self._natural_batches)
+        if self.max_batches is not None:
+            return self.max_batches
         total = 0
         for profiles in self.profiles_by_bin.values():
             used = 0
             for indices in profiles:
-                n = len(indices) if self.points_per_profile is None else self.points_per_profile
+                n = (len(indices) if self.points_per_profile is None else
+                     min(len(indices), self.points_per_profile))
                 if used and used + n > self.batch_size:
                     total += 1
                     used = 0
@@ -770,6 +1150,12 @@ def get_dataloaders(
     split_days=None,
     alt_range=None,
     full_validation_profiles=False,
+    sampling_semantics='legacy_profile_time_bin_v1',
+    schedule_seed=42,
+    max_batches=None,
+    magnetic_sidecar_path=None,
+    magnetic_sidecar_source='FY',
+    magnetic_sidecar_strict=False,
 ):
     """
     工厂函数: 组装 Dataset 和 Time-Aware Sampler
@@ -790,19 +1176,27 @@ def get_dataloaders(
         use_memmap=use_memmap, profile_path=profile_path,
         val_ratio=val_ratio, split_seed=split_seed,
         profile_index_path=profile_index_path, split_days=split_days,
-        alt_range=alt_range)
+        alt_range=alt_range,
+        magnetic_sidecar_path=magnetic_sidecar_path,
+        magnetic_sidecar_source=magnetic_sidecar_source,
+        magnetic_sidecar_strict=magnetic_sidecar_strict)
     val_dataset = FY3D_Dataset(
         npy_path, mode=('development' if split_days is not None else 'val'),
         val_days=val_days, bin_size_hours=bin_size_hours,
         use_memmap=use_memmap, profile_path=profile_path,
         val_ratio=val_ratio, split_seed=split_seed,
         profile_index_path=profile_index_path, split_days=split_days,
-        alt_range=alt_range)
+        alt_range=alt_range,
+        magnetic_sidecar_path=magnetic_sidecar_path,
+        magnetic_sidecar_source=magnetic_sidecar_source,
+        magnetic_sidecar_strict=magnetic_sidecar_strict)
     
     # 训练集开启 Shuffle (Time-Aware Shuffle)
     train_sampler = ProfileTimeBinSampler(
         train_dataset, batch_size=batch_size,
-        points_per_profile=points_per_profile, shuffle=True)
+        points_per_profile=points_per_profile, shuffle=True,
+        sampling_semantics=sampling_semantics,
+        schedule_seed=schedule_seed, max_batches=max_batches)
     # 验证集关闭 Shuffle (顺序评估)
     val_sampler = ProfileTimeBinSampler(
         val_dataset, batch_size=batch_size,
@@ -1151,27 +1545,48 @@ class FYNeighborhoodIndex:
             'lat_q':      lats_q,      # [B]
             'lon_q':      lons_q,      # [B]
             't_q':        times_q,     # [B]
+            'alt_q':      coords_np[:, 2].astype(np.float32),
             'K_p':        K_p,
         }
 
     def query_observation_batch(self, coords_np, exclude_profile_ids=None,
-                                allowed_profile_ids=None):
+                                allowed_profile_ids=None,
+                                time_lag_min_hours=None,
+                                time_lag_max_hours=None,
+                                time_support=None):
         """Return every positive-support exact FY token in stable order."""
         if not self.token_mode:
             cached = self.query_profiles_only(
                 coords_np, exclude_profile_ids, allowed_profile_ids)
-            return self.observation_payload_from_cached(cached)
+            return self.observation_payload_from_cached(
+                cached, time_lag_min_hours=time_lag_min_hours,
+                time_lag_max_hours=time_lag_max_hours,
+                time_support=time_support,
+                include_contract_metadata=any(value is not None for value in (
+                    time_lag_min_hours, time_lag_max_hours, time_support)))
         return _token_observation_payload(
             self.token_coords, self.token_values, self.token_profile_ids,
             self.token_ids, coords_np, source_code=0,
             space_radius_km=self.space_radius_km,
             time_radius_hours=self.time_radius_hours,
             exclude_profile_ids=exclude_profile_ids,
-            allowed_profile_ids=allowed_profile_ids)
+            allowed_profile_ids=allowed_profile_ids,
+            time_lag_min_hours=time_lag_min_hours,
+            time_lag_max_hours=time_lag_max_hours,
+            time_support=time_support,
+            include_contract_metadata=any(value is not None for value in (
+                time_lag_min_hours, time_lag_max_hours, time_support)))
 
-    def observation_payload_from_cached(self, cached):
+    def observation_payload_from_cached(self, cached, time_lag_min_hours=None,
+                                        time_lag_max_hours=None,
+                                        time_support=None):
         return _observation_payload_from_cached(
-            cached, self.dlat, self.dlon, self.dt, source_code=0)
+            cached, self.dlat, self.dlon, self.dt, source_code=0,
+            time_lag_min_hours=time_lag_min_hours,
+            time_lag_max_hours=time_lag_max_hours,
+            time_support=time_support,
+            include_contract_metadata=any(value is not None for value in (
+                time_lag_min_hours, time_lag_max_hours, time_support)))
 
 # ===========================================================================
 # run64: COSMIC-2 数据集与邻域索引
@@ -1181,8 +1596,12 @@ class COSMICDataset(FY3D_Dataset):
     """COSMIC-2 数据集 — 去掉第 6 列 profile_id，返回 5 列 [Lat,Lon,Alt,RelHour,Log10Ne]。"""
 
     def __getitem__(self, idx):
-        data_tensor, ds_idx, profile_id = super().__getitem__(idx)
-        return data_tensor[:5], ds_idx, profile_id
+        batch = super().__getitem__(idx)
+        data_tensor, ds_idx, profile_id, *metadata = batch
+        result = (data_tensor[:5], ds_idx, profile_id)
+        if metadata:
+            result += tuple(metadata)
+        return result
 
 
 class COSMICNeighborhoodIndex:
@@ -1429,49 +1848,81 @@ class COSMICNeighborhoodIndex:
 
         return dict(lat_q=lat_q, lon_q=lon_q, t_q=t_q,
                     sel_meta=sel_meta, sel_abs=sel_abs,
+                    alt_q=np.asarray(coords_np[:, 2], dtype=np.float32),
                     sel_vmask=sel_vmask, valid_prof=valid_prof,
                     sel_ids=sel_ids, sel_distance=sel_distance,
                     has_obs=has_obs)
 
     def query_observation_batch(self, coords_np, exclude_profile_ids=None,
-                                allowed_profile_ids=None):
+                                allowed_profile_ids=None,
+                                time_lag_min_hours=None,
+                                time_lag_max_hours=None,
+                                time_support=None):
         """Return every positive-support exact COSMIC token in stable order."""
         if not self.token_mode:
             cached = self.query_profiles_only(
                 coords_np, exclude_profile_ids, allowed_profile_ids)
-            return self.observation_payload_from_cached(cached)
+            return self.observation_payload_from_cached(
+                cached, time_lag_min_hours=time_lag_min_hours,
+                time_lag_max_hours=time_lag_max_hours,
+                time_support=time_support)
         return _token_observation_payload(
             self.token_coords, self.token_values, self.token_profile_ids,
             self.token_ids, coords_np, source_code=1,
             space_radius_km=self.space_radius_km,
             time_radius_hours=self.time_radius_hours,
             exclude_profile_ids=exclude_profile_ids,
-            allowed_profile_ids=allowed_profile_ids)
+            allowed_profile_ids=allowed_profile_ids,
+            time_lag_min_hours=time_lag_min_hours,
+            time_lag_max_hours=time_lag_max_hours,
+            time_support=time_support,
+            include_contract_metadata=any(value is not None for value in (
+                time_lag_min_hours, time_lag_max_hours, time_support)))
 
-    def observation_payload_from_cached(self, cached):
+    def observation_payload_from_cached(self, cached, time_lag_min_hours=None,
+                                        time_lag_max_hours=None,
+                                        time_support=None):
         return _observation_payload_from_cached(
-            cached, self.dlat, self.dlon, self.dt, source_code=1)
+            cached, self.dlat, self.dlon, self.dt, source_code=1,
+            time_lag_min_hours=time_lag_min_hours,
+            time_lag_max_hours=time_lag_max_hours,
+            time_support=time_support,
+            include_contract_metadata=any(value is not None for value in (
+                time_lag_min_hours, time_lag_max_hours, time_support)))
 
 def get_cosmic_dataloader(cosmic_path, batch_size, bin_size_hours=0.5,
-                           num_workers=0, use_memmap=True, val_ratio=0.1,
-                           split_seed=42, points_per_profile=8,
-                           profile_index_path=None, split_days=None,
-                           alt_range=None, full_validation_profiles=False):
+                          num_workers=0, use_memmap=True, val_ratio=0.1,
+                          split_seed=42, points_per_profile=8,
+                          profile_index_path=None, split_days=None,
+                          alt_range=None, full_validation_profiles=False,
+                          sampling_semantics='legacy_profile_time_bin_v1',
+                          schedule_seed=42, max_batches=None,
+                          magnetic_sidecar_path=None,
+                          magnetic_sidecar_source='COSMIC',
+                          magnetic_sidecar_strict=False):
     """COSMIC-2 DataLoader 工厂函数（接口与 get_dataloaders 对称）。"""
     train_dataset = COSMICDataset(
         cosmic_path, mode='train', val_days=[], bin_size_hours=bin_size_hours,
         use_memmap=use_memmap, val_ratio=val_ratio, split_seed=split_seed,
         profile_index_path=profile_index_path, split_days=split_days,
-        alt_range=alt_range)
+        alt_range=alt_range,
+        magnetic_sidecar_path=magnetic_sidecar_path,
+        magnetic_sidecar_source=magnetic_sidecar_source,
+        magnetic_sidecar_strict=magnetic_sidecar_strict)
     val_dataset = COSMICDataset(
         cosmic_path, mode=('development' if split_days is not None else 'val'),
         val_days=[], bin_size_hours=bin_size_hours,
         use_memmap=use_memmap, val_ratio=val_ratio, split_seed=split_seed,
         profile_index_path=profile_index_path, split_days=split_days,
-        alt_range=alt_range)
+        alt_range=alt_range,
+        magnetic_sidecar_path=magnetic_sidecar_path,
+        magnetic_sidecar_source=magnetic_sidecar_source,
+        magnetic_sidecar_strict=magnetic_sidecar_strict)
     train_sampler = ProfileTimeBinSampler(
         train_dataset, batch_size=batch_size,
-        points_per_profile=points_per_profile, shuffle=True)
+        points_per_profile=points_per_profile, shuffle=True,
+        sampling_semantics=sampling_semantics,
+        schedule_seed=schedule_seed, max_batches=max_batches)
     val_sampler = ProfileTimeBinSampler(
         val_dataset, batch_size=batch_size,
         points_per_profile=(None if full_validation_profiles

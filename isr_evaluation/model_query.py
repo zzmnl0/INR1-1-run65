@@ -25,7 +25,7 @@ def _unix_to_relhour(unix_times, start_unix):
 def query_model_grid(model, sw_manager, day_record, start_unix, device,
                      batch_size=2048, iri_peak_manager=None,
                      fy_nb_index=None, cosmic_nb_index=None,
-                     allowed_profile_ids=None):
+                     allowed_profile_ids=None, time_support=None):
     """
     在 DayRecord 的 (alt, time) 网格上推理 FSIA-INR，返回 log10(Ne) 网格。
 
@@ -54,6 +54,13 @@ def query_model_grid(model, sw_manager, day_record, start_unix, device,
         not model peak searches.
     """
     model.eval()
+    if time_support is None and getattr(
+            model, 'analysis_output_semantics', None
+            ) == 'causal_context_background_v1':
+        time_support = getattr(
+            model, 'analysis_observation_time_support', None)
+    if time_support == 'symmetric_legacy_v1':
+        time_support = None
 
     alt_1d = day_record['alt_1d']    # [n_alt]
     ts_1d  = day_record['ts_1d']     # [n_time]
@@ -138,7 +145,8 @@ def query_model_grid(model, sw_manager, day_record, start_unix, device,
             if fy_nb_index is not None:
                 observations = query_observation_payload(
                     fy_nb_index, chunk, device,
-                    allowed_profile_ids=(allowed_profile_ids or {}).get('FY'))
+                    allowed_profile_ids=(allowed_profile_ids or {}).get('FY'),
+                    time_support=time_support)
                 fy_covered += int(
                     observation_query_coverage(observations).sum().item())
                 model_kwargs['observations_fy'] = attach_observation_background(
@@ -146,7 +154,8 @@ def query_model_grid(model, sw_manager, day_record, start_unix, device,
             if cosmic_nb_index is not None:
                 observations = query_observation_payload(
                     cosmic_nb_index, chunk, device,
-                    allowed_profile_ids=(allowed_profile_ids or {}).get('COSMIC'))
+                    allowed_profile_ids=(allowed_profile_ids or {}).get('COSMIC'),
+                    time_support=time_support)
                 cosmic_covered += int(
                     observation_query_coverage(observations).sum().item())
                 model_kwargs['observations_cosmic'] = (

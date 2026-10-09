@@ -6,6 +6,7 @@ as structural references; no trainable peak head is present.
 """
 
 import math
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -212,6 +213,17 @@ def background_trust_gate(coords, enabled=False, altitude_core_km=200.0,
         (sin_i.abs() - dip_core) / dip_transition)
     gate = 1.0 - height_weight * night_weight * magnetic_weight
     return gate.clamp(0.0, 1.0)
+
+
+def background_adapter_gate(abs_sin_i, low=0.25, high=0.50):
+    """Fixed low/high magnetic-latitude smoothstep gate for A1-S7."""
+    low = float(low)
+    high = float(high)
+    if not np.isfinite((low, high)).all() or not 0.0 <= low < high:
+        raise ValueError('adapter gate thresholds must be finite and increasing')
+    value = torch.as_tensor(abs_sin_i)
+    gate = ((value.abs() - low) / (high - low)).clamp(0.0, 1.0)
+    return _smoothstep01(gate)
 
 
 # ======================== NeuralETKFLayer 辅助函数 ========================
@@ -791,6 +803,13 @@ class FSIA_INR_Model(nn.Module):
         tau_solar_init  = config.get('tau_solar_init', 72.0)
         if int(basis_dim) < 1:
             raise ValueError('basis_dim must be positive')
+        if config.get('low_dim_assimilation_semantics') == 'shared_latent_etkf_v1':
+            if int(basis_dim) != 64:
+                raise ValueError('frozen low-dimensional contract requires basis_dim=64')
+            if int(config.get('enkf_n_members', 8)) != 8:
+                raise ValueError('frozen low-dimensional contract requires 8 ETKF members')
+            if config.get('mode_mapping', 'M10:FY,M01:COSMIC,M11:FY+COSMIC') != 'M10:FY,M01:COSMIC,M11:FY+COSMIC':
+                raise ValueError('mode mapping violates frozen low-dimensional contract')
 
         # IRI proxy 末层隐层维度（与代理网络架构匹配：[4,128,128,128,128,1]）
         iri_hidden_dim = 128
@@ -909,6 +928,20 @@ class FSIA_INR_Model(nn.Module):
 
         self.background_residual_cap = float(
             config.get('background_residual_cap', 0.5))
+        # Explicit analysis-only ablation: retain learned context features,
+        # but make the Background exactly the raw IRI field.
+        self.background_semantics = config.get('background_semantics', 'learned_v1')
+        if self.background_semantics not in ('learned_v1', 'raw_iri_fixed_v1'):
+            raise ValueError(f'unknown background_semantics: {self.background_semantics!r}')
+        self.analysis_output_semantics = config.get(
+            'analysis_output_semantics', 'm11_feature_letkf_v1')
+        if self.analysis_output_semantics not in (
+                'm11_feature_letkf_v1', 'causal_context_background_v1'):
+            raise ValueError(
+                f'unknown analysis_output_semantics: '
+                f'{self.analysis_output_semantics!r}')
+        self.analysis_observation_time_support = config.get(
+            'analysis_observation_time_support', 'symmetric_legacy_v1')
         self.background_trust_gate_enabled = bool(
             config.get('background_trust_gate_enabled', False))
         self.background_trust_gate_semantics = config.get(
@@ -936,11 +969,162 @@ class FSIA_INR_Model(nn.Module):
         self.fy_dt_window = float(config.get('fy_nb_dt', 1.5))
         self.cosmic_dlat_window = float(config.get('cosmic_nb_dlat', 5.0))
         self.cosmic_dt_window = float(config.get('cosmic_nb_dt', 1.5))
+        self.background_decoder_conditioning = config.get(
+            'background_decoder_conditioning', 'legacy_v1')
+        if self.background_decoder_conditioning not in (
+                'legacy_v1', 'explicit_geo_lt_v1'):
+            raise ValueError(
+                'unknown background decoder conditioning: '
+                f'{self.background_decoder_conditioning!r}')
+        decoder_in_dim = basis_dim + sw_out_dim + 2
+        if self.background_decoder_conditioning == 'explicit_geo_lt_v1':
+            # Seven existing periodic/location features are fed directly to
+            # the base decoder; the hidden width and bounded residual path
+            # remain unchanged.
+            decoder_in_dim += 7
         self.background_decoder = nn.Sequential(
-            nn.Linear(basis_dim + sw_out_dim + 2, 64),
+            nn.Linear(decoder_in_dim, 64),
             nn.SiLU(),
             nn.Linear(64, 1),
         )
+        self.m00_candidate_semantics = str(config.get(
+            'm00_candidate_semantics', 'disabled'))
+        if self.m00_candidate_semantics not in (
+                'disabled', 'm00_decoder_last_trust_region_v1',
+                'm00_peak_relative_lowrank3_v1'):
+            raise ValueError(
+                f'unknown M00 candidate semantics: '
+                f'{self.m00_candidate_semantics!r}')
+        self.m00_candidate_residual_cap = float(config.get(
+            'm00_candidate_residual_cap', 0.05))
+        if not math.isfinite(self.m00_candidate_residual_cap) \
+                or self.m00_candidate_residual_cap <= 0.0:
+            raise ValueError('m00_candidate_residual_cap must be finite/positive')
+        self.m00_peak_relative_scale_km = float(config.get(
+            'm00_peak_relative_scale_km', 100.0))
+        if not math.isfinite(self.m00_peak_relative_scale_km) \
+                or self.m00_peak_relative_scale_km <= 0.0:
+            raise ValueError('m00_peak_relative_scale_km must be finite/positive')
+        self.m00_peak_relative_head = None
+        if self.m00_candidate_semantics == 'm00_decoder_last_trust_region_v1':
+            last = self.background_decoder[-1]
+            self.register_buffer(
+                'm00_decoder_baseline_weight',
+                torch.zeros_like(last.weight), persistent=True)
+            self.register_buffer(
+                'm00_decoder_baseline_bias',
+                torch.zeros_like(last.bias), persistent=True)
+            self.register_buffer(
+                'm00_decoder_baseline_captured',
+                torch.tensor(False), persistent=True)
+        elif self.m00_candidate_semantics == 'm00_peak_relative_lowrank3_v1':
+            self.m00_peak_relative_head = nn.Linear(
+                basis_dim + sw_out_dim, 3)
+            nn.init.zeros_(self.m00_peak_relative_head.weight)
+            nn.init.zeros_(self.m00_peak_relative_head.bias)
+
+        # Optional M00 condition adapter.  It is deliberately disabled by
+        # default so legacy checkpoints and the A1-S forward path are
+        # bit-for-bit unchanged.  The training driver decides whether this
+        # branch is adapter-only or joins the complete Background scope.
+        self.background_condition_adapter_semantics = config.get(
+            'background_condition_adapter', 'disabled')
+        if self.background_condition_adapter_semantics is None:
+            # Older A1-S/A1-S2 manifests recorded a null value for the
+            # disabled optional adapter.  Treat it as the legacy default.
+            self.background_condition_adapter_semantics = 'disabled'
+        if (config.get('adapter_route') == 'stopped_permanently'
+                and self.background_condition_adapter_semantics != 'disabled'
+                and not bool(config.get('eval_only', False))):
+            raise ValueError('A1-S7/A1-S8 adapter route is permanently stopped')
+        if (config.get('shared_backbone_unfreeze') is True
+                and not bool(config.get('eval_only', False))):
+            raise ValueError('shared backbone unfreeze is forbidden by frozen M00 contract')
+        if (config.get('background_training_scope') in (
+                'condition_adapter_only_v1',
+                'dual_maglat_adapter_only_v1',
+                'condition_adapter_joint_fresh_v1')
+                and not bool(config.get('eval_only', False))):
+            raise ValueError('adapter-only Background route is permanently stopped')
+        if self.background_condition_adapter_semantics == 'dual_maglat_smooth_v1':
+            # Compatibility alias for the pre-contract name.
+            self.background_condition_adapter_semantics = 'maglat2_smooth_v1'
+        if self.background_condition_adapter_semantics not in (
+                'disabled', 'lt_signed_abs_sini_periodic_lon_v1',
+                'maglat2_smooth_v1'):
+            raise ValueError(
+                'unknown background condition-adapter semantics: '
+                f"{self.background_condition_adapter_semantics!r}")
+        self.background_adapter_residual_cap = float(config.get(
+            'background_adapter_residual_cap', 0.1))
+        self.background_adapter_low_sini = float(config.get(
+            'background_adapter_low_sini', 0.25))
+        self.background_adapter_high_sini = float(config.get(
+            'background_adapter_high_sini', 0.50))
+        if self.background_adapter_low_sini >= self.background_adapter_high_sini:
+            raise ValueError('background adapter magnetic-latitude thresholds must increase')
+        if self.background_adapter_residual_cap <= 0:
+            raise ValueError('background_adapter_residual_cap must be positive')
+        self.background_training_scope = config.get(
+            'background_training_scope')
+        self.m00_observation_training_scope = config.get(
+            'm00_observation_training_scope', 'disabled')
+        self.background_adapter_rng_seed = config.get(
+            'background_adapter_rng_seed')
+        if self.background_condition_adapter_semantics == 'disabled':
+            self.background_condition_adapter = None
+            self.background_condition_adapter_low = None
+            self.background_condition_adapter_high = None
+        else:
+            # z_background + h_sw + (alt_n, delta_alt) + seven explicit
+            # location/phase features: lat, sin/cos(lon), sin/cos(LT),
+            # signed sin(I), and |sin(I)|.
+            adapter_in_dim = basis_dim + sw_out_dim + 2 + 7
+            # The fresh joint protocol owns an adapter-only RNG stream.  The
+            # fork keeps its construction from perturbing legacy/global model
+            # initialization, while the explicit seed makes its first layer
+            # reproducible independently of data-loader RNG use.
+            if self.background_condition_adapter_semantics == 'maglat2_smooth_v1':
+                self.background_condition_adapter = None
+                try:
+                    adapter_seed = int(self.background_adapter_rng_seed)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        'maglat2_smooth_v1 requires integer '
+                        'background_adapter_rng_seed') from exc
+                with torch.random.fork_rng(devices=[]):
+                    torch.manual_seed(adapter_seed)
+                    self.background_condition_adapter_low = nn.Sequential(
+                        nn.Linear(adapter_in_dim, 32), nn.SiLU(), nn.Linear(32, 1))
+                    self.background_condition_adapter_high = nn.Sequential(
+                        nn.Linear(adapter_in_dim, 32), nn.SiLU(), nn.Linear(32, 1))
+            elif self.background_training_scope == 'condition_adapter_joint_fresh_v1':
+                if self.background_adapter_rng_seed is None:
+                    raise ValueError(
+                        'joint fresh condition adapter requires '
+                        'background_adapter_rng_seed')
+                try:
+                    adapter_seed = int(self.background_adapter_rng_seed)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        'background_adapter_rng_seed must be an integer') from exc
+                with torch.random.fork_rng(devices=[]):
+                    torch.manual_seed(adapter_seed)
+                    self.background_condition_adapter = nn.Sequential(
+                        nn.Linear(adapter_in_dim, 32),
+                        nn.SiLU(),
+                        nn.Linear(32, 1),
+                    )
+            else:
+                self.background_condition_adapter = nn.Sequential(
+                    nn.Linear(adapter_in_dim, 32),
+                    nn.SiLU(),
+                    nn.Linear(32, 1),
+                )
+            self.background_condition_adapter_low = getattr(
+                self, 'background_condition_adapter_low', None)
+            self.background_condition_adapter_high = getattr(
+                self, 'background_condition_adapter_high', None)
 
         # Shared physical observation operator.  It is nonlinear in continuous
         # coordinates/context, but affine in the low-dimensional ETKF state.
@@ -958,6 +1142,26 @@ class FSIA_INR_Model(nn.Module):
                 nn.Linear(mode_in_dim, 64), nn.SiLU(), nn.Linear(64, 7))
 
         self._initialize_weights()
+
+    def _background_condition_features(self, coords, z_background, h_sw,
+                                       alt_n, delta_alt, sin_i):
+        """Build the shared explicit periodic/location feature vector."""
+        lat, lon, _, rel_hour = (coords[:, index] for index in range(4))
+        sin_lt, cos_lt = _compute_local_time_features(lon, rel_hour)
+        lon_rad = torch.deg2rad(lon)
+        return torch.cat((
+            z_background,
+            h_sw,
+            alt_n.unsqueeze(-1),
+            delta_alt.unsqueeze(-1),
+            (lat / 90.0).unsqueeze(-1),
+            torch.sin(lon_rad).unsqueeze(-1),
+            torch.cos(lon_rad).unsqueeze(-1),
+            sin_lt.unsqueeze(-1),
+            cos_lt.unsqueeze(-1),
+            sin_i.unsqueeze(-1),
+            sin_i.abs().unsqueeze(-1),
+        ), dim=-1)
 
     # ------------------------------------------------------------------ #
 
@@ -1028,6 +1232,17 @@ class FSIA_INR_Model(nn.Module):
             torch.cat([context, descriptors], dim=-1)) / math.sqrt(
                 self.kalman_layer.d_model)
 
+    def capture_m00_decoder_baseline(self):
+        """Freeze the loaded A1-S decoder endpoint for the trust-region route."""
+        if self.m00_candidate_semantics != 'm00_decoder_last_trust_region_v1':
+            raise RuntimeError(
+                'decoder baseline capture requires decoder-last candidate semantics')
+        last = self.background_decoder[-1]
+        with torch.no_grad():
+            self.m00_decoder_baseline_weight.copy_(last.weight)
+            self.m00_decoder_baseline_bias.copy_(last.bias)
+            self.m00_decoder_baseline_captured.fill_(True)
+
     def encode_background(self, coords, sw_seq, precomputed_h_sw=None,
                           iri_peak=None):
         """Single source of truth for the frozen/trained Background field."""
@@ -1053,6 +1268,14 @@ class FSIA_INR_Model(nn.Module):
             h_sw = sw_gate * h_sw_freq + (1.0 - sw_gate) * h_sw_time
         else:
             h_sw_freq, sw_gate, h_sw = None, None, h_sw_time
+        if self.m00_candidate_semantics != 'disabled':
+            if iri_peak is None:
+                raise ValueError(
+                    'M00 candidate semantics require explicit IRI peak values')
+            if (iri_peak.ndim != 2 or iri_peak.shape != (batch, 2)
+                    or not torch.isfinite(iri_peak).all()):
+                raise ValueError(
+                    'M00 candidate IRI peak must be finite with shape [B, 2]')
         if iri_peak is None:
             iri_peak = torch.stack([
                 torch.full((batch,), 300.0, device=coords.device),
@@ -1065,11 +1288,117 @@ class FSIA_INR_Model(nn.Module):
             h_iri, delta_alt.unsqueeze(-1),
             ((nmf2 - 11.0) / 2.0).unsqueeze(-1),
         ], dim=-1))
-        background_residual_raw = self.background_residual_cap * torch.tanh(
-            self.background_decoder(torch.cat([
+        if self.background_decoder_conditioning == 'explicit_geo_lt_v1':
+            decoder_input = self._background_condition_features(
+                coords, z_background, h_sw, alt_n, delta_alt, sin_i)
+        else:
+            decoder_input = torch.cat([
                 z_background, h_sw, alt_n.unsqueeze(-1),
                 delta_alt.unsqueeze(-1),
-            ], dim=-1)))
+            ], dim=-1)
+        background_base_logit = self.background_decoder(decoder_input)
+        background_base_residual_raw = self.background_residual_cap * torch.tanh(
+            background_base_logit)
+        background_residual_raw = background_base_residual_raw
+        candidate_delta = torch.zeros_like(background_residual_raw)
+        candidate_window = torch.zeros_like(background_residual_raw)
+        if self.m00_candidate_semantics == 'm00_decoder_last_trust_region_v1':
+            if not bool(self.m00_decoder_baseline_captured.item()):
+                raise RuntimeError(
+                    'capture_m00_decoder_baseline() must be called after loading '
+                    'the A1-S seed checkpoint')
+            hidden = self.background_decoder[:-1](decoder_input)
+            baseline_logit = torch.nn.functional.linear(
+                hidden, self.m00_decoder_baseline_weight,
+                self.m00_decoder_baseline_bias)
+            baseline_residual = self.background_residual_cap * torch.tanh(
+                baseline_logit)
+            trained_residual = self.background_residual_cap * torch.tanh(
+                background_base_logit)
+            candidate_delta = self.m00_candidate_residual_cap * torch.tanh(
+                (trained_residual - baseline_residual)
+                / self.m00_candidate_residual_cap)
+            candidate_window = _smoothstep01(
+                ((alt - 200.0) / 20.0).clamp(0.0, 1.0)).unsqueeze(-1)
+            background_base_residual_raw = baseline_residual
+            background_residual_raw = baseline_residual + (
+                candidate_window * candidate_delta)
+        elif self.m00_candidate_semantics == 'm00_peak_relative_lowrank3_v1':
+            peak_alt = hmf2.detach()
+            peak_alt_n = (2.0 * (peak_alt - self.alt_min)
+                          / (self.alt_max - self.alt_min) - 1.0)
+            _, peak_h_iri = self.get_background_with_features(
+                lat, lon, peak_alt, time)
+            peak_z = self.iri_align_net(torch.cat([
+                peak_h_iri, torch.zeros_like(peak_alt).unsqueeze(-1),
+                ((nmf2 - 11.0) / 2.0).unsqueeze(-1),
+            ], dim=-1)).detach()
+            if self.use_sw_freq:
+                peak_gate_input = torch.cat([
+                    h_sw_time, peak_alt_n.unsqueeze(-1),
+                    sin_i.abs().unsqueeze(-1), cos_sza.unsqueeze(-1),
+                    sin_doy.unsqueeze(-1), cos_doy.unsqueeze(-1),
+                ], dim=-1)
+                peak_gate = torch.sigmoid(self.sw_gate(peak_gate_input))
+                peak_h_sw = (peak_gate * h_sw_freq
+                             + (1.0 - peak_gate) * h_sw_time)
+            else:
+                peak_h_sw = h_sw_time
+            coefficients = self.m00_peak_relative_head(torch.cat([
+                peak_z, peak_h_sw.detach()], dim=-1))
+            x = (alt - peak_alt) / self.m00_peak_relative_scale_km
+            gaussian = torch.exp(-0.5 * x.square())
+            basis = torch.stack([
+                gaussian,
+                x * gaussian / math.exp(-0.5),
+                (x.square() - 1.0) * gaussian,
+            ], dim=-1)
+            raw_delta = (coefficients * basis).sum(dim=-1, keepdim=True)
+            candidate_delta = self.m00_candidate_residual_cap * torch.tanh(
+                raw_delta / self.m00_candidate_residual_cap)
+            candidate_window = _smoothstep01(
+                ((alt - 200.0) / 20.0).clamp(0.0, 1.0)).unsqueeze(-1)
+            background_residual_raw = background_base_residual_raw + (
+                candidate_window * candidate_delta)
+        adapter_delta = torch.zeros_like(background_residual_raw)
+        adapter_gate = torch.zeros_like(background_residual_raw)
+        if self.background_condition_adapter_low is not None:
+            adapter_features = self._background_condition_features(
+                coords, z_background, h_sw, alt_n, delta_alt, sin_i)
+            # Smoothly transition over the existing low/mid/high |sin(I)| bands.
+            mag = sin_i.abs()
+            lo = self.background_adapter_low_sini
+            hi = self.background_adapter_high_sini
+            gate = background_adapter_gate(mag, lo, hi)
+            adapter_gate = gate.unsqueeze(-1)
+            low = self.background_adapter_residual_cap * torch.tanh(
+                self.background_condition_adapter_low(adapter_features))
+            high = self.background_adapter_residual_cap * torch.tanh(
+                self.background_condition_adapter_high(adapter_features))
+            adapter_delta = (1.0 - gate).unsqueeze(-1) * low + gate.unsqueeze(-1) * high
+            # Both adapters are combined in the decoder logit, then one
+            # unified tanh enforces the legacy +/-0.5 dex Background cap.
+            background_residual_raw = self.background_residual_cap * torch.tanh(
+                background_base_logit + adapter_delta)
+        elif self.background_condition_adapter is not None:
+            adapter_features = self._background_condition_features(
+                coords, z_background, h_sw, alt_n, delta_alt, sin_i)
+            adapter_delta = self.background_adapter_residual_cap * torch.tanh(
+                self.background_condition_adapter(adapter_features))
+            # Keep the total Background residual within the legacy cap.
+            background_residual_raw = (
+                background_residual_raw + adapter_delta
+            ).clamp(-self.background_residual_cap,
+                    self.background_residual_cap)
+        if self.background_semantics == 'raw_iri_fixed_v1':
+            # Keep z_background/h_sw available to Analysis, while disabling
+            # every learned M00 correction (including condition adapters).
+            background_residual_raw = torch.zeros_like(background_residual_raw)
+            background_base_residual_raw = torch.zeros_like(background_base_residual_raw)
+            adapter_delta = torch.zeros_like(adapter_delta)
+            adapter_gate = torch.zeros_like(adapter_gate)
+        adapter_effective_delta = (
+            background_residual_raw - background_base_residual_raw)
         background_trust = background_trust_gate(
             coords,
             enabled=self.background_trust_gate_enabled,
@@ -1084,8 +1413,16 @@ class FSIA_INR_Model(nn.Module):
         return {
             'ne_bkg': ne_iri + background_residual,
             'ne_iri': ne_iri,
+            'background_semantics': self.background_semantics,
+            'ne_iri': ne_iri,
             'background_residual': background_residual,
             'background_residual_raw': background_residual_raw,
+            'background_base_residual_raw': background_base_residual_raw,
+            'background_adapter_delta': adapter_delta,
+            'background_adapter_effective_delta': adapter_effective_delta,
+            'background_adapter_gate': adapter_gate,
+            'm00_candidate_delta': candidate_delta,
+            'm00_candidate_window': candidate_window,
             'background_trust_gate': background_trust,
             'z_background': z_background,
             'h_sw': h_sw,
@@ -1413,6 +1750,11 @@ class FSIA_INR_Model(nn.Module):
             'ne_bkg': background['ne_bkg'], 'ne_iri': background['ne_iri'],
             'background_residual': background['background_residual'],
             'background_residual_raw': background['background_residual_raw'],
+            'background_base_residual_raw': background['background_base_residual_raw'],
+            'background_adapter_delta': background['background_adapter_delta'],
+            'background_adapter_effective_delta': background[
+                'background_adapter_effective_delta'],
+            'background_adapter_gate': background['background_adapter_gate'],
             'background_trust_gate': background['background_trust_gate'],
             'ne_residual': ne_delta,
             'h_iri_aligned': background['z_background'],
@@ -1626,6 +1968,11 @@ class FSIA_INR_Model(nn.Module):
             'ne_iri':         ne_iri,
             'background_residual': background_residual,
             'background_residual_raw': background['background_residual_raw'],
+            'background_base_residual_raw': background['background_base_residual_raw'],
+            'background_adapter_delta': background['background_adapter_delta'],
+            'background_adapter_effective_delta': background[
+                'background_adapter_effective_delta'],
+            'background_adapter_gate': background['background_adapter_gate'],
             'background_trust_gate': background['background_trust_gate'],
             'ne_residual':    Ne_delta,
             'h_iri_aligned':  f_iri,
@@ -1715,6 +2062,18 @@ class FSIA_INR_Model(nn.Module):
             'hx_condition_M11': etkf['hx_condition_M11'],
             'hx_valid_M11': etkf['hx_valid_M11'],
         }
+        if self.analysis_output_semantics == 'causal_context_background_v1':
+            extras['ne_causal_background'] = Ne_fused
+            extras['causal_background_increment'] = Ne_delta
+            for source, payload in (('FY', fy_obs), ('COSMIC', cosmic_obs)):
+                valid = payload['valid_mask'].bool()
+                profiles = payload.get('profile_id')
+                extras[f'history_token_count_{source}'] = valid.sum()
+                extras[f'history_unique_profile_count_{source}'] = (
+                    torch.unique(profiles[valid]).numel()
+                    if profiles is not None and valid.any() else 0)
+                extras[f'history_localization_weight_{source}'] = payload.get(
+                    'localization_weight')
 
         return Ne_fused, log_var, ne_placeholder, Ne_delta, extras
 
@@ -1729,6 +2088,14 @@ class FSIA_INR_Model(nn.Module):
             nn.init.zeros_(self.mode_residual[-1].bias)
         nn.init.zeros_(self.background_decoder[-1].weight)
         nn.init.zeros_(self.background_decoder[-1].bias)
+        if self.background_condition_adapter is not None:
+            nn.init.zeros_(self.background_condition_adapter[-1].weight)
+            nn.init.zeros_(self.background_condition_adapter[-1].bias)
+        for adapter in (self.background_condition_adapter_low,
+                        self.background_condition_adapter_high):
+            if adapter is not None:
+                nn.init.zeros_(adapter[-1].weight)
+                nn.init.zeros_(adapter[-1].bias)
         nn.init.zeros_(self.iri_align_net[-1].weight)
         nn.init.zeros_(self.iri_align_net[-1].bias)
 

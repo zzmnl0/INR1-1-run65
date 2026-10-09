@@ -32,6 +32,24 @@ else:
 
 
 CONFIG_MDIA = {
+    # Frozen low-dimensional ETKF contract (v2 audit only; state shapes stay
+    # compatible with historical A1-S checkpoints).
+    'low_dim_assimilation_semantics': 'shared_latent_etkf_v1',
+    'basis_dim': 64,
+    'enkf_n_members': 8,
+    'enkf_anomaly_parameterization': 'orthogonal_factor',
+    'analysis_state_semantics': 'legacy_feature_increment',
+    'density_basis_semantics': 'endpoint_context_symmetric',
+    'mode_mapping': 'M10:FY,M01:COSMIC,M11:FY+COSMIC',
+    'm00_status': 'frozen_a1s_epoch3',
+    'adapter_route': 'stopped_permanently',
+    'shared_backbone_unfreeze': False,
+    'locked_test_policy': 'excluded',
+    # QD changes calibration strata only when an experiment explicitly opts in.
+    # The legacy A1-S path has no magnetic calibration coordinate.
+    'magnetic_stratum_semantics': 'disabled',
+    'model_gate_semantics': 'dipole_abs_sin_i_v1',
+    'localization_enabled': False,
     # ==================== 数据路径 ====================
     'fy_path': r'D:\FYsatellite\EDP_data\fy_202409_qc_v2.npy',
     'fy_profile_path': None,
@@ -139,8 +157,16 @@ CONFIG_MDIA = {
     'use_date_blocked_split': True,
     'date_split_manifest': (
         r'isr_validation_outputs\run66-modelonly-m0\date_split_manifest.json'),
+    'date_split_semantics': None,
     'development_days': 5,
     'locked_test_days': 5,
+    # A1-S2 uses one fixed source-specific time-local profile manifest.  None
+    # keeps the legacy UTC-date split unchanged.
+    'profile_split_semantics': None,
+    'profile_split_path': None,
+    'profile_split_seed': 42,
+    'profile_split_dev_ratio': 0.20,
+    'profile_split_time_block_hours': 0.5,
 
     # ==================== run66 两阶段损失 ====================
     'background_epochs': 5,
@@ -159,8 +185,33 @@ CONFIG_MDIA = {
     'background_stratum_bias_gradient_target': 0.0,
     'background_stratum_bias_calibration_batches': 20,
     'w_background_stratum_bias': 0.0,
+    # M00 night v2 keeps the resolved legacy height/daynight coefficient and
+    # calibrates only the independent six-cell magnetic/daynight term.
+    'background_magnetic_daynight_gradient_target': 0.0125,
+    'background_magnetic_daynight_calibration_batches': 20,
+    'resolved_background_magnetic_daynight_weight': None,
+    'background_magnetic_daynight_gradient_calibration': None,
+    # ``height_daynight_v1`` is the legacy four-cell penalty.  The M00
+    # sparse-coverage candidate adds a separate coarse magnetic view without
+    # crossing it with altitude or local time.
+    'background_bias_grouping': 'height_daynight_v1',
+    'background_bias_magnetic_min_profiles': 30,
+    'background_bias_magnetic_min_batch_profiles': 8,
+    'background_bias_magnetic_weight': 0.5,
+    'background_bias_magnetic_daynight_labels': None,
+    'background_bias_magnetic_support_counts': None,
+    'background_bias_magnetic_support_semantics': None,
     'background_checkpoint_selection': 'legacy',
     'background_selection_baseline': None,
+    # Optional conditional profile-shape objective for the M00 experiment.
+    # Disabled preserves the A1-S2 loss and update path exactly.
+    'background_shape_loss': 'disabled',
+    'background_shape_gradient_target': 0.02,
+    'background_shape_calibration_batches': 20,
+    'background_shape_min_profiles_per_cell': 8,
+    'resolved_background_shape_weight': None,
+    'background_shape_gradient_calibration': None,
+    'background_selection_baseline_checkpoint': None,
     'w_vertical_analysis': 0.05,
     'w_time_analysis': 0.0033,
     'analysis_loss_active_only': False,
@@ -181,6 +232,46 @@ CONFIG_MDIA = {
     'structure_time_step_hours': 1.0,
     'structure_huber_beta': 0.05,
     'background_residual_cap': 0.5,
+    # Base Background decoder input contract.  Legacy keeps old checkpoints
+    # bit-compatible; explicit_geo_lt_v1 uses the existing seven local/phase
+    # features without changing hidden width or residual bounds.
+    'background_decoder_conditioning': 'legacy_v1',
+    # Optional M00 condition adapter.  ``disabled`` preserves A1-S behavior.
+    'background_condition_adapter': 'disabled',
+    # A1-S7 M00-B: two smooth magnetic-latitude residual branches with a
+    # source/date/physical-stratum balanced profile schedule.  Disabled by
+    # default so A1-S/A1-S2 manifests retain their historical semantics.
+    'background_adapter_gate_semantics':
+        'abs_sinI_025_050_smoothstep_v1',
+    'background_sampling_semantics': 'legacy_profile_time_bin_v1',
+    'background_fixed_updates_per_epoch': None,
+    'background_source_quota_semantics': 'legacy_cycle_shorter_v1',
+    'background_physical_stratum_quota_cap': 1.0,
+    'background_profile_schedule_seed': 42,
+    'background_profile_schedule_version': 'legacy_v1',
+    'checkpoint_semantic': 'a1s_legacy_v1',
+    'background_adapter_seed_checkpoint': None,
+    'background_adapter_rng_seed': 43,
+    'background_training_scope': 'full_background_v1',
+    'background_adapter_residual_cap': 0.1,
+    # A1-S8 M00-preserve: frozen A1-S trunk, dual magnetic-latitude adapters,
+    # gate-aware mixed sampling and an output trust-region anchor.
+    'background_anchor_semantics': 'disabled',
+    'background_anchor_gradient_target': 0.10,
+    'background_anchor_calibration_batches': 20,
+    'background_anchor_warmup_epochs': 1,
+    'background_gate_balance_semantics': 'disabled',
+    'background_source_mix_schedule': 'equal_v1',
+    'background_mix_legacy_fraction': 1.0,
+    'background_mix_balanced_fraction': 0.0,
+    'background_exposure_weight_cap': 3.0,
+    'background_gradient_ratio_min': 0.25,
+    'background_gradient_ratio_max': 4.0,
+    'background_low_effective_mass_min': 0.25,
+    'background_low_effective_mass_max': 0.35,
+    'background_high_effective_mass_min': 0.65,
+    'background_high_effective_mass_max': 0.75,
+    'skip_hash_verification': False,
     # 固定有效观测方差的初值；Background 阶段结束后由训练集残差稳健校准。
     'r_fy_init': 0.04,
     'r_cosmic_init': 0.04,
@@ -203,6 +294,65 @@ CONFIG_MDIA = {
     'background_seed_ckpt': None,
     'source_dropout': (0.25, 0.25, 0.50),  # M10, M01, M11
     'source_mode_schedule': 'random_profile',
+    # A1-S4 optionally trains an analysis-only causal history update on a
+    # frozen A1-S2 Background.  Defaults preserve the legacy symmetric M11.
+    'analysis_training_scope': 'full_analysis_v1',
+    'analysis_output_semantics': 'm11_feature_letkf_v1',
+    'analysis_observation_time_support': 'symmetric_legacy_v1',
+    'analysis_seed_background': None,
+    # A1-S5 names the source-neutral M00 anchor; A1-S4 keeps the legacy name.
+    'causal_background_anchor': 'a1s2_m00_v1',
+    'r_source': 'train_only_recalibrated_v1',
+    'r_fy_fixed': None,
+    'r_cosmic_fixed': None,
+    # Optional M00 observation-error calibration.  Disabled preserves A1-S.
+    'm00_observation_calibration_semantics': 'disabled',
+    'm00_observation_bias_path': None,
+    'm00_observation_r_path': None,
+    # A1-S epoch-3 Background used as the frozen starting point for the
+    # observation-error-only M00 route.  Weight-only loading is intentional;
+    # optimizer/scheduler state is never inherited.
+    'm00_observation_seed_checkpoint': None,
+    'm00_observation_stage': 'bias_r',
+    'm00_observation_weight_cap': 4.0,
+    'm00_observation_variance_floor': 1e-6,
+    'm00_observation_variance_cap': 1e6,
+    'm00_representativeness_enabled': False,
+    'm00_localization_enabled': False,
+    'm00_observation_magnetic_sin_i_fy': None,
+    'm00_observation_magnetic_sin_i_cosmic': None,
+    'm00_observation_aacgm_latitude_fy': None,
+ 'm00_observation_aacgm_latitude_cosmic': None,
+ 'm00_observation_qd_latitude_fy': None,
+ 'm00_observation_qd_latitude_cosmic': None,
+    # Strict v2 sidecars are row/profile aligned AACGM arrays.  They are
+    # loaded for calibration/audit only and never concatenated to model input.
+ 'm00_observation_magnetic_sidecar_fy': None,
+ 'm00_observation_magnetic_sidecar_cosmic': None,
+ 'm00_observation_qd_sidecar_fy': None,
+ 'm00_observation_qd_sidecar_cosmic': None,
+ 'm00_observation_strict_magnetic': False,
+    'm00_observation_aacgm_version': 'aacgmv2',
+    'm00_observation_aacgm_reference_time_utc': None,
+    'm00_observation_aacgm_actual_height_semantics': 'row_altitude_km_v1',
+    'm00_localization_semantics': 'm00_3d_localization_v2',
+    'm00_localization_time_semantics': 'relative_utc_hours_v1',
+    'm00_localization_vertical_scale_km': 100.0,
+    'm00_calibration_frozen': False,
+    'm00_calibration_applied': False,
+    'm00_observation_training_scope': 'disabled',
+    # Ordered, independent M00 candidate routes.  Disabled preserves A1-S.
+    'm00_candidate_semantics': 'disabled',
+    'm00_candidate_residual_cap': 0.05,
+    'm00_peak_relative_scale_km': 100.0,
+    'm00_transition_status': 'active',
+    'a1s9_semantics': 'a1s9_m00_strict_baseline_v1',
+    'a1s9_background_seed': None,
+    'a1s9_anchor_gradient_target': 0.20,
+    'a1s9_adapter_residual_cap': 0.05,
+    'a1s9_fixed_updates_per_epoch': 960,
+    'a1s9_selector': 'bias_constrained_v1',
+    'a1s9_status': 'not_run',
 
     # ==================== 梯度裁剪 ====================
     'grad_clip': 1.0,
@@ -291,7 +441,11 @@ def print_config_mdia():
         '训练超参数': ['batch_size', 'lr', 'weight_decay', 'background_epochs',
                        'analysis_epochs', 'seed', 'analysis_seed', 'device',
                        'num_workers', 'use_memmap', 'train_profile_fraction',
-                       'profile_subset_manifest', 'background_training_semantics',
+                       'profile_subset_manifest', 'profile_split_semantics',
+                       'profile_split_path', 'profile_split_seed',
+                       'profile_split_dev_ratio',
+                       'profile_split_time_block_hours',
+                       'background_training_semantics',
                        'background_only', 'background_trust_gate_enabled',
                        'background_trust_gate_semantics',
                        'background_trust_gate_altitude_core_km',
@@ -307,8 +461,29 @@ def print_config_mdia():
                     'background_stratum_bias_gradient_target',
                     'background_stratum_bias_calibration_batches',
                     'w_background_stratum_bias',
+                    'background_magnetic_daynight_gradient_target',
+                    'background_magnetic_daynight_calibration_batches',
+                    'resolved_background_magnetic_daynight_weight',
                     'background_checkpoint_selection',
                     'background_selection_baseline',
+                    'background_selection_baseline_checkpoint',
+                    'background_shape_loss',
+                    'background_shape_gradient_target',
+                    'background_shape_calibration_batches',
+                    'background_shape_min_profiles_per_cell',
+                    'background_decoder_conditioning',
+                    'background_condition_adapter',
+                    'background_adapter_gate_semantics',
+                    'background_sampling_semantics',
+                    'background_fixed_updates_per_epoch',
+                    'background_source_quota_semantics',
+                    'background_physical_stratum_quota_cap',
+                    'background_profile_schedule_seed',
+                    'background_profile_schedule_version',
+                    'checkpoint_semantic',
+                    'background_adapter_seed_checkpoint',
+                    'background_training_scope',
+                    'background_adapter_residual_cap',
                     'w_vertical_analysis', 'w_time_analysis',
                     'analysis_loss_active_only',
                     'analysis_exact_mode_loss',

@@ -5,6 +5,7 @@ from traditional_static_etkf.core import GRID, generate_static_ensemble
 from traditional_static_etkf.runner import (
     _analyze_points,
     _key,
+    _load_online_indices,
     _strict_join_canonical,
 )
 
@@ -121,3 +122,42 @@ def test_200_km_observation_has_low_altitude_cross_covariance():
         {"FY": np.asarray([1]), "COSMIC": np.empty(0, dtype=np.int64)})
     assert np.all(result["status"] == "FY-only")
     assert abs(result["etkf"][0] - result["iri_grid"][0]) > 1e-6
+
+
+def test_shared_full30_profile_split_overrides_legacy_online_pool(
+        monkeypatch, tmp_path):
+    from inr_modules.data_managers.profile_split import (
+        SEMANTICS, save_profile_split)
+
+    split_path = tmp_path / "profile_split.npz"
+    save_profile_split(split_path, {
+        "semantics": SEMANTICS,
+        "seed": 42,
+        "sources": {
+            "FY": {"train": np.asarray([1, 3]),
+                   "development": np.asarray([2])},
+            "COSMIC": {"train": np.asarray([11]),
+                       "development": np.asarray([12, 13])},
+        },
+    })
+    monkeypatch.setattr(
+        "traditional_static_etkf.runner._FULL30_PROFILE_COUNTS",
+        {"FY": 3, "COSMIC": 3})
+    observed = {}
+
+    def fake_index(source, config, allowed_ids):
+        observed[source] = np.asarray(allowed_ids, dtype=np.int64)
+        return source
+
+    monkeypatch.setattr("traditional_static_etkf.runner._load_source_index",
+                        fake_index)
+    indexes, allowed, audit = _load_online_indices(
+        {}, {}, shared_full30_profile_split=split_path)
+
+    assert indexes == {"FY": "FY", "COSMIC": "COSMIC"}
+    assert np.array_equal(allowed["FY"], [1, 2, 3])
+    assert np.array_equal(allowed["COSMIC"], [11, 12, 13])
+    assert np.array_equal(observed["FY"], allowed["FY"])
+    assert audit["observation_pool_semantics"] == (
+        "shared_full30_a1s2_profile_split_v1")
+    assert audit["FY"]["online_profiles"] == 3

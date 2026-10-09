@@ -1,10 +1,12 @@
-"""Canonical, side-effect-free contracts for the hybrid M2-W v14 run."""
+"""Canonical, side-effect-free contracts for strict FSIA run domains."""
 
 import math
 import statistics
 
 HYBRID_DOMAIN_SEMANTICS = 'hybrid_120_500_model_200_500_observation_v1'
 TRAINING_PROTOCOL_REVISION = 'v14_hybrid_gram_calibration_v2'
+A2S1_DOMAIN_SEMANTICS = 'a2s_model120_500_obs120_500_peak200_500_v1'
+A2S1_TRAINING_PROTOCOL_REVISION = 'a2s1_a1s_legacy_120_500_v1'
 GRAM_WEIGHT_RESOLUTION_SEMANTICS = (
     'target_over_median_no_lower_clip_reject_gt_one_v1')
 GRADIENT_PARAMETER_SCOPE = (
@@ -144,6 +146,62 @@ def canonical_v14_config(smoke_run=False):
         'low_altitude_gradient_ratio_max': 0.25,
         **{key: value for key, value in protocol.items()
            if key != 'low_altitude_prior_protocol'},
+    }
+
+
+def canonical_a2s1_training_protocol(smoke_run=False):
+    """A2S1 keeps A1S legacy sampling while retaining the fixed loss contract."""
+    protocol = canonical_v14_training_protocol(smoke_run)
+    protocol.update({
+        'training_protocol_revision': A2S1_TRAINING_PROTOCOL_REVISION,
+        'background_sampling_semantics': 'legacy_profile_time_bin_v1',
+        'background_source_quota_semantics': 'legacy_cycle_shorter_v1',
+        'background_profile_schedule_version': 'legacy_v1',
+        'pairing': 'cycle_shorter_source_max_loader_length',
+    })
+    return protocol
+
+
+def build_a2s1_training_protocol(config):
+    """Normalize an A2S1 config for manifests and resumable state."""
+    protocol = build_v14_training_protocol(config)
+    protocol.update({
+        'training_protocol_revision': config.get(
+            'training_protocol_revision'),
+        'background_sampling_semantics': config.get(
+            'background_sampling_semantics'),
+        'background_source_quota_semantics': config.get(
+            'background_source_quota_semantics'),
+        'background_profile_schedule_version': config.get(
+            'background_profile_schedule_version'),
+        'pairing': 'cycle_shorter_source_max_loader_length',
+    })
+    return protocol
+
+
+def canonical_a2s1_config(smoke_run=False):
+    """Config fields that must match the fixed A2S1 contract."""
+    protocol = canonical_a2s1_training_protocol(smoke_run)
+    return {
+        'checkpoint_format_version': 15,
+        'model_domain_semantics': A2S1_DOMAIN_SEMANTICS,
+        'alt_range': (120.0, 500.0),
+        'observation_alt_range': (120.0, 500.0),
+        'peak_search_alt_range': (200.0, 500.0),
+        'low_altitude_prior_range': (120.0, 200.0),
+        'low_altitude_prior_semantics': (
+            'soft_iri_background_zero_analysis_increment_v1'),
+        'low_altitude_anchor_levels_km': tuple(
+            float(value) for value in range(120, 200, 10)),
+        'low_altitude_anchor_profiles_per_source': 16,
+        'w_low_altitude_background_iri': 0.02,
+        'w_low_altitude_analysis_increment': 0.01,
+        'low_altitude_gradient_ratio_max': 0.25,
+        'background_sampling_semantics': 'legacy_profile_time_bin_v1',
+        'background_source_quota_semantics': 'legacy_cycle_shorter_v1',
+        'background_profile_schedule_version': 'legacy_v1',
+        **{key: value for key, value in protocol.items()
+           if key not in ('low_altitude_prior_protocol', 'pairing')},
     }
 
 

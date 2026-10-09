@@ -1,0 +1,2556 @@
+{
+  "scope": "Current CONFIG_MDIA literals plus main and three sensitivity run initial/resolved/summary records",
+  "rows": [
+    {
+      "key": "analysis_loss_active_only",
+      "current_literal_default": false,
+      "runs": {
+        "main": {
+          "initial_value": false,
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 1.5550329423250582e-06,
+            "resolved_background_stratum_bias_weight": 0.015319562115810564
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N4D64": {
+          "initial_value": false,
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 6.593058558818565e-07,
+            "resolved_background_stratum_bias_weight": 0.015236347148194305
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N8D32": {
+          "initial_value": false,
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 8.298275600704441e-06,
+            "resolved_background_stratum_bias_weight": 0.01464220248565664
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N8D64_REPRODUCTION": {
+          "initial_value": false,
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 1.5550329423250582e-06,
+            "resolved_background_stratum_bias_weight": 0.015319562115810564
+          },
+          "summary_same_key": "NOT_RECORDED"
+        }
+      },
+      "references": [
+        {
+          "file": "inr_modules/config_mdia.py",
+          "line": 217
+        },
+        {
+          "file": "inr_modules/config_mdia.py",
+          "line": 488
+        },
+        {
+          "file": "main_fsia.py",
+          "line": 900
+        },
+        {
+          "file": "main_fsia.py",
+          "line": 901
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 2713
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 3603
+        }
+      ],
+      "disposition": "KEEP_CONTROL_OR_PENDING_EFFECTIVE_USE"
+    },
+    {
+      "key": "background_mix_balanced_fraction",
+      "current_literal_default": 0.0,
+      "runs": {
+        "main": {
+          "initial_value": "NOT_RECORDED",
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 1.5550329423250582e-06,
+            "resolved_background_stratum_bias_weight": 0.015319562115810564
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N4D64": {
+          "initial_value": "NOT_RECORDED",
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 6.593058558818565e-07,
+            "resolved_background_stratum_bias_weight": 0.015236347148194305
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N8D32": {
+          "initial_value": "NOT_RECORDED",
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 8.298275600704441e-06,
+            "resolved_background_stratum_bias_weight": 0.01464220248565664
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N8D64_REPRODUCTION": {
+          "initial_value": "NOT_RECORDED",
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 1.5550329423250582e-06,
+            "resolved_background_stratum_bias_weight": 0.015319562115810564
+          },
+          "summary_same_key": "NOT_RECORDED"
+        }
+      },
+      "references": [
+        {
+          "file": "inr_modules/config_mdia.py",
+          "line": 266
+        },
+        {
+          "file": "main_fsia.py",
+          "line": 420
+        },
+        {
+          "file": "main_fsia.py",
+          "line": 421
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 956
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 2447
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 9391
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 956
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 9392
+        }
+      ],
+      "disposition": "REVIEW_WITH_BRANCH_GROUP_KEEP_NEUTRAL_BEHAVIOR"
+    },
+    {
+      "key": "background_only",
+      "current_literal_default": false,
+      "runs": {
+        "main": {
+          "initial_value": true,
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 1.5550329423250582e-06,
+            "resolved_background_stratum_bias_weight": 0.015319562115810564
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N4D64": {
+          "initial_value": false,
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 6.593058558818565e-07,
+            "resolved_background_stratum_bias_weight": 0.015236347148194305
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N8D32": {
+          "initial_value": false,
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 8.298275600704441e-06,
+            "resolved_background_stratum_bias_weight": 0.01464220248565664
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N8D64_REPRODUCTION": {
+          "initial_value": false,
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 1.5550329423250582e-06,
+            "resolved_background_stratum_bias_weight": 0.015319562115810564
+          },
+          "summary_same_key": "NOT_RECORDED"
+        }
+      },
+      "references": [
+        {
+          "file": "inr_modules/config_mdia.py",
+          "line": 67
+        },
+        {
+          "file": "inr_modules/config_mdia.py",
+          "line": 449
+        },
+        {
+          "file": "main_fsia.py",
+          "line": 236
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 7779
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 8863
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 7357
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 7392
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 7408
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 7415
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 7431
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 7582
+        }
+      ],
+      "disposition": "KEEP_CONTROL_OR_PENDING_EFFECTIVE_USE"
+    },
+    {
+      "key": "background_stratum_bias_gradient_target",
+      "current_literal_default": 0.0,
+      "runs": {
+        "main": {
+          "initial_value": 0.05,
+          "resolved_same_key": 0.05,
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 1.5550329423250582e-06,
+            "resolved_background_stratum_bias_weight": 0.015319562115810564
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N4D64": {
+          "initial_value": 0.05,
+          "resolved_same_key": 0.05,
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 6.593058558818565e-07,
+            "resolved_background_stratum_bias_weight": 0.015236347148194305
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N8D32": {
+          "initial_value": 0.05,
+          "resolved_same_key": 0.05,
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 8.298275600704441e-06,
+            "resolved_background_stratum_bias_weight": 0.01464220248565664
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N8D64_REPRODUCTION": {
+          "initial_value": 0.05,
+          "resolved_same_key": 0.05,
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 1.5550329423250582e-06,
+            "resolved_background_stratum_bias_weight": 0.015319562115810564
+          },
+          "summary_same_key": "NOT_RECORDED"
+        }
+      },
+      "references": [
+        {
+          "file": "inr_modules/config_mdia.py",
+          "line": 185
+        },
+        {
+          "file": "inr_modules/config_mdia.py",
+          "line": 461
+        },
+        {
+          "file": "main_fsia.py",
+          "line": 792
+        },
+        {
+          "file": "main_fsia.py",
+          "line": 794
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 899
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 9201
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 2851
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 899
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 8295
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 8929
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 9202
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 8296
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 8930
+        }
+      ],
+      "disposition": "KEEP_EFFECTIVE_ACTIVE"
+    },
+    {
+      "key": "background_trust_gate_enabled",
+      "current_literal_default": false,
+      "runs": {
+        "main": {
+          "initial_value": false,
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 1.5550329423250582e-06,
+            "resolved_background_stratum_bias_weight": 0.015319562115810564
+          },
+          "summary_same_key": false
+        },
+        "FNDA_V8_N4D64": {
+          "initial_value": false,
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 6.593058558818565e-07,
+            "resolved_background_stratum_bias_weight": 0.015236347148194305
+          },
+          "summary_same_key": false
+        },
+        "FNDA_V8_N8D32": {
+          "initial_value": false,
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 8.298275600704441e-06,
+            "resolved_background_stratum_bias_weight": 0.01464220248565664
+          },
+          "summary_same_key": false
+        },
+        "FNDA_V8_N8D64_REPRODUCTION": {
+          "initial_value": false,
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 1.5550329423250582e-06,
+            "resolved_background_stratum_bias_weight": 0.015319562115810564
+          },
+          "summary_same_key": false
+        }
+      },
+      "references": [
+        {
+          "file": "inr_modules/config_mdia.py",
+          "line": 72
+        },
+        {
+          "file": "inr_modules/config_mdia.py",
+          "line": 449
+        },
+        {
+          "file": "main_fsia.py",
+          "line": 238
+        },
+        {
+          "file": "main_fsia.py",
+          "line": 919
+        },
+        {
+          "file": "main_fsia.py",
+          "line": 239
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 211
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 7130
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 7735
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 9253
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 212
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 7131
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 8848
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 9254
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 8195
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 8849
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 7700
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 7705
+        },
+        {
+          "file": "inr_modules/mdia/fsia_model.py",
+          "line": 946
+        }
+      ],
+      "disposition": "REVIEW_WITH_BRANCH_GROUP_KEEP_NEUTRAL_BEHAVIOR"
+    },
+    {
+      "key": "eval_only",
+      "current_literal_default": "NOT_LITERAL",
+      "runs": {
+        "main": {
+          "initial_value": false,
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 1.5550329423250582e-06,
+            "resolved_background_stratum_bias_weight": 0.015319562115810564
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N4D64": {
+          "initial_value": false,
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 6.593058558818565e-07,
+            "resolved_background_stratum_bias_weight": 0.015236347148194305
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N8D32": {
+          "initial_value": false,
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 8.298275600704441e-06,
+            "resolved_background_stratum_bias_weight": 0.01464220248565664
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N8D64_REPRODUCTION": {
+          "initial_value": false,
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 1.5550329423250582e-06,
+            "resolved_background_stratum_bias_weight": 0.015319562115810564
+          },
+          "summary_same_key": "NOT_RECORDED"
+        }
+      },
+      "references": [
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 8284
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 7690
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 8088
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 7717
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 8101
+        },
+        {
+          "file": "inr_modules/mdia/fsia_model.py",
+          "line": 1038
+        },
+        {
+          "file": "inr_modules/mdia/fsia_model.py",
+          "line": 1041
+        },
+        {
+          "file": "inr_modules/mdia/fsia_model.py",
+          "line": 1047
+        }
+      ],
+      "disposition": "KEEP_CONTROL_OR_PENDING_EFFECTIVE_USE"
+    },
+    {
+      "key": "include_isr_overlay",
+      "current_literal_default": "NOT_LITERAL",
+      "runs": {
+        "main": {
+          "initial_value": false,
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 1.5550329423250582e-06,
+            "resolved_background_stratum_bias_weight": 0.015319562115810564
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N4D64": {
+          "initial_value": false,
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 6.593058558818565e-07,
+            "resolved_background_stratum_bias_weight": 0.015236347148194305
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N8D32": {
+          "initial_value": false,
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 8.298275600704441e-06,
+            "resolved_background_stratum_bias_weight": 0.01464220248565664
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N8D64_REPRODUCTION": {
+          "initial_value": false,
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 1.5550329423250582e-06,
+            "resolved_background_stratum_bias_weight": 0.015319562115810564
+          },
+          "summary_same_key": "NOT_RECORDED"
+        }
+      },
+      "references": [
+        {
+          "file": "main_fsia.py",
+          "line": 1360
+        }
+      ],
+      "disposition": "KEEP_CONTROL_OR_PENDING_EFFECTIVE_USE"
+    },
+    {
+      "key": "localization_enabled",
+      "current_literal_default": false,
+      "runs": {
+        "main": {
+          "initial_value": "NOT_RECORDED",
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 1.5550329423250582e-06,
+            "resolved_background_stratum_bias_weight": 0.015319562115810564
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N4D64": {
+          "initial_value": "NOT_RECORDED",
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 6.593058558818565e-07,
+            "resolved_background_stratum_bias_weight": 0.015236347148194305
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N8D32": {
+          "initial_value": "NOT_RECORDED",
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 8.298275600704441e-06,
+            "resolved_background_stratum_bias_weight": 0.01464220248565664
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N8D64_REPRODUCTION": {
+          "initial_value": "NOT_RECORDED",
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 1.5550329423250582e-06,
+            "resolved_background_stratum_bias_weight": 0.015319562115810564
+          },
+          "summary_same_key": "NOT_RECORDED"
+        }
+      },
+      "references": [
+        {
+          "file": "inr_modules/config_mdia.py",
+          "line": 52
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 1113
+        }
+      ],
+      "disposition": "REVIEW_WITH_BRANCH_GROUP_KEEP_NEUTRAL_BEHAVIOR"
+    },
+    {
+      "key": "low_altitude_anchor_profiles_per_source",
+      "current_literal_default": 0,
+      "runs": {
+        "main": {
+          "initial_value": 16,
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 1.5550329423250582e-06,
+            "resolved_background_stratum_bias_weight": 0.015319562115810564
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N4D64": {
+          "initial_value": 16,
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 6.593058558818565e-07,
+            "resolved_background_stratum_bias_weight": 0.015236347148194305
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N8D32": {
+          "initial_value": 16,
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 8.298275600704441e-06,
+            "resolved_background_stratum_bias_weight": 0.01464220248565664
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N8D64_REPRODUCTION": {
+          "initial_value": 16,
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 1.5550329423250582e-06,
+            "resolved_background_stratum_bias_weight": 0.015319562115810564
+          },
+          "summary_same_key": "NOT_RECORDED"
+        }
+      },
+      "references": [
+        {
+          "file": "inr_modules/config_mdia.py",
+          "line": 103
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 1279
+        }
+      ],
+      "disposition": "KEEP_EFFECTIVE_ACTIVE"
+    },
+    {
+      "key": "m00_calibration_applied",
+      "current_literal_default": false,
+      "runs": {
+        "main": {
+          "initial_value": "NOT_RECORDED",
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 1.5550329423250582e-06,
+            "resolved_background_stratum_bias_weight": 0.015319562115810564
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N4D64": {
+          "initial_value": "NOT_RECORDED",
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 6.593058558818565e-07,
+            "resolved_background_stratum_bias_weight": 0.015236347148194305
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N8D32": {
+          "initial_value": "NOT_RECORDED",
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 8.298275600704441e-06,
+            "resolved_background_stratum_bias_weight": 0.01464220248565664
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N8D64_REPRODUCTION": {
+          "initial_value": "NOT_RECORDED",
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 1.5550329423250582e-06,
+            "resolved_background_stratum_bias_weight": 0.015319562115810564
+          },
+          "summary_same_key": "NOT_RECORDED"
+        }
+      },
+      "references": [
+        {
+          "file": "inr_modules/config_mdia.py",
+          "line": 342
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 583
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 1004
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 9304
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 552
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 1004
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 3489
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 5160
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 9304
+        }
+      ],
+      "disposition": "REVIEW_WITH_BRANCH_GROUP_KEEP_NEUTRAL_BEHAVIOR"
+    },
+    {
+      "key": "m00_calibration_frozen",
+      "current_literal_default": false,
+      "runs": {
+        "main": {
+          "initial_value": "NOT_RECORDED",
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 1.5550329423250582e-06,
+            "resolved_background_stratum_bias_weight": 0.015319562115810564
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N4D64": {
+          "initial_value": "NOT_RECORDED",
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 6.593058558818565e-07,
+            "resolved_background_stratum_bias_weight": 0.015236347148194305
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N8D32": {
+          "initial_value": "NOT_RECORDED",
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 8.298275600704441e-06,
+            "resolved_background_stratum_bias_weight": 0.01464220248565664
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N8D64_REPRODUCTION": {
+          "initial_value": "NOT_RECORDED",
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 1.5550329423250582e-06,
+            "resolved_background_stratum_bias_weight": 0.015319562115810564
+          },
+          "summary_same_key": "NOT_RECORDED"
+        }
+      },
+      "references": [
+        {
+          "file": "inr_modules/config_mdia.py",
+          "line": 341
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 584
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 1005
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 9305
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 1005
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 9305
+        }
+      ],
+      "disposition": "REVIEW_WITH_BRANCH_GROUP_KEEP_NEUTRAL_BEHAVIOR"
+    },
+    {
+      "key": "m00_localization_enabled",
+      "current_literal_default": false,
+      "runs": {
+        "main": {
+          "initial_value": "NOT_RECORDED",
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 1.5550329423250582e-06,
+            "resolved_background_stratum_bias_weight": 0.015319562115810564
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N4D64": {
+          "initial_value": "NOT_RECORDED",
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 6.593058558818565e-07,
+            "resolved_background_stratum_bias_weight": 0.015236347148194305
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N8D32": {
+          "initial_value": "NOT_RECORDED",
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 8.298275600704441e-06,
+            "resolved_background_stratum_bias_weight": 0.01464220248565664
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N8D64_REPRODUCTION": {
+          "initial_value": "NOT_RECORDED",
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 1.5550329423250582e-06,
+            "resolved_background_stratum_bias_weight": 0.015319562115810564
+          },
+          "summary_same_key": "NOT_RECORDED"
+        }
+      },
+      "references": [
+        {
+          "file": "inr_modules/config_mdia.py",
+          "line": 321
+        },
+        {
+          "file": "main_fsia.py",
+          "line": 367
+        },
+        {
+          "file": "main_fsia.py",
+          "line": 367
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 1009
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 9308
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 1010
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 9309
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 5190
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 3691
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 3708
+        }
+      ],
+      "disposition": "REVIEW_WITH_BRANCH_GROUP_KEEP_NEUTRAL_BEHAVIOR"
+    },
+    {
+      "key": "m00_observation_strict_magnetic",
+      "current_literal_default": false,
+      "runs": {
+        "main": {
+          "initial_value": "NOT_RECORDED",
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 1.5550329423250582e-06,
+            "resolved_background_stratum_bias_weight": 0.015319562115810564
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N4D64": {
+          "initial_value": "NOT_RECORDED",
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 6.593058558818565e-07,
+            "resolved_background_stratum_bias_weight": 0.015236347148194305
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N8D32": {
+          "initial_value": "NOT_RECORDED",
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 8.298275600704441e-06,
+            "resolved_background_stratum_bias_weight": 0.01464220248565664
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N8D64_REPRODUCTION": {
+          "initial_value": "NOT_RECORDED",
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 1.5550329423250582e-06,
+            "resolved_background_stratum_bias_weight": 0.015319562115810564
+          },
+          "summary_same_key": "NOT_RECORDED"
+        }
+      },
+      "references": [
+        {
+          "file": "inr_modules/config_mdia.py",
+          "line": 334
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 981
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 1117
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 582
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 982
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 1118
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 747
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 5186
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 7869
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 7878
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 3687
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 3704
+        }
+      ],
+      "disposition": "REVIEW_WITH_BRANCH_GROUP_KEEP_NEUTRAL_BEHAVIOR"
+    },
+    {
+      "key": "m00_representativeness_enabled",
+      "current_literal_default": false,
+      "runs": {
+        "main": {
+          "initial_value": "NOT_RECORDED",
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 1.5550329423250582e-06,
+            "resolved_background_stratum_bias_weight": 0.015319562115810564
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N4D64": {
+          "initial_value": "NOT_RECORDED",
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 6.593058558818565e-07,
+            "resolved_background_stratum_bias_weight": 0.015236347148194305
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N8D32": {
+          "initial_value": "NOT_RECORDED",
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 8.298275600704441e-06,
+            "resolved_background_stratum_bias_weight": 0.01464220248565664
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N8D64_REPRODUCTION": {
+          "initial_value": "NOT_RECORDED",
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 1.5550329423250582e-06,
+            "resolved_background_stratum_bias_weight": 0.015319562115810564
+          },
+          "summary_same_key": "NOT_RECORDED"
+        }
+      },
+      "references": [
+        {
+          "file": "inr_modules/config_mdia.py",
+          "line": 320
+        },
+        {
+          "file": "main_fsia.py",
+          "line": 363
+        },
+        {
+          "file": "main_fsia.py",
+          "line": 364
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 1007
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 9306
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 1008
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 9307
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 5188
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 3689
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 3706
+        }
+      ],
+      "disposition": "REVIEW_WITH_BRANCH_GROUP_KEEP_NEUTRAL_BEHAVIOR"
+    },
+    {
+      "key": "num_workers",
+      "current_literal_default": "NOT_LITERAL",
+      "runs": {
+        "main": {
+          "initial_value": 0,
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 1.5550329423250582e-06,
+            "resolved_background_stratum_bias_weight": 0.015319562115810564
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N4D64": {
+          "initial_value": 0,
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 6.593058558818565e-07,
+            "resolved_background_stratum_bias_weight": 0.015236347148194305
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N8D32": {
+          "initial_value": 0,
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 8.298275600704441e-06,
+            "resolved_background_stratum_bias_weight": 0.01464220248565664
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N8D64_REPRODUCTION": {
+          "initial_value": 0,
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 1.5550329423250582e-06,
+            "resolved_background_stratum_bias_weight": 0.015319562115810564
+          },
+          "summary_same_key": "NOT_RECORDED"
+        }
+      },
+      "references": [
+        {
+          "file": "inr_modules/config_mdia.py",
+          "line": 145
+        },
+        {
+          "file": "inr_modules/config_mdia.py",
+          "line": 443
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 829
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 7832
+        }
+      ],
+      "disposition": "KEEP_CONTROL_OR_PENDING_EFFECTIVE_USE"
+    },
+    {
+      "key": "persistent_workers",
+      "current_literal_default": "NOT_LITERAL",
+      "runs": {
+        "main": {
+          "initial_value": false,
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 1.5550329423250582e-06,
+            "resolved_background_stratum_bias_weight": 0.015319562115810564
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N4D64": {
+          "initial_value": false,
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 6.593058558818565e-07,
+            "resolved_background_stratum_bias_weight": 0.015236347148194305
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N8D32": {
+          "initial_value": false,
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 8.298275600704441e-06,
+            "resolved_background_stratum_bias_weight": 0.01464220248565664
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N8D64_REPRODUCTION": {
+          "initial_value": false,
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 1.5550329423250582e-06,
+            "resolved_background_stratum_bias_weight": 0.015319562115810564
+          },
+          "summary_same_key": "NOT_RECORDED"
+        }
+      },
+      "references": [
+        {
+          "file": "inr_modules/config_mdia.py",
+          "line": 148
+        }
+      ],
+      "disposition": "KEEP_CONTROL_OR_PENDING_EFFECTIVE_USE"
+    },
+    {
+      "key": "pin_memory",
+      "current_literal_default": "NOT_LITERAL",
+      "runs": {
+        "main": {
+          "initial_value": false,
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 1.5550329423250582e-06,
+            "resolved_background_stratum_bias_weight": 0.015319562115810564
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N4D64": {
+          "initial_value": false,
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 6.593058558818565e-07,
+            "resolved_background_stratum_bias_weight": 0.015236347148194305
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N8D32": {
+          "initial_value": false,
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 8.298275600704441e-06,
+            "resolved_background_stratum_bias_weight": 0.01464220248565664
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N8D64_REPRODUCTION": {
+          "initial_value": false,
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 1.5550329423250582e-06,
+            "resolved_background_stratum_bias_weight": 0.015319562115810564
+          },
+          "summary_same_key": "NOT_RECORDED"
+        }
+      },
+      "references": [
+        {
+          "file": "inr_modules/config_mdia.py",
+          "line": 146
+        }
+      ],
+      "disposition": "KEEP_CONTROL_OR_PENDING_EFFECTIVE_USE"
+    },
+    {
+      "key": "shared_backbone_unfreeze",
+      "current_literal_default": false,
+      "runs": {
+        "main": {
+          "initial_value": "NOT_RECORDED",
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 1.5550329423250582e-06,
+            "resolved_background_stratum_bias_weight": 0.015319562115810564
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N4D64": {
+          "initial_value": "NOT_RECORDED",
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 6.593058558818565e-07,
+            "resolved_background_stratum_bias_weight": 0.015236347148194305
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N8D32": {
+          "initial_value": "NOT_RECORDED",
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 8.298275600704441e-06,
+            "resolved_background_stratum_bias_weight": 0.01464220248565664
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N8D64_REPRODUCTION": {
+          "initial_value": "NOT_RECORDED",
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 1.5550329423250582e-06,
+            "resolved_background_stratum_bias_weight": 0.015319562115810564
+          },
+          "summary_same_key": "NOT_RECORDED"
+        }
+      },
+      "references": [
+        {
+          "file": "inr_modules/config_mdia.py",
+          "line": 46
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 1111
+        },
+        {
+          "file": "inr_modules/mdia/fsia_model.py",
+          "line": 1040
+        }
+      ],
+      "disposition": "REVIEW_WITH_BRANCH_GROUP_KEEP_NEUTRAL_BEHAVIOR"
+    },
+    {
+      "key": "skip_hash_verification",
+      "current_literal_default": false,
+      "runs": {
+        "main": {
+          "initial_value": "NOT_RECORDED",
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 1.5550329423250582e-06,
+            "resolved_background_stratum_bias_weight": 0.015319562115810564
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N4D64": {
+          "initial_value": "NOT_RECORDED",
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 6.593058558818565e-07,
+            "resolved_background_stratum_bias_weight": 0.015236347148194305
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N8D32": {
+          "initial_value": "NOT_RECORDED",
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 8.298275600704441e-06,
+            "resolved_background_stratum_bias_weight": 0.01464220248565664
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N8D64_REPRODUCTION": {
+          "initial_value": "NOT_RECORDED",
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 1.5550329423250582e-06,
+            "resolved_background_stratum_bias_weight": 0.015319562115810564
+          },
+          "summary_same_key": "NOT_RECORDED"
+        }
+      },
+      "references": [
+        {
+          "file": "inr_modules/config_mdia.py",
+          "line": 274
+        },
+        {
+          "file": "main_fsia.py",
+          "line": 195
+        },
+        {
+          "file": "main_fsia.py",
+          "line": 1214
+        },
+        {
+          "file": "main_fsia.py",
+          "line": 233
+        },
+        {
+          "file": "main_fsia.py",
+          "line": 1230
+        },
+        {
+          "file": "main_fsia.py",
+          "line": 231
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 245
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 7047
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 446
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 7997
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 8059
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 9187
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 438
+        }
+      ],
+      "disposition": "KEEP_CONTROL_OR_PENDING_EFFECTIVE_USE"
+    },
+    {
+      "key": "smoke_run",
+      "current_literal_default": false,
+      "runs": {
+        "main": {
+          "initial_value": false,
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 1.5550329423250582e-06,
+            "resolved_background_stratum_bias_weight": 0.015319562115810564
+          },
+          "summary_same_key": false
+        },
+        "FNDA_V8_N4D64": {
+          "initial_value": false,
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 6.593058558818565e-07,
+            "resolved_background_stratum_bias_weight": 0.015236347148194305
+          },
+          "summary_same_key": false
+        },
+        "FNDA_V8_N8D32": {
+          "initial_value": false,
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 8.298275600704441e-06,
+            "resolved_background_stratum_bias_weight": 0.01464220248565664
+          },
+          "summary_same_key": false
+        },
+        "FNDA_V8_N8D64_REPRODUCTION": {
+          "initial_value": false,
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 1.5550329423250582e-06,
+            "resolved_background_stratum_bias_weight": 0.015319562115810564
+          },
+          "summary_same_key": false
+        }
+      },
+      "references": [
+        {
+          "file": "inr_modules/config_mdia.py",
+          "line": 68
+        },
+        {
+          "file": "main_fsia.py",
+          "line": 1246
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 9144
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 187
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 3235
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 3236
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 4146
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 7311
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 8864
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 9144
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 7417
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 7434
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 7440
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 7577
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 8711
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 8864
+        }
+      ],
+      "disposition": "KEEP_CONTROL_OR_PENDING_EFFECTIVE_USE"
+    },
+    {
+      "key": "use_amp",
+      "current_literal_default": "NOT_LITERAL",
+      "runs": {
+        "main": {
+          "initial_value": false,
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 1.5550329423250582e-06,
+            "resolved_background_stratum_bias_weight": 0.015319562115810564
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N4D64": {
+          "initial_value": false,
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 6.593058558818565e-07,
+            "resolved_background_stratum_bias_weight": 0.015236347148194305
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N8D32": {
+          "initial_value": false,
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 8.298275600704441e-06,
+            "resolved_background_stratum_bias_weight": 0.01464220248565664
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N8D64_REPRODUCTION": {
+          "initial_value": false,
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 1.5550329423250582e-06,
+            "resolved_background_stratum_bias_weight": 0.015319562115810564
+          },
+          "summary_same_key": "NOT_RECORDED"
+        }
+      },
+      "references": [
+        {
+          "file": "inr_modules/config_mdia.py",
+          "line": 361
+        },
+        {
+          "file": "inr_modules/config_mdia.py",
+          "line": 513
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 3412
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 4687
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 8575
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 8634
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 2915
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 3126
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 3345
+        }
+      ],
+      "disposition": "KEEP_CONTROL_OR_PENDING_EFFECTIVE_USE"
+    },
+    {
+      "key": "use_covariance_moment_loss",
+      "current_literal_default": false,
+      "runs": {
+        "main": {
+          "initial_value": false,
+          "resolved_same_key": false,
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 1.5550329423250582e-06,
+            "resolved_background_stratum_bias_weight": 0.015319562115810564
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N4D64": {
+          "initial_value": false,
+          "resolved_same_key": false,
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 6.593058558818565e-07,
+            "resolved_background_stratum_bias_weight": 0.015236347148194305
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N8D32": {
+          "initial_value": false,
+          "resolved_same_key": false,
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 8.298275600704441e-06,
+            "resolved_background_stratum_bias_weight": 0.01464220248565664
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N8D64_REPRODUCTION": {
+          "initial_value": false,
+          "resolved_same_key": false,
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 1.5550329423250582e-06,
+            "resolved_background_stratum_bias_weight": 0.015319562115810564
+          },
+          "summary_same_key": "NOT_RECORDED"
+        }
+      },
+      "references": [
+        {
+          "file": "inr_modules/config_mdia.py",
+          "line": 219
+        },
+        {
+          "file": "inr_modules/config_mdia.py",
+          "line": 490
+        },
+        {
+          "file": "main_fsia.py",
+          "line": 767
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 887
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 7744
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 887
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 2672
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 8550
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 3727
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 9336
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 8610
+        }
+      ],
+      "disposition": "ARCHIVE_DISABLED_BRANCH_CANDIDATE"
+    },
+    {
+      "key": "use_direction_loss",
+      "current_literal_default": false,
+      "runs": {
+        "main": {
+          "initial_value": false,
+          "resolved_same_key": false,
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 1.5550329423250582e-06,
+            "resolved_background_stratum_bias_weight": 0.015319562115810564
+          },
+          "summary_same_key": false
+        },
+        "FNDA_V8_N4D64": {
+          "initial_value": false,
+          "resolved_same_key": false,
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 6.593058558818565e-07,
+            "resolved_background_stratum_bias_weight": 0.015236347148194305
+          },
+          "summary_same_key": false
+        },
+        "FNDA_V8_N8D32": {
+          "initial_value": false,
+          "resolved_same_key": false,
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 8.298275600704441e-06,
+            "resolved_background_stratum_bias_weight": 0.01464220248565664
+          },
+          "summary_same_key": false
+        },
+        "FNDA_V8_N8D64_REPRODUCTION": {
+          "initial_value": false,
+          "resolved_same_key": false,
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 1.5550329423250582e-06,
+            "resolved_background_stratum_bias_weight": 0.015319562115810564
+          },
+          "summary_same_key": false
+        }
+      },
+      "references": [
+        {
+          "file": "inr_modules/config_mdia.py",
+          "line": 227
+        },
+        {
+          "file": "inr_modules/config_mdia.py",
+          "line": 497
+        },
+        {
+          "file": "main_fsia.py",
+          "line": 858
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 891
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 9316
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 7740
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 8558
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 891
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 3770
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 8908
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 9317
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 8618
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 9345
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 8176
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 8177
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 8909
+        }
+      ],
+      "disposition": "ARCHIVE_DISABLED_BRANCH_CANDIDATE"
+    },
+    {
+      "key": "use_empirical_covariance_loss",
+      "current_literal_default": false,
+      "runs": {
+        "main": {
+          "initial_value": false,
+          "resolved_same_key": false,
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 1.5550329423250582e-06,
+            "resolved_background_stratum_bias_weight": 0.015319562115810564
+          },
+          "summary_same_key": false
+        },
+        "FNDA_V8_N4D64": {
+          "initial_value": false,
+          "resolved_same_key": false,
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 6.593058558818565e-07,
+            "resolved_background_stratum_bias_weight": 0.015236347148194305
+          },
+          "summary_same_key": false
+        },
+        "FNDA_V8_N8D32": {
+          "initial_value": false,
+          "resolved_same_key": false,
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 8.298275600704441e-06,
+            "resolved_background_stratum_bias_weight": 0.01464220248565664
+          },
+          "summary_same_key": false
+        },
+        "FNDA_V8_N8D64_REPRODUCTION": {
+          "initial_value": false,
+          "resolved_same_key": false,
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 1.5550329423250582e-06,
+            "resolved_background_stratum_bias_weight": 0.015319562115810564
+          },
+          "summary_same_key": false
+        }
+      },
+      "references": [
+        {
+          "file": "inr_modules/config_mdia.py",
+          "line": 220
+        },
+        {
+          "file": "inr_modules/config_mdia.py",
+          "line": 491
+        },
+        {
+          "file": "main_fsia.py",
+          "line": 770
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 888
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 2675
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 9314
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 2786
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 7645
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 7745
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 7747
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 8055
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 888
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 2673
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 8551
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 8906
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 9315
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 3728
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 9338
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 8172
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 8173
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 8611
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 8907
+        }
+      ],
+      "disposition": "ARCHIVE_DISABLED_BRANCH_CANDIDATE"
+    },
+    {
+      "key": "use_observation_gram_loss",
+      "current_literal_default": true,
+      "runs": {
+        "main": {
+          "initial_value": true,
+          "resolved_same_key": true,
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 1.5550329423250582e-06,
+            "resolved_background_stratum_bias_weight": 0.015319562115810564
+          },
+          "summary_same_key": true
+        },
+        "FNDA_V8_N4D64": {
+          "initial_value": true,
+          "resolved_same_key": true,
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 6.593058558818565e-07,
+            "resolved_background_stratum_bias_weight": 0.015236347148194305
+          },
+          "summary_same_key": true
+        },
+        "FNDA_V8_N8D32": {
+          "initial_value": true,
+          "resolved_same_key": true,
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 8.298275600704441e-06,
+            "resolved_background_stratum_bias_weight": 0.01464220248565664
+          },
+          "summary_same_key": true
+        },
+        "FNDA_V8_N8D64_REPRODUCTION": {
+          "initial_value": true,
+          "resolved_same_key": true,
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 1.5550329423250582e-06,
+            "resolved_background_stratum_bias_weight": 0.015319562115810564
+          },
+          "summary_same_key": true
+        }
+      },
+      "references": [
+        {
+          "file": "inr_modules/config_mdia.py",
+          "line": 224
+        },
+        {
+          "file": "inr_modules/config_mdia.py",
+          "line": 494
+        },
+        {
+          "file": "main_fsia.py",
+          "line": 781
+        },
+        {
+          "file": "main_fsia.py",
+          "line": 782
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 894
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 2733
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 7751
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 9318
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 8565
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 894
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 3749
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 8910
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 9319
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 8625
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 9351
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 8180
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 8181
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 8911
+        }
+      ],
+      "disposition": "KEEP_EFFECTIVE_ACTIVE"
+    },
+    {
+      "key": "use_sw_freq",
+      "current_literal_default": true,
+      "runs": {
+        "main": {
+          "initial_value": true,
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 1.5550329423250582e-06,
+            "resolved_background_stratum_bias_weight": 0.015319562115810564
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N4D64": {
+          "initial_value": true,
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 6.593058558818565e-07,
+            "resolved_background_stratum_bias_weight": 0.015236347148194305
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N8D32": {
+          "initial_value": true,
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 8.298275600704441e-06,
+            "resolved_background_stratum_bias_weight": 0.01464220248565664
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N8D64_REPRODUCTION": {
+          "initial_value": true,
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 1.5550329423250582e-06,
+            "resolved_background_stratum_bias_weight": 0.015319562115810564
+          },
+          "summary_same_key": "NOT_RECORDED"
+        }
+      },
+      "references": [
+        {
+          "file": "inr_modules/config_mdia.py",
+          "line": 368
+        },
+        {
+          "file": "inr_modules/mdia/fsia_model.py",
+          "line": 2112
+        },
+        {
+          "file": "inr_modules/mdia/fsia_model.py",
+          "line": 839
+        }
+      ],
+      "disposition": "KEEP_EFFECTIVE_ACTIVE"
+    },
+    {
+      "key": "w_background_stratum_bias",
+      "current_literal_default": 0.0,
+      "runs": {
+        "main": {
+          "initial_value": 0.0,
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 1.5550329423250582e-06,
+            "resolved_background_stratum_bias_weight": 0.015319562115810564
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N4D64": {
+          "initial_value": 0.0,
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 6.593058558818565e-07,
+            "resolved_background_stratum_bias_weight": 0.015236347148194305
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N8D32": {
+          "initial_value": 0.0,
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 8.298275600704441e-06,
+            "resolved_background_stratum_bias_weight": 0.01464220248565664
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N8D64_REPRODUCTION": {
+          "initial_value": 0.0,
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 1.5550329423250582e-06,
+            "resolved_background_stratum_bias_weight": 0.015319562115810564
+          },
+          "summary_same_key": "NOT_RECORDED"
+        }
+      },
+      "references": [
+        {
+          "file": "inr_modules/config_mdia.py",
+          "line": 187
+        },
+        {
+          "file": "inr_modules/config_mdia.py",
+          "line": 463
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 2973
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 2856
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 4430
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 4526
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 8255
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 3815
+        }
+      ],
+      "disposition": "KEEP_EFFECTIVE_ACTIVE"
+    },
+    {
+      "key": "w_low_altitude_analysis_increment",
+      "current_literal_default": 0.0,
+      "runs": {
+        "main": {
+          "initial_value": 0.01,
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 1.5550329423250582e-06,
+            "resolved_background_stratum_bias_weight": 0.015319562115810564
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N4D64": {
+          "initial_value": 0.01,
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 6.593058558818565e-07,
+            "resolved_background_stratum_bias_weight": 0.015236347148194305
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N8D32": {
+          "initial_value": 0.01,
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 8.298275600704441e-06,
+            "resolved_background_stratum_bias_weight": 0.01464220248565664
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N8D64_REPRODUCTION": {
+          "initial_value": 0.01,
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 1.5550329423250582e-06,
+            "resolved_background_stratum_bias_weight": 0.015319562115810564
+          },
+          "summary_same_key": "NOT_RECORDED"
+        }
+      },
+      "references": [
+        {
+          "file": "inr_modules/config_mdia.py",
+          "line": 105
+        },
+        {
+          "file": "inr_modules/config_mdia.py",
+          "line": 459
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 3936
+        }
+      ],
+      "disposition": "KEEP_EFFECTIVE_ACTIVE"
+    },
+    {
+      "key": "w_low_altitude_background_iri",
+      "current_literal_default": 0.0,
+      "runs": {
+        "main": {
+          "initial_value": 0.02,
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 1.5550329423250582e-06,
+            "resolved_background_stratum_bias_weight": 0.015319562115810564
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N4D64": {
+          "initial_value": 0.02,
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 6.593058558818565e-07,
+            "resolved_background_stratum_bias_weight": 0.015236347148194305
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N8D32": {
+          "initial_value": 0.02,
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 8.298275600704441e-06,
+            "resolved_background_stratum_bias_weight": 0.01464220248565664
+          },
+          "summary_same_key": "NOT_RECORDED"
+        },
+        "FNDA_V8_N8D64_REPRODUCTION": {
+          "initial_value": 0.02,
+          "resolved_same_key": "NOT_RECORDED",
+          "resolved_weights": {
+            "resolved_covariance_weight": null,
+            "resolved_direction_weight": null,
+            "resolved_gram_weight": 1.5550329423250582e-06,
+            "resolved_background_stratum_bias_weight": 0.015319562115810564
+          },
+          "summary_same_key": "NOT_RECORDED"
+        }
+      },
+      "references": [
+        {
+          "file": "inr_modules/config_mdia.py",
+          "line": 104
+        },
+        {
+          "file": "inr_modules/config_mdia.py",
+          "line": 458
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 3912
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 4442
+        },
+        {
+          "file": "inr_modules/mdia/train_fsia.py",
+          "line": 4538
+        }
+      ],
+      "disposition": "KEEP_EFFECTIVE_ACTIVE"
+    }
+  ],
+  "source_hashes": {
+    "inr_modules/config_mdia.py": "6dc74aef86bf878abd731b73381fa96c8a30ed9c73033835a12fd8dc367e0ff5",
+    "main_fsia.py": "bb83ab00dff9b85a5deb64f1a4767dc6f9a0001687f2c55b6caf2fcecd3e72b3",
+    "inr_modules/mdia/train_fsia.py": "ff35d806c8d05d5a550a7d7f4aca01a39d508bf51bc18fa86cb5c09955c20b60",
+    "inr_modules/mdia/fsia_model.py": "f38a738fac1c924e46442aa743ad6cb5359acb6a60672858aed94230540bd085"
+  },
+  "inactive_compute_finding": {
+    "id": "Z02/C12",
+    "file": "inr_modules/mdia/train_fsia.py",
+    "producer": "_paired_analysis_losses:2727-2731 computes direction loss unconditionally",
+    "consumer": "Gram calibration at 3282/3347 discards direction return",
+    "action": "Candidate removal with shared return/caller update and Gram baseline verification; not implemented"
+  },
+  "limitations": [
+    "No runtime execution",
+    "Zero values in tensors, optimizer counters or time coordinates are not disabled modules",
+    "Resolved runtime values and retained workflows govern removal, not literal defaults"
+  ]
+}

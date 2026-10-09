@@ -169,12 +169,21 @@ def attach_representativeness_weight(
 
 
 def query_observation_payload(index, coords, device, exclude_profile_ids=None,
-                              allowed_profile_ids=None):
+                              allowed_profile_ids=None,
+                              time_lag_min_hours=None,
+                              time_lag_max_hours=None,
+                              time_support=None):
     if index is None:
         return None
     kwargs = {'exclude_profile_ids': exclude_profile_ids}
     if allowed_profile_ids is not None:
         kwargs['allowed_profile_ids'] = allowed_profile_ids
+    if time_lag_min_hours is not None:
+        kwargs['time_lag_min_hours'] = time_lag_min_hours
+    if time_lag_max_hours is not None:
+        kwargs['time_lag_max_hours'] = time_lag_max_hours
+    if time_support is not None:
+        kwargs['time_support'] = time_support
     payload = index.query_observation_batch(
         coords.detach().cpu().numpy(), **kwargs)
     return {
@@ -340,7 +349,9 @@ class SlidingWindowBatchProcessor:
         self.representativeness_floor = float(representativeness_floor)
         self.empirical_covariance_targets = empirical_covariance_targets
 
-    def process_batch(self, batch_item, query_neighbors=True):
+    def process_batch(self, batch_item, query_neighbors=True,
+                      time_lag_min_hours=None, time_lag_max_hours=None,
+                      time_support=None):
         """
         Convert one FY batch and query the local FY/COSMIC profile indexes.
 
@@ -397,14 +408,20 @@ class SlidingWindowBatchProcessor:
         if query_neighbors and self.fy_nb_index is not None:
             observations_fy = query_observation_payload(
                 self.fy_nb_index, coords, self.device,
-                exclude_profile_ids=profile_ids_np)
+                exclude_profile_ids=profile_ids_np,
+                time_lag_min_hours=time_lag_min_hours,
+                time_lag_max_hours=time_lag_max_hours,
+                time_support=time_support)
         else:
             observations_fy = None
 
         # run64/run65: COSMIC-2 邻域观测查询（P2：优先用预计算数据）
         if query_neighbors and self.cosmic_nb_index is not None:
             observations_cosmic = query_observation_payload(
-                self.cosmic_nb_index, coords, self.device)
+                self.cosmic_nb_index, coords, self.device,
+                time_lag_min_hours=time_lag_min_hours,
+                time_lag_max_hours=time_lag_max_hours,
+                time_support=time_support)
         else:
             observations_cosmic = None
 

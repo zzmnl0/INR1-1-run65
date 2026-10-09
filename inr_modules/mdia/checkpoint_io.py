@@ -8,10 +8,17 @@ import numpy as np
 import torch
 
 from .v14_contract import (
+    A2S1_DOMAIN_SEMANTICS,
+    canonical_a2s1_config,
+    canonical_a2s1_training_protocol,
     HYBRID_DOMAIN_SEMANTICS,
     canonical_v14_config,
     canonical_v14_training_protocol,
     valid_v14_gram_calibration,
+)
+from .m00_observation import (
+    validate_frozen_m00_config,
+    validate_low_dim_assimilation_config,
 )
 
 
@@ -34,7 +41,15 @@ _DOMAIN_CONTRACTS = {
         'observation_alt_range': (200.0, 500.0),
         'peak_search_alt_range': (200.0, 500.0),
     },
+    A2S1_DOMAIN_SEMANTICS: {
+        'format_version': 15,
+        'alt_range': (120.0, 500.0),
+        'observation_alt_range': (120.0, 500.0),
+        'peak_search_alt_range': (200.0, 500.0),
+    },
 }
+
+_STRICT_LOW_PRIOR_DOMAINS = (HYBRID_DOMAIN_SEMANTICS, A2S1_DOMAIN_SEMANTICS)
 
 def _sha256(path):
     digest = hashlib.sha256()
@@ -45,6 +60,15 @@ def _sha256(path):
 
 
 def _verify_v14_input_identity(manifest, summary):
+    # A1-S2 deliberately has no date/locked-test manifest. Its ISR contract
+    # is the explicit profile split; callers that opt out of hash verification
+    # must not be forced to re-hash the large input products here.
+    config = manifest.get('config', {})
+    if config.get('profile_split_semantics') == (
+            'source_time_local_block80_dev20_v1'):
+        if not summary.get('profile_split'):
+            raise ValueError('A1-S2 summary lacks profile_split identity')
+        return
     identities = manifest.get('data_identity')
     expected = manifest.get('config', {}).get('input_data_sha256')
     resolved = manifest.get('resolved_training', {})
@@ -70,7 +94,7 @@ def _verify_v14_input_identity(manifest, summary):
 
 def load_fsia_analysis_checkpoint(checkpoint, device='cpu', require_domain=None,
                                   allow_historical_epoch=False,
-                                  expected_sha256=None):
+                                  expected_sha256=None, verify_hashes=True):
     """Load a finite Analysis model using only its colocated run contract."""
     checkpoint = Path(checkpoint).resolve()
     manifest_path = checkpoint.parent / 'run_manifest.json'
@@ -83,22 +107,30 @@ def load_fsia_analysis_checkpoint(checkpoint, device='cpu', require_domain=None,
     with summary_path.open(encoding='utf-8') as stream:
         summary = json.load(stream)
     config = manifest.get('config')
+    if isinstance(config, dict):
+        validate_low_dim_assimilation_config(config)
+        # Loading is evaluation-only; stopped adapter routes may be inspected
+        # but are never eligible for resume or training.
+        validate_frozen_m00_config(config, eval_only=True)
     if not isinstance(config, dict):
         raise ValueError('run manifest lacks a config object')
     if summary.get('completed_stage') != 'analysis':
         raise ValueError('complete Analysis checkpoint requires completed_stage=analysis')
     if summary.get('checkpoint_stage') not in (None, 'analysis'):
         raise ValueError('training summary checkpoint_stage is not analysis')
-    actual_sha = _sha256(checkpoint)
-    if summary.get('checkpoint_sha256') != actual_sha:
-        parts = checkpoint.stem.split('_')
-        is_historical_epoch = (len(parts) == 3 and parts[0] == 'epoch'
-                               and parts[1].isdigit() and parts[2] == 'model')
-        if not (allow_historical_epoch and is_historical_epoch
-                and expected_sha256 == actual_sha):
-            raise ValueError('checkpoint SHA256 differs from training summary')
+    actual_sha = None
+    if verify_hashes:
+        actual_sha = _sha256(checkpoint)
+        if summary.get('checkpoint_sha256') != actual_sha:
+            parts = checkpoint.stem.split('_')
+            is_historical_epoch = (len(parts) == 3 and parts[0] == 'epoch'
+                                   and parts[1].isdigit() and parts[2] == 'model')
+            if not (allow_historical_epoch and is_historical_epoch
+                    and expected_sha256 == actual_sha):
+                raise ValueError('checkpoint SHA256 differs from training summary')
         summary = dict(summary)
         summary['checkpoint'] = str(checkpoint)
+    if verify_hashes:
         summary['checkpoint_sha256'] = actual_sha
 
     domain = config.get(
@@ -113,7 +145,7 @@ def load_fsia_analysis_checkpoint(checkpoint, device='cpu', require_domain=None,
     actual_alt_range = tuple(map(float, config.get(
         'alt_range', expected_alt_range if domain ==
         'legacy_120_500_domain_v1' else ())))
-    legacy_domain_fields = domain != HYBRID_DOMAIN_SEMANTICS
+    legacy_domain_fields = domain not in _STRICT_LOW_PRIOR_DOMAINS
     actual_observation_alt_range = tuple(map(float, config.get(
         'observation_alt_range', expected_alt_range if legacy_domain_fields else ())))
     actual_peak_search_alt_range = tuple(map(float, config.get(
@@ -163,9 +195,17 @@ def load_fsia_analysis_checkpoint(checkpoint, device='cpu', require_domain=None,
         mismatches['background_trust_gate_semantics'] = (
             config.get('background_trust_gate_semantics'),
             'fixed_altitude_localtime_dip_smoothstep_v1')
-    if domain == HYBRID_DOMAIN_SEMANTICS:
-        expected_protocol = canonical_v14_training_protocol(False)
-        for key, expected in canonical_v14_config(False).items():
+    expected_protocol = None
+    if domain in _STRICT_LOW_PRIOR_DOMAINS:
+        expected_protocol = (
+            canonical_a2s1_training_protocol(False)
+            if domain == A2S1_DOMAIN_SEMANTICS
+            else canonical_v14_training_protocol(False))
+        expected_config = (
+            canonical_a2s1_config(False)
+            if domain == A2S1_DOMAIN_SEMANTICS
+            else canonical_v14_config(False))
+        for key, expected in expected_config.items():
             actual = config.get(key)
             if isinstance(expected, tuple):
                 actual = tuple(map(float, actual or ()))
@@ -189,20 +229,28 @@ def load_fsia_analysis_checkpoint(checkpoint, device='cpu', require_domain=None,
         if config.get('smoke_run', False) or summary.get('smoke_run', False):
             mismatches['smoke_run'] = (True, False)
         expected_summary = {
-            'checkpoint_format_version': 14,
+            'checkpoint_format_version': expected_version,
             'model_domain_semantics': domain,
-            'alt_range': [120.0, 500.0],
-            'observation_alt_range': [200.0, 500.0],
-            'peak_search_alt_range': [200.0, 500.0],
+            'alt_range': list(domain_contract['alt_range']),
+            'observation_alt_range': list(
+                domain_contract['observation_alt_range']),
+            'peak_search_alt_range': list(
+                domain_contract['peak_search_alt_range']),
             'training_protocol': expected_protocol,
         }
         for key, expected in expected_summary.items():
             if summary.get(key) != expected:
                 mismatches[f'training_summary.{key}'] = (
                     summary.get(key), expected)
-        if not summary.get('date_split'):
-            mismatches['training_summary.date_split'] = (
-                summary.get('date_split'), 'required')
+    profile_split_semantics = 'source_time_local_block80_dev20_v1'
+    if config.get('profile_split_semantics') == profile_split_semantics:
+        if not summary.get('profile_split'):
+            mismatches['training_summary.profile_split'] = (
+                summary.get('profile_split'), 'required')
+    elif not summary.get('date_split'):
+        mismatches['training_summary.date_split'] = (
+            summary.get('date_split'), 'required')
+    if domain in _STRICT_LOW_PRIOR_DOMAINS:
         resolved = manifest.get('resolved_training')
         if not isinstance(resolved, dict):
             mismatches['manifest.resolved_training'] = (resolved, 'required object')
@@ -221,7 +269,7 @@ def load_fsia_analysis_checkpoint(checkpoint, device='cpu', require_domain=None,
                     summary_calibration, calibration)
     if mismatches:
         raise ValueError(f'FSIA checkpoint contract mismatch: {mismatches}')
-    if domain == HYBRID_DOMAIN_SEMANTICS:
+    if domain in _STRICT_LOW_PRIOR_DOMAINS and verify_hashes:
         _verify_v14_input_identity(manifest, summary)
 
     from inr_modules.data_managers.irinc_neural_proxy import IRINeuralProxy
@@ -247,9 +295,24 @@ def allowed_observation_profile_ids(config):
     from inr_modules.data_managers.FY_dataloader import (
         COSMICDataset, FY3D_Dataset)
 
+    if config.get('profile_split_semantics') == (
+            'source_time_local_block80_dev20_v1'):
+        split_path = Path(config['profile_split_path']).resolve()
+        with np.load(split_path, allow_pickle=False) as split:
+            return {
+                source: np.unique(np.concatenate((
+                    np.asarray(split[f'{source}_train_profile_ids'], dtype=np.int64),
+                    np.asarray(split[f'{source}_development_profile_ids'],
+                               dtype=np.int64))))
+                for source in ('FY', 'COSMIC')
+            }
+
     with Path(config['date_split_manifest']).open(encoding='utf-8') as stream:
         partitions = json.load(stream)['partitions']
-    days = sorted(set(partitions['train']) | set(partitions['development']))
+    days = set(partitions['train']) | set(partitions['development'])
+    if str(config.get('date_split_semantics', '')).replace('-', '_') == 'a1s_train_plus_locked_dev5_v1':
+        days |= set(partitions.get('locked_test', []))
+    days = sorted(days)
     common = dict(
         mode='observation', val_days=[],
         bin_size_hours=config['bin_size_hours'], use_memmap=True,
@@ -264,3 +327,38 @@ def allowed_observation_profile_ids(config):
         profile_index_path=config.get('cosmic_profile_index_path'), **common)
     return {'FY': np.unique(fy.profile_ids),
             'COSMIC': np.unique(cosmic.profile_ids)}
+
+
+def shared_full30_profile_allowlist(config, expected_counts=None):
+    """Validate and return the A1-S2 Train+Development full-domain allowlist."""
+    semantics = 'source_time_local_block80_dev20_v1'
+    if config.get('profile_split_semantics') != semantics:
+        raise ValueError('shared-full30 requires the A1-S2 profile split manifest')
+    split_path = Path(config.get('profile_split_path', '')).resolve()
+    if not split_path.is_file():
+        raise FileNotFoundError(f'shared-full30 profile split is missing: {split_path}')
+    expected = expected_counts or {'FY': 66612, 'COSMIC': 84364}
+    allowed, audit = {}, {}
+    with np.load(split_path, allow_pickle=False) as split:
+        for source in ('FY', 'COSMIC'):
+            train = np.asarray(split[f'{source}_train_profile_ids'], dtype=np.int64).reshape(-1)
+            development = np.asarray(split[f'{source}_development_profile_ids'], dtype=np.int64).reshape(-1)
+            if np.unique(train).size != train.size or np.unique(development).size != development.size:
+                raise ValueError(f'{source} profile IDs contain duplicates')
+            if np.intersect1d(train, development).size:
+                raise ValueError(f'{source} Train/Development profile IDs overlap')
+            ids = np.unique(np.concatenate((train, development)))
+            if ids.size != expected[source]:
+                raise ValueError(f'{source} shared-full30 count {ids.size} != expected {expected[source]}')
+            index_path = Path(config.get(f'{source.lower()}_profile_index_path', '')).resolve()
+            if not index_path.is_file():
+                raise FileNotFoundError(f'{source} profile index is missing: {index_path}')
+            with np.load(index_path, allow_pickle=False) as index:
+                indexed = np.asarray(index['profile_id'], dtype=np.int64).reshape(-1)
+            if not np.all(np.isin(ids, indexed)):
+                raise ValueError(f'{source} shared-full30 IDs missing from index')
+            allowed[source] = ids
+            audit[source] = {'train_count': int(train.size), 'development_count': int(development.size),
+                             'all_count': int(ids.size), 'index_count': int(indexed.size),
+                             'manifest_path': str(split_path)}
+    return allowed, audit
